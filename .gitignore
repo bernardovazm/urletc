@@ -1,0 +1,11 @@
+node_modules
+dist
+dev-dist
+*.local
+.vercel
+.DS_Store
+# e2e Python venv (created by scripts/e2e.sh)
+.venv-e2e
+.venv
+__pycache__
+*.log

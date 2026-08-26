@@ -1,0 +1,1363 @@
+/* Monochrome design system. Dark default, light via [data-theme="light"]. Token-driven,
+   no framework, only subtle transitions. CSP-safe: all styles live in this sheet (no inline). */
+:root {
+  /* Palette: near-black ground, hairline borders, pure-white ink. Geometry is square,
+     with radius 0 everywhere except avatars/dots, and no shadows: elevation is carried
+     by a border, not a blur. --fg-mute is deliberately lighter than the reference
+     design's grey, which fails WCAG AA at the 0.68-0.82rem sizes this token is used at. */
+  /* Tie browser-painted controls to OUR theme, not the OS. The index.html meta says
+     "dark light", so an OS set to light painted this near-black app's checkboxes as
+     solid white squares, which read as already ticked. */
+  color-scheme: dark;
+  --bg: #060707;
+  --surface: #0a0b0c;
+  --surface-2: #121314;
+  --elev: #0e0f10;
+  --border: #121314;
+  --border-strong: #2a2d2f;
+  --fg: #ffffff;
+  --fg-dim: #c4c4c4;
+  --fg-mute: #808589;
+  --primary: #ffffff;
+  --primary-fg: #060707;
+  --danger: #e5534b;
+  --ok: #3aa675;
+  --warn: #d6a04a;
+  --radius: 0px;
+  --radius-sm: 0px;
+  --pill: 0px;
+  --ring: 0 0 0 2px rgba(255, 255, 255, 0.55);
+  --shadow: none;
+  --scrim: rgba(6, 7, 7, 0.85);
+  --plate: rgba(6, 7, 7, 0.78);
+  --track: 0.07em;
+  --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  --sans: 'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', Roboto, Inter, sans-serif;
+  --maxw: 760px;
+  --sidebar-w: 300px;
+  --topbar-h: 52px;
+  /* One overlay scale, so stacking is decided here and not by whichever rule was edited
+     last. Lowest is the drawer: it is furniture the user parked open, so anything opened
+     on top of it is newer and more specific. Then menus, then the flyout a menu spawns
+     (it must cover its own menu), then toasts, then the modal, which owns the screen.
+     Anything below 20 (the card delete button at 2) is in-flow overlap, not an overlay. */
+  --z-drawer: 20;
+  --z-menu: 40;
+  --z-flyout: 50;
+  --z-toast: 55;
+  --z-modal: 60;
+}
+:root[data-theme='light'] {
+  color-scheme: light;
+  --bg: #ffffff;
+  --surface: #fafafa;
+  --surface-2: #f0f0f1;
+  --elev: #ffffff;
+  --border: #e3e4e5;
+  --border-strong: #c8cacc;
+  --fg: #060707;
+  --fg-dim: #45484a;
+  --fg-mute: #6b6f73;
+  --primary: #060707;
+  --primary-fg: #ffffff;
+  /* status colours need their own light values because the dark ones fail AA on white
+     (ok 3.05:1, danger 3.70:1, warn 2.34:1) */
+  --danger: #c0392f;
+  --ok: #14764a;
+  --warn: #8a6414;
+  --ring: 0 0 0 2px rgba(6, 7, 7, 0.5);
+  --shadow: none;
+  --scrim: rgba(6, 7, 7, 0.55);
+  --plate: rgba(6, 7, 7, 0.72);
+}
+
+* {
+  box-sizing: border-box;
+}
+/* the app shell owns all scrolling (feed/sidebar/tiles). The document never scrolls,
+   so the topbar and composer can never be pushed off-screen */
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+}
+#app {
+  height: 100%;
+}
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--sans);
+  font-size: 15px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+::selection {
+  background: var(--fg);
+  color: var(--bg);
+}
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: var(--pill);
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+a {
+  color: inherit;
+}
+h3,
+h4 {
+  margin: 0;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+button {
+  font: inherit;
+  cursor: pointer;
+  color: var(--fg);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  padding: 0.45rem 0.7rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  transition:
+    background 0.12s,
+    border-color 0.12s,
+    opacity 0.12s;
+}
+button:hover {
+  background: var(--surface-2);
+}
+button:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+}
+button.primary {
+  background: var(--primary);
+  color: var(--primary-fg);
+}
+button.primary:hover {
+  opacity: 0.9;
+}
+button.ghost {
+  border-color: var(--border);
+}
+button.ghost:hover {
+  border-color: var(--border-strong);
+  background: var(--surface-2);
+}
+/* The icon ladder is a SQUARE FLOOR, not a fixed square. The size is min-width plus a
+   fixed height, so one glyph sits in an exact 36/28/24px square while a label that is
+   wider than the square (a word, a two-codepoint emoji, a wide fallback font) pushes the
+   button out sideways instead of spilling its text over the neighbour. `flex: none` stops
+   a tight flex row from shrinking the squares back under their own content, and nowrap
+   stops a wide label from wrapping to a second line and blowing the fixed height. Before
+   this, three 28px squares carrying "Grid" / "Focus" / "Solo" rendered as the run-on word
+   "GridFocusSolo". Every row that holds these must carry a real gap (see .row.tight). */
+button.icon {
+  padding: 0 0.25rem;
+  border-radius: var(--pill);
+  min-width: 36px;
+  height: 36px;
+  flex: none;
+  white-space: nowrap;
+  justify-content: center;
+}
+button.icon.sm {
+  min-width: 28px;
+  height: 28px;
+  font-size: 0.85rem;
+}
+/* icon-only control in a dense row (a roster entry is 28px tall, the height of its
+   avatar): .xs keeps the square inside that line, .quiet reads as secondary next to the
+   row's own text and comes forward on hover. Composable: class="icon xs quiet". */
+button.icon.xs {
+  min-width: 24px;
+  height: 24px;
+  font-size: 0.78rem;
+}
+button.quiet {
+  color: var(--fg-dim);
+}
+button.quiet:hover,
+button.quiet:focus-visible {
+  color: var(--fg);
+}
+button.danger {
+  color: var(--danger);
+}
+button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+input,
+textarea,
+select {
+  font: inherit;
+  color: var(--fg);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0.5rem 0.65rem;
+}
+input:focus,
+textarea:focus,
+select:focus {
+  outline: none;
+  border-color: var(--border-strong);
+  box-shadow: var(--ring);
+}
+textarea {
+  resize: none;
+  width: 100%;
+}
+input[type='range'] {
+  padding: 0;
+  accent-color: var(--fg);
+}
+/* Author CSS cannot reach the box a checkbox paints, only its tick. Monochrome, to match
+   the palette instead of the browser's blue. The empty-vs-ticked contrast comes from
+   `color-scheme` above. */
+input[type='checkbox'],
+input[type='radio'] {
+  accent-color: var(--fg);
+}
+
+.muted {
+  color: var(--fg-mute);
+}
+.dim {
+  color: var(--fg-dim);
+}
+.row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.row.gap {
+  gap: 0.7rem;
+  row-gap: 0.5rem;
+}
+label.row {
+  cursor: pointer;
+}
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.spacer {
+  flex: 1;
+}
+.hidden {
+  display: none;
+}
+.full {
+  width: 100%;
+}
+.small {
+  font-size: 0.82rem;
+}
+
+/* App shell */
+.app-shell {
+  display: grid;
+  grid-template-rows: var(--topbar-h) 1fr;
+  /* An implicit `auto` column resolves to the widest descendant's min-content, so one
+     wide row (the composer bar) used to stretch the whole shell past the viewport.
+     minmax(0, 1fr) pins every row to the shell width instead. */
+  grid-template-columns: minmax(0, 1fr);
+  height: 100%;
+  overflow: hidden;
+}
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0 0.9rem;
+  border-bottom: 1px solid var(--border);
+  min-width: 0;
+}
+.topbar .brand {
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 0.82rem;
+}
+.body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) var(--sidebar-w);
+  min-height: 0;
+  min-width: 0;
+}
+.body.solo {
+  grid-template-columns: minmax(0, 1fr);
+}
+/* Sidebar visibility is class-driven: the topbar 👥 button toggles .open (persisted). */
+.sidebar:not(.open) {
+  display: none;
+}
+.body.side-collapsed {
+  grid-template-columns: minmax(0, 1fr);
+}
+@media (max-width: 820px) {
+  .body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  /* Small screens: the open sidebar floats as a drawer instead of squeezing content. */
+  .sidebar {
+    position: fixed;
+    top: var(--topbar-h);
+    right: 0;
+    bottom: 0;
+    width: min(84vw, 320px);
+    z-index: var(--z-drawer);
+    box-shadow: var(--shadow);
+  }
+}
+
+.center {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
+  grid-template-columns: minmax(0, 1fr);
+  min-height: 0;
+  min-width: 0;
+}
+/* Each row is assigned by CLASS, never by source position. The stage and the captions strip
+   are both display:none while idle, and a display:none child is not a grid item, so with
+   positional placement the remaining children slid up a row: the feed landed on the `auto`
+   row, grew to its full content height, and pushed the composer past the bottom of the
+   viewport where .app-shell's overflow:hidden clipped it. Explicit rows keep the feed on the
+   flexible track whatever else is hidden. */
+.center > .tiles-region {
+  grid-row: 1;
+}
+.center > .feed {
+  grid-row: 2;
+}
+.center > .captions {
+  grid-row: 3;
+}
+.center > .composer-wrap {
+  grid-row: 4;
+}
+/* --maxw is the width of the content, not of the padded box, so every row that pads by
+   1.1rem has to carry that padding on top of it to line up with the feed cards. */
+.tiles:not(:empty) {
+  padding: 0.7rem 1.1rem 0;
+  max-width: calc(var(--maxw) + 2.2rem);
+  width: 100%;
+  margin: 0 auto;
+}
+/* The feed is the only scrolling row in the column, so its scrollbar used to eat width
+   from its content box the moment the feed overflowed: .feed-inner re-centred inside the
+   narrower box while .composer, whose wrapper never scrolls, did not, and the card edges
+   jumped by a scrollbar width. `both-edges` reserves the gutter on each side, so the
+   centre never moves and the width never changes with the scroll state; .composer-wrap
+   and .tiles-region reserve the identical gutter so all three rows share one column. */
+.feed {
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-gutter: stable both-edges;
+  padding: 1.1rem;
+  min-width: 0;
+}
+.feed-inner {
+  max-width: var(--maxw);
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.8rem;
+  min-width: 0;
+  width: 100%;
+}
+/* every feed item can be removed; the delete button appears on hover/focus */
+.feed-item {
+  position: relative;
+  min-width: 0;
+  /* an unbroken word or URL is otherwise a min-content floor that widens the column */
+  overflow-wrap: anywhere;
+}
+.feed-item > .del {
+  position: absolute;
+  top: -0.35rem;
+  right: -0.35rem;
+  opacity: 0;
+  background: var(--elev);
+  border: 1px solid var(--border);
+  z-index: 2;
+  transition: opacity 0.12s;
+}
+.feed-item:hover > .del,
+.feed-item:focus-within > .del {
+  opacity: 1;
+}
+.empty {
+  color: var(--fg-mute);
+  text-align: center;
+  margin-top: 14vh;
+}
+.empty .big {
+  font-size: 1.5rem;
+  color: var(--fg-dim);
+  letter-spacing: -0.02em;
+}
+
+.composer-wrap {
+  padding: 0.4rem 1.1rem 1.1rem;
+  /* mirrors the feed's gutter. A scroll container is the only way to ask for exactly the
+     gutter the engine gave the feed, whatever the platform scrollbar measures; `hidden`
+     keeps it a reservation and never a scrollbar of its own. */
+  overflow: hidden;
+  scrollbar-gutter: stable both-edges;
+  /* A grid item only gets an automatic min-content floor while its overflow is `visible`.
+     The `hidden` above therefore let this row be squeezed to its padding (24px against the
+     122px it needs) whenever the feed had enough content to claim the free space, clipping
+     the composer and pushing Send off screen. The floor has to be restored explicitly. */
+  min-height: min-content;
+}
+.composer {
+  max-width: var(--maxw);
+  margin: 0 auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.5rem 0.6rem;
+  box-shadow: var(--shadow);
+}
+.composer:focus-within {
+  border-color: var(--border-strong);
+}
+.composer textarea {
+  background: transparent;
+  border: none;
+  padding: 0.35rem 0.4rem;
+  max-height: 38vh;
+}
+.composer textarea:focus {
+  box-shadow: none;
+}
+.composer .bar {
+  display: flex;
+  align-items: center;
+  gap: 0.2rem;
+  /* eleven controls plus Send exceed a phone's width, so the row wraps and Send moves to
+     a line of its own instead of being cut off at the edge */
+  flex-wrap: wrap;
+  row-gap: 0.3rem;
+}
+.composer .bar button.primary {
+  margin-left: auto;
+} /* on a wrapped row the .spacer stayed behind, so Send needs its own push right */
+.composer .bar .spacer {
+  flex: 1;
+}
+
+/* cards & messages: feed cards are <details> so any output can collapse away */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0.8rem;
+}
+.card .head {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-bottom: 0.4rem;
+}
+details.card > summary {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+details.card > summary::-webkit-details-marker {
+  display: none;
+}
+details.card .chev {
+  color: var(--fg-mute);
+  font-size: 0.68rem;
+  transition: transform 0.12s;
+  flex: none;
+}
+details.card[open] > summary .chev {
+  transform: rotate(90deg);
+}
+/* Sender attribution on a received file card. A file and a chat message are both things
+   someone sent you, so they say so in one visual language: this is `.msg .who` at the same
+   size and the same muted ink, sitting in the card summary instead of over a bubble. It is
+   metadata, so it never competes with the filename: it holds its width while the filename
+   is what ellipsizes. */
+.card-from {
+  font-size: 0.74rem;
+  color: var(--fg-mute);
+  white-space: nowrap;
+  flex: none;
+}
+details.card > summary > strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+details.card > .card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  margin-top: 0.55rem;
+}
+.msg {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  max-width: 100%;
+}
+.msg.me {
+  align-items: flex-end;
+}
+.msg .who {
+  font-size: 0.74rem;
+  color: var(--fg-mute);
+}
+.msg .bubble {
+  background: var(--surface-2);
+  border-radius: var(--radius-sm);
+  padding: 0.45rem 0.7rem;
+  max-width: 88%;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.msg.me .bubble {
+  background: var(--primary);
+  color: var(--primary-fg);
+}
+.msg > button {
+  margin-top: 0.25rem;
+} /* inline affordances under a bubble (e.g. Join code) */
+.sys {
+  font-size: 0.82rem;
+  color: var(--fg-mute);
+  text-align: center;
+  padding: 0.1rem;
+}
+
+/* sidebar */
+.sidebar {
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--surface);
+}
+.sidebar h4 {
+  padding: 0.85rem 0.95rem 0.4rem;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: var(--track);
+  color: var(--fg-mute);
+}
+.peers {
+  overflow-y: auto;
+  padding: 0 0.5rem 0.5rem;
+  flex: 1;
+}
+.peer {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0.5rem;
+  border-radius: var(--radius-sm);
+}
+.peer:hover {
+  background: var(--surface-2);
+}
+.peer .avatar {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--elev);
+  border: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.78rem;
+  flex: none;
+}
+.peer .name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* presence rows lead with the unspoofable key fingerprint; the self-asserted name is
+   demoted so a stranger cannot dress up as one of your paired devices */
+.peer .fp {
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  color: var(--fg-dim);
+}
+.peer .claimed {
+  color: var(--fg-mute);
+  font-size: 0.82rem;
+}
+/* The row is a no-wrap flex line and .badge has no flex-basis, so in a narrow sidebar the
+   state chip would clip or wrap its own text instead of letting .peer .name (which has
+   ellipsis) absorb the squeeze. */
+.peer .peer-state {
+  flex: none;
+  white-space: nowrap;
+}
+.peer .ctl {
+  display: flex;
+  gap: 0.05rem;
+}
+.peer input[type='range'] {
+  width: 56px;
+}
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--fg-mute);
+  flex: none;
+}
+.dot.on {
+  background: var(--ok);
+}
+.side-head {
+  display: flex;
+  align-items: center;
+  padding-right: 0.45rem;
+}
+.group-label {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: var(--track);
+  color: var(--fg-mute);
+  padding: 0.55rem 0.5rem 0.15rem;
+}
+.pad-x {
+  padding: 0 0.5rem 0.3rem;
+}
+/* collapsible sidebar tier groups */
+.pgroup > summary {
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+}
+.pgroup > summary::-webkit-details-marker {
+  display: none;
+}
+.pgroup > summary.group-label::before {
+  content: '🔼 ';
+  display: inline-block;
+  transition: transform 0.12s;
+}
+.pgroup[open] > summary.group-label::before {
+  content: '🔽 ';
+}
+
+/* join codes */
+.code-big {
+  font-family: var(--mono);
+  font-size: 1.6rem;
+  letter-spacing: 0.35em;
+  text-align: center;
+  text-transform: uppercase;
+  padding: 0.5rem 0.5rem 0.5rem 0.85rem;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-sm);
+}
+.mono-input {
+  font-family: var(--mono);
+  text-transform: lowercase;
+}
+button.code-chip {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.14em;
+  color: var(--fg-dim);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--pill);
+  padding: 0.1rem 0.6rem;
+}
+button.code-chip:hover {
+  color: var(--fg);
+  background: var(--surface-2);
+}
+
+/* diff tool. One <div> per line inside the <pre>; color carries add/remove/context */
+.diff {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.diff-add {
+  color: var(--ok);
+}
+.diff-del {
+  color: var(--danger);
+}
+.diff-ctx {
+  color: var(--fg-dim);
+}
+
+/* generators tool */
+.gen-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.15rem 0;
+}
+.gen-label {
+  flex: none;
+  width: 6.5rem;
+  font-size: 0.78rem;
+  color: var(--fg-mute);
+}
+button.gen-value {
+  flex: 1;
+  min-width: 0;
+  justify-content: flex-start;
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: block;
+  text-align: left;
+  padding: 0.35rem 0.55rem;
+}
+button.gen-value:hover {
+  border-color: var(--border-strong);
+  background: var(--surface-2);
+}
+/* Tools-launcher hover preview: scrollable value list beside the launcher */
+.gen-flyout {
+  position: fixed;
+  z-index: var(--z-flyout);
+  width: min(340px, calc(100vw - 16px));
+  max-height: 70vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--elev);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow);
+  padding: 0.5rem 0.6rem;
+}
+.gen-fly-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  padding-bottom: 0.35rem;
+}
+.gen-fly-list {
+  overflow-y: auto;
+}
+
+/* pong (P2P PoC). Canvas draws its own board; fixed buffer scales to fit via CSS */
+.pong {
+  display: block;
+  width: 100%;
+  max-width: 640px;
+  aspect-ratio: 16 / 10;
+  background: #000;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  touch-action: none;
+}
+.pong:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+}
+.pong-score {
+  font-family: var(--mono);
+  font-size: 1rem;
+  letter-spacing: 0.04em;
+  padding: 0.15rem 0;
+}
+.pong-chat-log {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  max-height: 5.5rem;
+  overflow-y: auto;
+  font-size: 0.85rem;
+}
+.pong-chat-line {
+  word-break: break-word;
+}
+.pong-quick {
+  gap: 0.3rem;
+}
+.pong-quick button {
+  padding: 0.25rem 0.5rem;
+}
+
+/* collapsible video-tiles region: a header with a collapse toggle; hides entirely
+   when there are no video sources (so it costs nothing when nothing is shared) */
+.tiles-region {
+  overflow: hidden;
+  scrollbar-gutter: stable both-edges;
+  /* same automatic-minimum loss as .composer-wrap above */
+  min-height: min-content;
+}
+.tiles-region:not(:has(.stage-tile)) {
+  display: none;
+}
+.tiles-head {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  max-width: calc(var(--maxw) + 2.2rem);
+  width: 100%;
+  margin: 0.5rem auto 0;
+  padding: 0 1.1rem;
+}
+/* The source count is the only elastic thing in the head, so it is what gives way when
+   the controls grow. Matched as "the label that is not the spacer and not the control
+   group" rather than by position, so reordering the head does not move the rule. Without
+   it the count wraps to a second line and doubles the head's height. */
+.tiles-head > span:not(.spacer):not(.row) {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tiles-region.tiles-collapsed .tiles {
+  display: none;
+}
+/* The layout group in .tiles-head. 0.1rem is 1.6px, which is not a gap: adjacent icon
+   buttons read as one control with a hairline through it. 0.25rem is the smallest gap
+   that still groups them while keeping each button its own object. */
+.row.tight {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+/* the active stage layout reads as pressed */
+button.icon.on {
+  background: var(--surface-2);
+  border-color: var(--border-strong);
+  color: var(--fg);
+}
+
+/* Expanded stage. The in-document counterpart to the chromeless #/stage route: the
+   stage takes the window while the composer and roster stay usable. */
+:root.stage-max .feed,
+:root.stage-max .captions {
+  display: none;
+}
+:root.stage-max .center {
+  grid-template-rows: 1fr auto;
+}
+:root.stage-max .tiles-region {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+:root.stage-max .tiles.stage {
+  max-width: 100%;
+  max-height: none;
+  flex: 1;
+  padding: 0 0.6rem 0.4rem;
+}
+:root.stage-max .tiles-head {
+  max-width: 100%;
+  padding: 0 0.9rem;
+}
+:root.stage-max .stage.layout-solo .stage-tile.spot,
+:root.stage-max .stage.layout-spotlight .stage-tile.spot {
+  height: 100%;
+}
+:root.stage-max .stage.layout-solo video.tile,
+:root.stage-max .stage.layout-spotlight .stage-tile.spot video.tile {
+  height: 100%;
+  aspect-ratio: auto;
+  object-fit: contain;
+}
+
+/* the stage: VDO.ninja-style multi-source layouts (grid / spotlight / solo) */
+.tiles.stage {
+  max-width: calc(var(--maxw) + 2.2rem);
+  width: 100%;
+  margin: 0 auto;
+  max-height: 46vh;
+  overflow-y: auto;
+}
+.stage.layout-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 0.5rem;
+}
+.stage.layout-spotlight {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-content: flex-start;
+}
+.stage.layout-spotlight .stage-tile {
+  width: calc(25% - 0.4rem);
+}
+.stage.layout-spotlight .stage-tile.spot {
+  width: 100%;
+  order: -1;
+}
+.stage.layout-solo {
+  display: block;
+}
+.stage.layout-solo .stage-tile:not(.spot) {
+  display: none;
+}
+
+/* a source tile: the <video> fills it; a nameplate + hover controls overlay the corner */
+.stage-tile {
+  position: relative;
+  min-width: 0;
+}
+video.tile {
+  width: 100%;
+  border-radius: var(--radius-sm);
+  background: #000;
+  border: 1px solid var(--border);
+  aspect-ratio: 16 / 10;
+  object-fit: cover;
+  display: block;
+}
+.stage-tile.spot video.tile {
+  border-color: var(--border-strong);
+  aspect-ratio: 16 / 9;
+}
+.tile-name {
+  position: absolute;
+  left: 0.35rem;
+  bottom: 0.35rem;
+  max-width: calc(100% - 0.7rem);
+  padding: 0.05rem 0.45rem;
+  font-size: 0.72rem;
+  background: var(--plate);
+  color: #fff;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  pointer-events: none;
+}
+/* The overlay grew from two controls to as many as four (spotlight, fullscreen, windowed
+   mode, mute). It is anchored to the tile's top-right and wraps back under itself rather
+   than running off the left edge of a spotlight thumbnail, which is the narrowest tile
+   the stage produces. Every button in here is `icon sm`, so windowed mode inherits the
+   fullscreen button's size, hover reveal and touch rule with no extra styling. */
+.tile-ctl {
+  position: absolute;
+  top: 0.3rem;
+  right: 0.3rem;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  max-width: calc(100% - 0.6rem);
+  gap: 0.15rem;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+.stage-tile:hover .tile-ctl,
+.stage-tile:focus-within .tile-ctl {
+  opacity: 1;
+}
+/* Touch devices never hover, so a hover-only control is unreachable there. */
+@media (hover: none) {
+  .tile-ctl {
+    opacity: 1;
+  }
+}
+.stage-tile:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+}
+
+/* A shared screen must never be cropped. `cover` on a 16:10 tile cuts off the edges of
+   someone's desktop, which is exactly where the content usually is. */
+.stage-tile.kind-screen video.tile {
+  object-fit: contain;
+}
+
+/* Fullscreen a whole tile (not the bare <video>) so the nameplate and the controls
+   travel into the fullscreen layer with it. */
+.stage-tile:fullscreen {
+  width: 100vw;
+  height: 100vh;
+  background: #000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.stage-tile:fullscreen video.tile {
+  width: 100%;
+  height: 100%;
+  aspect-ratio: auto;
+  object-fit: contain;
+  border: none;
+}
+.stage-tile:fullscreen .tile-ctl {
+  opacity: 1;
+}
+/* Over video, an overlay button needs its own ground or the glyph sits on moving pixels.
+   `button.icon.on` (0,2,1) still outranks this (0,1,1), so a pressed control (windowed
+   mode while PiP is open) keeps the same pressed treatment as the stage layout buttons. */
+.tile-ctl button {
+  background: var(--elev);
+  border: 1px solid var(--border);
+}
+.src-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+/* chromeless stage view (#/stage/<code>) for OBS browser sources / a second screen:
+   hide all app chrome, let the stage fill the window */
+:root.stage-view .topbar,
+:root.stage-view .composer-wrap,
+:root.stage-view .sidebar,
+:root.stage-view .feed,
+:root.stage-view .captions,
+:root.stage-view .tiles-head {
+  display: none !important;
+}
+:root.stage-view,
+:root.stage-view body,
+:root.stage-view #app {
+  background: #000;
+}
+:root.stage-view .tiles.stage {
+  max-height: 100vh;
+  max-width: 100vw;
+  height: 100vh;
+}
+:root.stage-view .center {
+  grid-template-rows: 1fr;
+}
+
+/* Without these rules a 360px phone computes a spotlight thumbnail at about 84px and
+   the grid forces two columns at minmax(150px). */
+@media (max-width: 560px) {
+  .stage.layout-grid {
+    grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+  }
+  .stage.layout-spotlight .stage-tile {
+    width: calc(50% - 0.25rem);
+  }
+}
+@media (orientation: portrait) {
+  .tiles.stage {
+    max-height: 58vh;
+  }
+}
+
+/* live captions (on-device Whisper), a quiet strip between feed and composer.
+   The one row with no wrapper of its own, so it cannot mirror the feed's scrollbar
+   gutter: it lands on the same edges as the cards whenever the column is at --maxw, and
+   sits one gutter wider on each side below that. Hardcoding the gutter here instead would
+   be wrong on every platform that draws overlay scrollbars, where the gutter is zero. */
+.captions {
+  width: min(var(--maxw), calc(100% - 2.2rem));
+  margin: 0 auto 0.2rem;
+  display: flex;
+  gap: 0.5rem;
+  align-items: baseline;
+  background: var(--elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0.3rem 0.35rem 0.3rem 0.65rem;
+  font-size: 0.95rem;
+}
+.captions.hidden {
+  display: none;
+} /* .captions wins the source-order tie against .hidden otherwise */
+.captions .cap-text {
+  flex: 1;
+  min-width: 0;
+}
+.captions.cap-min .cap-text {
+  display: none;
+} /* minimized: collapse to the CC pill, transcription keeps running */
+.captions .badge,
+.captions button {
+  flex: none;
+}
+
+/* device check tool: self-view + mic level meter */
+video.preview {
+  display: block;
+  width: 100%;
+  max-width: 460px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: #000;
+}
+video.preview.mirror {
+  transform: scaleX(-1);
+} /* self-view like a mirror, as every meeting app does */
+.meter {
+  height: 10px;
+  width: 100%;
+  max-width: 460px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--pill);
+  overflow: hidden;
+}
+.meter-fill {
+  height: 100%;
+  width: 0%;
+  background: var(--ok);
+  transition: width 0.06s linear;
+}
+.meter-fill.hot {
+  background: var(--danger);
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  font-size: 0.7rem;
+  padding: 0.08rem 0.45rem;
+  border-radius: var(--pill);
+  border: 1px solid var(--border);
+  color: var(--fg-dim);
+}
+.badge.hidden {
+  display: none;
+} /* .badge's display wins the source-order tie against .hidden otherwise */
+.badge.ok {
+  color: var(--ok);
+  border-color: var(--ok);
+}
+.badge.warn {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+.badge.danger {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+img.preview {
+  max-width: 100%;
+  max-height: 300px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+}
+canvas.qr {
+  image-rendering: pixelated;
+  border-radius: var(--radius-sm);
+  background: #fff;
+  padding: 8px;
+}
+pre {
+  overflow: auto;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0.6rem;
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* overlays */
+#toasts {
+  position: fixed;
+  right: 1rem;
+  bottom: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  z-index: var(--z-toast);
+}
+.toast {
+  background: var(--elev);
+  border: 1px solid var(--border-strong);
+  padding: 0.55rem 0.8rem;
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow);
+  max-width: 320px;
+}
+.modal-back {
+  position: fixed;
+  inset: 0;
+  background: var(--scrim);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: var(--z-modal);
+  padding: 1rem;
+}
+.modal {
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  max-width: 560px;
+  width: 100%;
+  padding: 1.1rem;
+  box-shadow: var(--shadow);
+  max-height: 88vh;
+  overflow: auto;
+}
+.modal ul {
+  margin: 0.3rem 0;
+  padding-left: 1.1rem;
+}
+.menu {
+  position: absolute;
+  background: var(--elev);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow);
+  padding: 0.3rem;
+  z-index: var(--z-menu);
+  min-width: 200px;
+  max-height: 60vh;
+  overflow: auto;
+}
+.menu button {
+  width: 100%;
+  justify-content: flex-start;
+}
+/* tool launcher: fixed panel anchored to its button; grid so it never scrolls */
+.menu.tool-grid {
+  position: fixed;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(150px, 1fr));
+  gap: 0.25rem;
+  width: min(540px, calc(100vw - 16px));
+  max-height: none;
+  overflow: visible;
+}
+.menu.tool-grid button {
+  border-color: transparent;
+}
+.menu.tool-grid button:hover {
+  border-color: var(--border-strong);
+  background: var(--surface-2);
+}
+@media (max-width: 560px) {
+  .menu.tool-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+details > summary {
+  cursor: pointer;
+}
+
+/* workshop html apps: chrome (name + trust badge) stays OUTSIDE the frame so an
+   app can't spoof the host UI; the frame itself is visibly bounded */
+.ws-app-mount {
+  margin-top: 0.4rem;
+}
+iframe.ws-app-frame {
+  width: 100%;
+  height: min(60vh, 480px);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: #000;
+}
+
+/* Phones. Last block in the sheet on purpose: a media query adds no specificity, so these
+   rules only beat the base .feed / .feed-item / .composer-wrap / .captions rules by
+   sitting after them.
+
+   The topbar carries ten controls, more than 360-390px can hold, so it sheds them in
+   value order: below 560px the brand goes and everything left gets tighter, below 470px
+   the status chip goes (80px of text the roster drawer also reports), below 380px the
+   drawer toggle goes as well. The code chip, the room link, the clear-feed button, Tools,
+   Connect and the theme toggle survive every step; the theme toggle has no other entry
+   point in the app. Measured at 360px this leaves 38px of slack in the topbar, 32px at
+   390px. */
+@media (max-width: 560px) {
+  .topbar {
+    padding: 0 0.4rem;
+    gap: 0.25rem;
+  }
+  .topbar .brand {
+    display: none;
+  }
+  .topbar button.icon {
+    min-width: 32px;
+    height: 32px;
+  }
+  .topbar button.ghost {
+    padding: 0.45rem 0.45rem;
+  }
+  .topbar button.code-chip {
+    padding: 0.1rem 0.4rem;
+    letter-spacing: 0.08em;
+  }
+  .feed {
+    padding: 0.8rem 0.7rem;
+  }
+  /* the delete button hangs outside its card by design; on a phone that is off-screen,
+     so it moves inside while keeping the hover/focus reveal */
+  .feed-item > .del {
+    top: 0.15rem;
+    right: 0.15rem;
+  }
+  .composer-wrap {
+    padding: 0.4rem 0.7rem 0.7rem;
+  }
+  .composer .bar button.icon {
+    min-width: 32px;
+    height: 32px;
+  }
+  .captions {
+    width: min(var(--maxw), calc(100% - 1.4rem));
+  }
+}
+@media (max-width: 470px) {
+  .topbar .badge {
+    display: none;
+  }
+}
+@media (max-width: 380px) {
+  /* The 👥 roster toggle. `.roster-toggle` is the contract: console.ts puts it on the
+     topbar button that opens the devices & people panel, and this rule sheds that button
+     and nothing else. Position and tooltip are both free to change. The title-prefix
+     selector below it is the pre-contract fallback and can be deleted once the class is
+     on the button, so the rule no longer depends on tooltip wording. */
+  .topbar button.roster-toggle {
+    display: none;
+  }
+}
+
+/* Respect the OS "reduce motion" setting everywhere. Neutralize transitions/animations
+   (the game already handles its own via prefers-reduced-motion). */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+  }
+}

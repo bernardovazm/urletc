@@ -1,0 +1,65 @@
+{
+  "name": "utilscript",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Client-only, security-first productivity & P2P toolkit (clipboard/OCR/STT/TTS, WebRTC messenger, sandboxed tool workshop).",
+  "license": "MIT",
+  "author": "utilscript contributors",
+  "keywords": [
+    "webrtc",
+    "p2p",
+    "e2ee",
+    "privacy",
+    "client-only",
+    "ocr",
+    "whisper",
+    "webcrypto",
+    "pwa"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bernardovazm/utilscript.git"
+  },
+  "homepage": "https://github.com/bernardovazm/utilscript#readme",
+  "bugs": {
+    "url": "https://github.com/bernardovazm/utilscript/issues"
+  },
+  "engines": {
+    "node": ">=20.19"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint \"src/**/*.ts\"",
+    "lint:fix": "eslint \"src/**/*.ts\" --fix",
+    "format": "prettier --write \"src/**/*.{ts,css}\"",
+    "format:check": "prettier --check \"src/**/*.{ts,css}\"",
+    "e2e": "bash scripts/e2e.sh"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "4.2.0",
+    "compromise": "14.15.1",
+    "dompurify": "3.4.11",
+    "idb-keyval": "6.2.5",
+    "kokoro-js": "1.2.1",
+    "nanostores": "1.3.0",
+    "tesseract.js": "7.0.0",
+    "trystero": "0.25.2",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.37.0",
+    "eslint": "9.37.0",
+    "eslint-config-prettier": "9.1.2",
+    "eslint-plugin-no-unsanitized": "4.1.2",
+    "globals": "15.15.0",
+    "prettier": "3.6.2",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.46.0",
+    "vite": "8.0.16",
+    "vite-plugin-pwa": "1.3.0"
+  }
+}

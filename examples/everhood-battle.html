@@ -1,0 +1,1218 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Everhood Battle</title>
+<style>
+html, body {
+  margin: 0;
+  height: 100%;
+  background: #000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+canvas {
+  max-width: 100vw;
+  max-height: 100vh;
+  aspect-ratio: 4 / 3;
+  image-rendering: pixelated;
+}
+</style></head><body>
+<canvas id="game" width="960" height="720"></canvas>
+<script>
+// Motor de música procedural (Web Audio). Gera um loop synth sombrio em Lá menor
+// e expõe o relógio de áudio, usado como fonte única de sincronia do jogo.
+
+const BPM = 130;
+const BEAT = 60 / BPM;        // duração de 1 beat (s)
+const STEP = BEAT / 4;        // semicolcheia
+const BAR = BEAT * 4;         // compasso 4/4
+
+// Progressão por compasso: Am, F, C, G (raiz em Hz + tríade p/ arpejo)
+const A2 = 110, F2 = 87.31, C2 = 65.41, G2 = 98.0;
+const CHORDS = [
+  { root: A2, arp: [220, 261.63, 329.63, 440] },      // Am
+  { root: F2, arp: [174.61, 220, 261.63, 349.23] },   // F
+  { root: C2, arp: [130.81, 164.81, 196, 261.63] },   // C
+  { root: G2, arp: [196, 246.94, 293.66, 392] },      // G
+];
+
+class MusicEngine {
+  constructor() {
+    this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+    this.master = this.ctx.createGain();
+    this.master.gain.value = 0.5;
+    this.master.connect(this.ctx.destination);
+    this.startTime = 0;
+    this.nextStep = 0;   // índice global de semicolcheia
+    this.timer = null;
+    this.getIntensity = () => 0; // 0..2, injetado pelo jogo (fase da batalha)
+  }
+
+  now() { return this.ctx.currentTime; }
+
+  start() {
+    this.ctx.resume();
+    clearInterval(this.timer);
+    this.master.gain.cancelScheduledValues(this.ctx.currentTime);
+    this.master.gain.setValueAtTime(0.5, this.ctx.currentTime);
+    this.startTime = this.ctx.currentTime + 0.1;
+    this.nextStep = 0;
+    this.timer = setInterval(() => this.schedule(), 25);
+  }
+
+  stop() {
+    clearInterval(this.timer);
+    this.master.gain.setTargetAtTime(0, this.ctx.currentTime, 0.3);
+  }
+
+  // agenda com lookahead de 120ms
+  schedule() {
+    const ahead = this.ctx.currentTime + 0.12;
+    while (this.startTime + this.nextStep * STEP < ahead) {
+      this.scheduleStep(this.nextStep, this.startTime + this.nextStep * STEP);
+      this.nextStep++;
+    }
+  }
+
+  scheduleStep(step, t) {
+    const inBar = step % 16;           // posição no compasso (16 semicolcheias)
+    const bar = Math.floor(step / 16);
+    const chord = CHORDS[bar % CHORDS.length];
+    const phase = this.getIntensity();
+
+    // bateria
+    if (inBar % 4 === 0) this.kick(t);
+    if (inBar === 4 || inBar === 12) this.snare(t);
+    if (phase >= 1 && inBar % 2 === 0) this.hat(t, 0.05);
+    if (phase >= 2 && inBar % 2 === 1) this.hat(t, 0.02);
+
+    // baixo: colcheias na raiz, oitava acima no contratempo
+    if (inBar % 2 === 0) {
+      const up = inBar % 4 === 2;
+      this.tone(t, chord.root * (up ? 2 : 1), STEP * 1.8, 'sawtooth', 0.22, 400);
+    }
+
+    // arpejo: semicolcheias cíclicas, mais denso conforme a fase
+    if (phase >= 1 || inBar % 2 === 0) {
+      const n = chord.arp[(step + (phase >= 2 ? bar : 0)) % chord.arp.length];
+      this.tone(t, n, STEP * 0.9, 'square', 0.07, 2500);
+    }
+
+    // pad: ataque no início do compasso
+    if (inBar === 0) {
+      for (const f of chord.arp.slice(0, 3))
+        this.tone(t, f / 2, BAR * 0.95, 'triangle', 0.05, 1200);
+    }
+  }
+
+  tone(t, freq, dur, type, vol, cutoff) {
+    const o = this.ctx.createOscillator();
+    const g = this.ctx.createGain();
+    const f = this.ctx.createBiquadFilter();
+    o.type = type;
+    o.frequency.value = freq;
+    f.type = 'lowpass';
+    f.frequency.value = cutoff;
+    g.gain.setValueAtTime(vol, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+    o.connect(f).connect(g).connect(this.master);
+    o.start(t);
+    o.stop(t + dur + 0.05);
+  }
+
+  kick(t) {
+    const o = this.ctx.createOscillator();
+    const g = this.ctx.createGain();
+    o.frequency.setValueAtTime(150, t);
+    o.frequency.exponentialRampToValueAtTime(40, t + 0.12);
+    g.gain.setValueAtTime(0.8, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.15);
+    o.connect(g).connect(this.master);
+    o.start(t);
+    o.stop(t + 0.2);
+  }
+
+  noise(t, dur, vol, cutoff, type = 'highpass') {
+    const len = Math.ceil(this.ctx.sampleRate * dur);
+    const buf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+    const src = this.ctx.createBufferSource();
+    src.buffer = buf;
+    const f = this.ctx.createBiquadFilter();
+    f.type = type;
+    f.frequency.value = cutoff;
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(vol, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+    src.connect(f).connect(g).connect(this.master);
+    src.start(t);
+  }
+
+  snare(t) { this.noise(t, 0.12, 0.3, 1500); }
+  hat(t, v) { this.noise(t, 0.04, v, 7000); }
+
+  // efeitos sonoros pontuais
+  sfxHit() {
+    const t = this.ctx.currentTime;
+    this.noise(t, 0.2, 0.4, 800, 'lowpass');
+    this.tone(t, 90, 0.2, 'sawtooth', 0.3, 500);
+  }
+  sfxAbsorb() {
+    const t = this.ctx.currentTime;
+    this.tone(t, 440, 0.08, 'sine', 0.25, 4000);
+    this.tone(t + 0.06, 660, 0.1, 'sine', 0.25, 4000);
+  }
+  sfxFire() {
+    const t = this.ctx.currentTime;
+    for (let i = 0; i < 6; i++)
+      this.tone(t + i * 0.03, 300 + i * 150, 0.08, 'square', 0.12, 5000);
+  }
+  sfxJump() {
+    const t = this.ctx.currentTime;
+    const o = this.ctx.createOscillator();
+    const g = this.ctx.createGain();
+    o.type = 'sine';
+    o.frequency.setValueAtTime(300, t);
+    o.frequency.exponentialRampToValueAtTime(600, t + 0.1);
+    g.gain.setValueAtTime(0.15, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.12);
+    o.connect(g).connect(this.master);
+    o.start(t);
+    o.stop(t + 0.15);
+  }
+}
+</script>
+<script>
+// Padrões de notas por compasso (16 semicolcheias).
+// s: passo (0-15), lane: pista (0-4), type: 'note' (pulável) | 'wall' (parede alta).
+// Cada fase da batalha sorteia dentro do seu conjunto; a densidade cresce.
+
+const P = (events) => events;
+
+const PHASES = [
+  // fase 0: aquecimento
+  [
+    P([{ s: 0, lane: 2, type: 'note' }, { s: 8, lane: 1, type: 'note' }]),
+    P([{ s: 0, lane: 3, type: 'note' }, { s: 8, lane: 2, type: 'note' }]),
+    P([{ s: 4, lane: 1, type: 'note' }, { s: 12, lane: 3, type: 'note' }]),
+    P([{ s: 0, lane: 0, type: 'note' }, { s: 8, lane: 4, type: 'note' }]),
+  ],
+  // fase 1: paredes e sequências
+  [
+    P([{ s: 0, lane: 1, type: 'note' }, { s: 4, lane: 2, type: 'note' },
+       { s: 8, lane: 3, type: 'note' }, { s: 12, lane: 2, type: 'wall' }]),
+    P([{ s: 0, lane: 2, type: 'wall' }, { s: 8, lane: 2, type: 'note' },
+       { s: 12, lane: 1, type: 'note' }]),
+    P([{ s: 0, lane: 0, type: 'note' }, { s: 4, lane: 1, type: 'note' },
+       { s: 8, lane: 2, type: 'note' }, { s: 12, lane: 3, type: 'note' }]),
+    P([{ s: 0, lane: 4, type: 'wall' }, { s: 4, lane: 3, type: 'wall' },
+       { s: 10, lane: 1, type: 'note' }]),
+  ],
+  // fase 2: fúria
+  [
+    P([{ s: 0, lane: 2, type: 'note' }, { s: 2, lane: 2, type: 'note' },
+       { s: 4, lane: 3, type: 'wall' }, { s: 8, lane: 1, type: 'note' },
+       { s: 10, lane: 1, type: 'note' }, { s: 12, lane: 0, type: 'wall' }]),
+    P([{ s: 0, lane: 0, type: 'wall' }, { s: 2, lane: 1, type: 'wall' },
+       { s: 6, lane: 3, type: 'note' }, { s: 8, lane: 4, type: 'note' },
+       { s: 12, lane: 2, type: 'note' }, { s: 14, lane: 2, type: 'note' }]),
+    P([{ s: 0, lane: 1, type: 'note' }, { s: 3, lane: 2, type: 'note' },
+       { s: 6, lane: 3, type: 'note' }, { s: 9, lane: 2, type: 'wall' },
+       { s: 12, lane: 1, type: 'note' }, { s: 14, lane: 0, type: 'note' }]),
+    P([{ s: 0, lane: 4, type: 'note' }, { s: 2, lane: 3, type: 'note' },
+       { s: 4, lane: 2, type: 'note' }, { s: 6, lane: 1, type: 'note' },
+       { s: 8, lane: 0, type: 'wall' }, { s: 12, lane: 2, type: 'wall' }]),
+  ],
+];
+</script>
+<script>
+// Efeitos: partículas aditivas e textos flutuantes de dano.
+
+class Particles {
+  constructor() { this.list = []; }
+
+  burst(x, y, color, n, opts = {}) {
+    const { speed = 180, life = 0.6, size = 3, gravity = 260,
+            spread = Math.PI * 2, angle = 0 } = opts;
+    for (let i = 0; i < n; i++) {
+      const a = angle + (Math.random() - 0.5) * spread;
+      const v = speed * (0.35 + Math.random() * 0.65);
+      const t = life * (0.5 + Math.random() * 0.5);
+      this.list.push({
+        x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v,
+        life: t, t, size: size * (0.5 + Math.random()), color, gravity,
+      });
+    }
+  }
+
+  update(dt) {
+    for (const p of this.list) {
+      p.t -= dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.vy += p.gravity * dt;
+    }
+    this.list = this.list.filter(p => p.t > 0);
+  }
+
+  draw(g) {
+    g.save();
+    g.globalCompositeOperation = 'lighter';
+    for (const p of this.list) {
+      const a = Math.max(0, p.t / p.life);
+      g.globalAlpha = a;
+      g.fillStyle = p.color;
+      g.beginPath();
+      g.arc(p.x, p.y, p.size * (0.5 + a * 0.5), 0, Math.PI * 2);
+      g.fill();
+    }
+    g.restore();
+    g.globalAlpha = 1;
+  }
+}
+
+class FloatTexts {
+  constructor() { this.list = []; }
+
+  add(x, y, text, color, size = 26) {
+    this.list.push({ x, y, text, color, size, t: 0.9, life: 0.9 });
+  }
+
+  update(dt) {
+    for (const f of this.list) { f.t -= dt; f.y -= 55 * dt; }
+    this.list = this.list.filter(f => f.t > 0);
+  }
+
+  draw(g) {
+    g.save();
+    g.textAlign = 'center';
+    for (const f of this.list) {
+      const a = Math.max(0, f.t / f.life);
+      g.globalAlpha = a;
+      g.font = `bold ${f.size}px monospace`;
+      g.lineWidth = 4;
+      g.strokeStyle = 'rgba(0,0,0,0.7)';
+      g.strokeText(f.text, f.x, f.y);
+      g.fillStyle = f.color;
+      g.fillText(f.text, f.x, f.y);
+    }
+    g.restore();
+    g.globalAlpha = 1;
+  }
+}
+</script>
+<script>
+// Lógica e renderização da batalha. Toda a sincronia parte do relógio de áudio:
+// cada nota tem um hitTime absoluto e sua posição na tela é derivada dele.
+
+
+const W = 960, H = 720;
+const LANES = 5;
+const TRAVEL = 1.8;           // s do topo até a linha de acerto
+const HIT_Y = 600, TOP_Y = 170;
+const CX = W / 2;
+const HALF_FAR = 95, HALF_NEAR = 340;
+const LANE_COLORS = ['#ff4fa3', '#41e8ff', '#ffe14f', '#6dff6d', '#c77dff'];
+
+const PLAYER_HP = 100, ENEMY_HP = 300;
+const NOTE_DMG = 10, WALL_DMG = 14;
+const ABSORB_WINDOW = 0.16, MAX_CHARGE = 6;
+
+const lerp = (a, b, t) => a + (b - a) * t;
+const clamp01 = (t) => Math.max(0, Math.min(1, t));
+
+// x central da pista `lane` na profundidade t (0 = longe, 1 = linha de acerto)
+function laneX(lane, t) {
+  const half = lerp(HALF_FAR, HALF_NEAR, t);
+  return CX - half + (half * 2) * (lane + 0.5) / LANES;
+}
+const laneWidth = (t) => lerp(HALF_FAR, HALF_NEAR, t) * 2 / LANES;
+const depthY = (t) => lerp(TOP_Y, HIT_Y, t * t * 0.35 + t * 0.65); // leve aceleração
+
+class Game {
+  constructor(canvas) {
+    this.cv = canvas;
+    this.g = canvas.getContext('2d');
+    this.engine = null;
+    this.state = 'title';
+    this.lastFrame = performance.now();
+
+    // camadas estáticas pré-renderizadas
+    this.vignette = this.makeVignette();
+    this.scanlines = this.makeScanlines();
+    this.reset();
+  }
+
+  reset() {
+    this.player = {
+      lane: 2, hp: PLAYER_HP, jumpT: -1, hurtUntil: 0, charge: 0,
+      x: laneX(2, 1), trail: [],
+    };
+    this.enemy = { hp: ENEMY_HP, hurtUntil: 0, x: CX, y: 105 };
+    this.notes = [];
+    this.beams = [];
+    this.nextBar = 1;          // compasso 0 fica vazio (respiro inicial)
+    this.shake = 0;
+    this.msg = 0;              // timestamp p/ overlay de fim
+    this.particles = new Particles();
+    this.texts = new FloatTexts();
+    this.hurtFlash = 0;        // vermelho ao levar dano
+    this.hitFlash = 0;         // branco quando o inimigo é atingido
+    this.absorbFx = -1;        // timestamp do último absorb (anel)
+    this.dieT = -1;            // início da animação de morte do inimigo
+  }
+
+  phase() {
+    return this.enemy.hp > ENEMY_HP * 2 / 3 ? 0 : this.enemy.hp > ENEMY_HP / 3 ? 1 : 2;
+  }
+
+  start() {
+    if (!this.engine) this.engine = new MusicEngine();
+    this.engine.getIntensity = () => this.phase();
+    this.reset();
+    this.engine.start();
+    this.state = 'play';
+  }
+
+  onKey(e) {
+    const k = e.key.toLowerCase();
+    if (this.state === 'title') { this.start(); return; }
+    if (this.state === 'win' || this.state === 'lose') {
+      if (k === 'enter' && performance.now() - this.msg > 800) this.start();
+      return;
+    }
+    if (this.state !== 'play') return;
+    const p = this.player;
+    if (k === 'arrowleft' || k === 'a') p.lane = Math.max(0, p.lane - 1);
+    else if (k === 'arrowright' || k === 'd') p.lane = Math.min(LANES - 1, p.lane + 1);
+    else if (k === ' ' || k === 'arrowup' || k === 'w') this.jump();
+    else if (k === 'z' || k === 'j') this.absorb();
+    else if (k === 'x' || k === 'k') this.fire();
+  }
+
+  jump() {
+    if (this.player.jumpT < 0) {
+      this.player.jumpT = this.engine.now();
+      this.engine.sfxJump();
+    }
+  }
+
+  absorb() {
+    const now = this.engine.now();
+    const n = this.notes.find(n => !n.done && n.type === 'note' &&
+      n.lane === this.player.lane && Math.abs(n.hitTime - now) < ABSORB_WINDOW);
+    if (n && this.player.charge < MAX_CHARGE) {
+      n.done = true;
+      this.player.charge++;
+      this.absorbFx = now;
+      this.particles.burst(this.player.x, HIT_Y - 25, '#41e8ff', 18,
+        { speed: 220, life: 0.5, gravity: -80, size: 2.5 });
+      this.engine.sfxAbsorb();
+    }
+  }
+
+  fire() {
+    if (this.player.charge === 0) return;
+    const now = this.engine.now();
+    this.beams.push({
+      t0: now, dur: 0.38, hitAt: now + 0.2, hit: false,
+      dmg: this.player.charge * 9, x: this.player.x,
+    });
+    this.player.charge = 0;
+    this.engine.sfxFire();
+  }
+
+  // planeja os compassos vindouros sorteando padrões da fase atual
+  plan(now) {
+    while (this.engine.startTime + this.nextBar * BAR - TRAVEL - 0.5 < now) {
+      const barStart = this.engine.startTime + this.nextBar * BAR;
+      const pool = PHASES[this.phase()];
+      const pat = pool[Math.floor(Math.random() * pool.length)];
+      for (const ev of pat)
+        this.notes.push({ hitTime: barStart + ev.s * BAR / 16, lane: ev.lane, type: ev.type, done: false });
+      this.nextBar++;
+    }
+  }
+
+  update() {
+    const dt = Math.min(0.05, (performance.now() - this.lastFrame) / 1000);
+    this.lastFrame = performance.now();
+    this.particles.update(dt);
+    this.texts.update(dt);
+    this.hurtFlash = Math.max(0, this.hurtFlash - dt * 2.5);
+    this.hitFlash = Math.max(0, this.hitFlash - dt * 3);
+    if (this.state !== 'play' && this.state !== 'dying') return;
+
+    const now = this.engine.now();
+    const p = this.player;
+
+    // movimento visual suave entre pistas + rastro
+    p.x = lerp(p.x, laneX(p.lane, 1), 1 - Math.pow(0.0008, dt));
+    p.trail.unshift({ x: p.x, y: this.playerY(now), t: 0.18 });
+    for (const s of p.trail) s.t -= dt;
+    p.trail = p.trail.filter(s => s.t > 0).slice(0, 14);
+
+    if (this.state === 'dying') {
+      // inimigo se desfazendo em partículas
+      if (Math.random() < 0.6)
+        this.particles.burst(
+          this.enemy.x + (Math.random() - 0.5) * 80,
+          this.enemy.y + (Math.random() - 0.5) * 70,
+          `hsl(${Math.random() * 60 + 260}, 90%, 65%)`, 4,
+          { speed: 160, life: 0.9, gravity: -60 });
+      if (now - this.dieT > 1.4) { this.state = 'win'; this.msg = performance.now(); }
+      return;
+    }
+
+    this.plan(now);
+
+    if (p.jumpT >= 0 && now - p.jumpT > 0.42) p.jumpT = -1;
+
+    // colisão na linha de acerto
+    for (const n of this.notes) {
+      if (n.done || n.hitTime > now) continue;
+      n.done = true;
+      const jumping = p.jumpT >= 0 && n.type === 'note';
+      const c = LANE_COLORS[n.lane];
+      if (n.lane === p.lane && !jumping && now > p.hurtUntil) {
+        const dmg = n.type === 'wall' ? WALL_DMG : NOTE_DMG;
+        p.hp -= dmg;
+        p.hurtUntil = now + 0.6;
+        this.shake = 14;
+        this.hurtFlash = 1;
+        this.texts.add(p.x, HIT_Y - 80, `-${dmg}`, '#ff5252');
+        this.particles.burst(p.x, HIT_Y - 25, '#ff5252', 26, { speed: 260, life: 0.7 });
+        this.engine.sfxHit();
+      } else {
+        // nota cruzou a linha: fagulhas na cor da pista
+        this.particles.burst(laneX(n.lane, 1), HIT_Y, c, 8,
+          { speed: 130, life: 0.35, gravity: 200, size: 2, spread: Math.PI, angle: -Math.PI / 2 });
+      }
+    }
+    this.notes = this.notes.filter(n => !n.done || n.hitTime > now - 0.1);
+
+    // feixes chegando no inimigo
+    for (const b of this.beams) {
+      if (!b.hit && now >= b.hitAt) {
+        b.hit = true;
+        this.enemy.hp -= b.dmg;
+        this.enemy.hurtUntil = now + 0.4;
+        this.shake = 10;
+        this.hitFlash = 0.7;
+        this.texts.add(this.enemy.x, this.enemy.y - 60, `-${b.dmg}`, '#ffe14f', 34);
+        this.particles.burst(this.enemy.x, this.enemy.y, '#ffffff', 30,
+          { speed: 320, life: 0.6, gravity: 40 });
+      }
+    }
+    this.beams = this.beams.filter(b => now - b.t0 < b.dur);
+
+    p.hp = Math.min(PLAYER_HP, p.hp + 1.5 * dt); // regeneração lenta
+
+    if (this.enemy.hp <= 0) {
+      this.state = 'dying';
+      this.dieT = now;
+      this.shake = 20;
+      this.engine.stop();
+      this.particles.burst(this.enemy.x, this.enemy.y, '#ffffff', 80, { speed: 420, life: 1.1 });
+    } else if (p.hp <= 0) {
+      this.state = 'lose';
+      this.msg = performance.now();
+      this.engine.stop();
+    }
+  }
+
+  playerY(now) {
+    const p = this.player;
+    let y = HIT_Y;
+    if (p.jumpT >= 0) {
+      const jt = (now - p.jumpT) / 0.42;
+      y -= Math.sin(Math.min(jt, 1) * Math.PI) * 85;
+    }
+    return y;
+  }
+
+  // ---------------- renderização ----------------
+
+  draw() {
+    const g = this.g;
+    const active = this.state !== 'title';
+    const now = this.engine ? this.engine.now() : performance.now() / 1000;
+    const beat = this.engine && active
+      ? Math.max(0, (now - this.engine.startTime) / BEAT) : now * 2;
+    const pulse = Math.pow(1 - (beat % 1), 2);       // 1 no ataque do beat, decai
+    const hue = (Math.floor(beat / 4) * 47) % 360;   // gira a cada compasso
+
+    g.save();
+    // zoom sutil no beat + tremor
+    const zoom = active ? 1 + pulse * 0.006 : 1;
+    g.translate(CX, H / 2);
+    g.scale(zoom, zoom);
+    g.translate(-CX, -H / 2);
+    if (this.shake > 0) {
+      g.translate((Math.random() - 0.5) * this.shake, (Math.random() - 0.5) * this.shake);
+      this.shake *= 0.85;
+      if (this.shake < 0.5) this.shake = 0;
+    }
+
+    this.drawBackground(g, now, beat, pulse, hue);
+    if (active) {
+      if (this.state !== 'win') this.drawEnemy(g, now, pulse);
+      this.drawHighway(g, now, pulse, hue);
+      this.drawWallWarnings(g, now);
+      this.drawNotes(g, now);
+      this.drawBeams(g, now);
+      this.particles.draw(g);
+      this.drawPlayer(g, now, pulse);
+      this.texts.draw(g);
+      this.drawHUD(g, pulse);
+    }
+    g.restore();
+
+    this.drawPost(g, pulse);
+
+    if (this.state === 'title') this.drawTitle(g, now);
+    if (this.state === 'win') this.drawEnd(g, 'VOCÊ VENCEU!', '#6dff6d', now);
+    if (this.state === 'lose') this.drawEnd(g, 'GAME OVER', '#ff4f4f', now);
+  }
+
+  drawBackground(g, now, beat, pulse, hue) {
+    g.fillStyle = '#030108';
+    g.fillRect(-30, -30, W + 60, H + 60);
+
+    // raios giratórios convergindo no inimigo
+    g.save();
+    g.translate(CX, 120);
+    const spin = beat * 0.35;
+    for (let i = 0; i < 16; i++) {
+      const a0 = spin + i * Math.PI * 2 / 16;
+      g.fillStyle = `hsla(${(hue + i * 24) % 360}, 90%, 55%, ${0.045 + pulse * 0.09})`;
+      g.beginPath();
+      g.moveTo(0, 0);
+      g.arc(0, 0, 1100, a0, a0 + Math.PI / 16);
+      g.closePath();
+      g.fill();
+    }
+    // anéis do túnel expandindo no beat
+    g.globalCompositeOperation = 'lighter';
+    for (let i = 0; i < 5; i++) {
+      const t = ((beat * 0.25 + i / 5) % 1);
+      const r = t * t * 620 + 30;
+      g.strokeStyle = `hsla(${(hue + 180 + i * 20) % 360}, 90%, 60%, ${(1 - t) * 0.16})`;
+      g.lineWidth = 2 + t * 5;
+      g.beginPath();
+      g.arc(0, 0, r, 0, Math.PI * 2);
+      g.stroke();
+    }
+    g.restore();
+
+    // chão em grade com perspectiva, correndo em direção ao jogador
+    g.save();
+    g.globalCompositeOperation = 'lighter';
+    const horizon = TOP_Y - 6;
+    for (let i = 0; i < 12; i++) {
+      const t = (beat * 0.22 + i / 12) % 1;
+      const y = lerp(horizon, H + 40, t * t);
+      g.strokeStyle = `hsla(${hue}, 85%, 60%, ${t * (0.10 + pulse * 0.12)})`;
+      g.lineWidth = 1 + t * 2.5;
+      g.beginPath();
+      g.moveTo(-30, y);
+      g.lineTo(W + 30, y);
+      g.stroke();
+    }
+    // linhas radiais do chão
+    for (let i = -8; i <= 8; i++) {
+      g.strokeStyle = `hsla(${(hue + 40) % 360}, 85%, 60%, 0.06)`;
+      g.lineWidth = 1.5;
+      g.beginPath();
+      g.moveTo(CX + i * 26, horizon);
+      g.lineTo(CX + i * 190, H + 40);
+      g.stroke();
+    }
+    // brilho do horizonte
+    const hg = g.createLinearGradient(0, horizon - 24, 0, horizon + 40);
+    hg.addColorStop(0, 'rgba(0,0,0,0)');
+    hg.addColorStop(0.5, `hsla(${hue}, 95%, 62%, ${0.10 + pulse * 0.14})`);
+    hg.addColorStop(1, 'rgba(0,0,0,0)');
+    g.fillStyle = hg;
+    g.fillRect(-30, horizon - 24, W + 60, 64);
+    g.restore();
+  }
+
+  drawHighway(g, now, pulse, hue) {
+    // sombra da pista
+    g.fillStyle = 'rgba(3, 3, 14, 0.88)';
+    g.beginPath();
+    g.moveTo(CX - HALF_FAR, TOP_Y);
+    g.lineTo(CX + HALF_FAR, TOP_Y);
+    g.lineTo(CX + HALF_NEAR, HIT_Y + 40);
+    g.lineTo(CX - HALF_NEAR, HIT_Y + 40);
+    g.closePath();
+    g.fill();
+
+    // bordas neon
+    g.save();
+    g.globalCompositeOperation = 'lighter';
+    g.shadowColor = `hsl(${hue}, 95%, 60%)`;
+    g.shadowBlur = 16 + pulse * 14;
+    g.strokeStyle = `hsla(${hue}, 95%, 65%, 0.9)`;
+    g.lineWidth = 3;
+    for (const s of [-1, 1]) {
+      g.beginPath();
+      g.moveTo(CX + s * HALF_FAR, TOP_Y);
+      g.lineTo(CX + s * HALF_NEAR, HIT_Y + 40);
+      g.stroke();
+    }
+    g.restore();
+
+    // divisórias internas
+    g.strokeStyle = `rgba(255,255,255,${0.10 + pulse * 0.08})`;
+    g.lineWidth = 1.5;
+    for (let i = 1; i < LANES; i++) {
+      g.beginPath();
+      g.moveTo(CX - HALF_FAR + HALF_FAR * 2 * i / LANES, TOP_Y);
+      g.lineTo(CX - HALF_NEAR + HALF_NEAR * 2 * i / LANES, HIT_Y + 40);
+      g.stroke();
+    }
+
+    // travessas correndo (sensação de velocidade)
+    for (let i = 0; i < 8; i++) {
+      const t = ((now / TRAVEL) * 0.9 + i / 8) % 1;
+      const y = depthY(t);
+      const half = lerp(HALF_FAR, HALF_NEAR, t);
+      g.strokeStyle = `rgba(255,255,255,${t * 0.07})`;
+      g.lineWidth = 1 + t;
+      g.beginPath();
+      g.moveTo(CX - half, y);
+      g.lineTo(CX + half, y);
+      g.stroke();
+    }
+
+    // realce da pista do jogador
+    const pl = this.player.lane;
+    const grad = g.createLinearGradient(0, TOP_Y, 0, HIT_Y);
+    grad.addColorStop(0, 'rgba(255,255,255,0)');
+    grad.addColorStop(1, `hsla(${hue}, 90%, 70%, ${0.07 + pulse * 0.05})`);
+    g.fillStyle = grad;
+    g.beginPath();
+    g.moveTo(laneX(pl, 0) - laneWidth(0) / 2, TOP_Y);
+    g.lineTo(laneX(pl, 0) + laneWidth(0) / 2, TOP_Y);
+    g.lineTo(laneX(pl, 1) + laneWidth(1) / 2, HIT_Y + 40);
+    g.lineTo(laneX(pl, 1) - laneWidth(1) / 2, HIT_Y + 40);
+    g.closePath();
+    g.fill();
+
+    // linha de acerto com brilho
+    g.save();
+    g.shadowColor = '#fff';
+    g.shadowBlur = 12 + pulse * 18;
+    g.strokeStyle = `rgba(255,255,255,${0.75 + pulse * 0.25})`;
+    g.lineWidth = 4;
+    g.beginPath();
+    g.moveTo(CX - HALF_NEAR, HIT_Y);
+    g.lineTo(CX + HALF_NEAR, HIT_Y);
+    g.stroke();
+    g.restore();
+  }
+
+  // aviso de parede chegando: pista pisca em vermelho
+  drawWallWarnings(g, now) {
+    for (const n of this.notes) {
+      if (n.done || n.type !== 'wall') continue;
+      const dt = n.hitTime - now;
+      if (dt < 0 || dt > 0.55) continue;
+      const a = (1 - dt / 0.55) * 0.22 * (Math.floor(now * 14) % 2 ? 1 : 0.5);
+      g.fillStyle = `rgba(255, 60, 60, ${a})`;
+      g.beginPath();
+      g.moveTo(laneX(n.lane, 0) - laneWidth(0) / 2, TOP_Y);
+      g.lineTo(laneX(n.lane, 0) + laneWidth(0) / 2, TOP_Y);
+      g.lineTo(laneX(n.lane, 1) + laneWidth(1) / 2, HIT_Y + 40);
+      g.lineTo(laneX(n.lane, 1) - laneWidth(1) / 2, HIT_Y + 40);
+      g.closePath();
+      g.fill();
+    }
+  }
+
+  drawNotes(g, now) {
+    g.save();
+    for (const n of this.notes) {
+      if (n.done) continue;
+      const t = 1 - (n.hitTime - now) / TRAVEL;
+      if (t < -0.05 || t > 1.1) continue;
+      const c = LANE_COLORS[n.lane];
+
+      // rastro: cópias fantasma atrás da nota
+      g.globalCompositeOperation = 'lighter';
+      for (let k = 3; k >= 1; k--) {
+        const tt = t - k * 0.03;
+        if (tt < 0) continue;
+        const x = laneX(n.lane, tt), y = depthY(Math.min(tt, 1));
+        const w = laneWidth(tt) * 0.62;
+        g.globalAlpha = 0.10 * (4 - k) * tt;
+        g.fillStyle = c;
+        if (n.type === 'wall') {
+          g.fillRect(x - w / 2, y - lerp(30, 130, tt), w, lerp(30, 130, tt));
+        } else {
+          const h = lerp(8, 26, tt);
+          g.beginPath();
+          g.roundRect(x - w / 2, y - h, w, h, h / 2);
+          g.fill();
+        }
+      }
+      g.globalAlpha = 1;
+      g.globalCompositeOperation = 'source-over';
+
+      const tc = clamp01(t);
+      const x = laneX(n.lane, t), y = depthY(tc);
+      const w = laneWidth(t) * 0.62;
+      g.shadowColor = c;
+      g.shadowBlur = 22 * tc;
+      if (n.type === 'wall') {
+        const h = lerp(30, 130, tc);
+        const grad = g.createLinearGradient(0, y - h, 0, y);
+        grad.addColorStop(0, '#fff');
+        grad.addColorStop(0.25, c);
+        grad.addColorStop(1, c);
+        g.fillStyle = grad;
+        g.fillRect(x - w / 2, y - h, w, h);
+        // listras de energia subindo na parede
+        g.save();
+        g.beginPath();
+        g.rect(x - w / 2, y - h, w, h);
+        g.clip();
+        g.globalCompositeOperation = 'lighter';
+        for (let s = 0; s < 4; s++) {
+          const sy = y - ((now * 130 + s * h / 4) % h);
+          g.fillStyle = 'rgba(255,255,255,0.35)';
+          g.fillRect(x - w / 2, sy, w, 3);
+        }
+        g.restore();
+      } else {
+        const h = lerp(8, 26, tc);
+        const grad = g.createLinearGradient(0, y - h, 0, y);
+        grad.addColorStop(0, '#fff');
+        grad.addColorStop(0.6, c);
+        grad.addColorStop(1, c);
+        g.fillStyle = grad;
+        g.beginPath();
+        g.roundRect(x - w / 2, y - h, w, h, h / 2);
+        g.fill();
+      }
+      g.shadowBlur = 0;
+    }
+    g.restore();
+  }
+
+  drawBeams(g, now) {
+    const e = this.enemy;
+    g.save();
+    g.globalCompositeOperation = 'lighter';
+    for (const b of this.beams) {
+      const life = (now - b.t0) / b.dur;
+      if (life < 0 || life > 1) continue;
+      const a = Math.sin(life * Math.PI);
+      const wCore = 6 + a * 10, wGlow = wCore * 3.2;
+      const hueB = (now * 500) % 360;
+      // brilho externo
+      const grad = g.createLinearGradient(b.x, HIT_Y - 30, e.x, e.y);
+      grad.addColorStop(0, `hsla(${hueB}, 100%, 70%, ${a * 0.5})`);
+      grad.addColorStop(1, `hsla(${(hueB + 90) % 360}, 100%, 70%, ${a * 0.5})`);
+      g.strokeStyle = grad;
+      g.lineWidth = wGlow;
+      g.lineCap = 'round';
+      g.beginPath();
+      g.moveTo(b.x, HIT_Y - 30);
+      g.lineTo(e.x, e.y);
+      g.stroke();
+      // núcleo branco
+      g.strokeStyle = `rgba(255,255,255,${a})`;
+      g.lineWidth = wCore;
+      g.beginPath();
+      g.moveTo(b.x, HIT_Y - 30);
+      g.lineTo(e.x, e.y);
+      g.stroke();
+    }
+    g.restore();
+  }
+
+  drawPlayer(g, now, pulse) {
+    const p = this.player;
+    const x = p.x;
+    const y = this.playerY(now);
+    const hurt = now < p.hurtUntil && Math.floor(now * 12) % 2 === 0;
+
+    // sombra no chão
+    const air = (HIT_Y - y) / 85;
+    g.fillStyle = `rgba(0,0,0,${0.4 - air * 0.25})`;
+    g.beginPath();
+    g.ellipse(x, HIT_Y + 4, 16 - air * 6, 5 - air * 2, 0, 0, Math.PI * 2);
+    g.fill();
+
+    // rastro
+    g.save();
+    g.globalCompositeOperation = 'lighter';
+    for (const s of p.trail) {
+      g.globalAlpha = (s.t / 0.18) * 0.12;
+      g.fillStyle = '#ff4060';
+      g.beginPath();
+      g.arc(s.x, s.y - 22, 12, 0, Math.PI * 2);
+      g.fill();
+    }
+    g.restore();
+    g.globalAlpha = 1;
+
+    // aura das cargas: orbes girando ao redor
+    if (p.charge > 0) {
+      g.save();
+      g.globalCompositeOperation = 'lighter';
+      for (let i = 0; i < p.charge; i++) {
+        const a = now * 3 + i * Math.PI * 2 / p.charge;
+        const ox = x + Math.cos(a) * 26, oy = y - 24 + Math.sin(a) * 14;
+        g.shadowColor = '#41e8ff';
+        g.shadowBlur = 12;
+        g.fillStyle = 'rgba(120, 235, 255, 0.9)';
+        g.beginPath();
+        g.arc(ox, oy, 3.5 + pulse, 0, Math.PI * 2);
+        g.fill();
+      }
+      g.restore();
+    }
+
+    // anel de absorção
+    if (this.absorbFx > 0 && now - this.absorbFx < 0.35) {
+      const t = (now - this.absorbFx) / 0.35;
+      g.strokeStyle = `rgba(65, 232, 255, ${1 - t})`;
+      g.lineWidth = 3;
+      g.beginPath();
+      g.arc(x, y - 22, 10 + t * 40, 0, Math.PI * 2);
+      g.stroke();
+    }
+
+    // corpinho estilizado (silhueta vermelha com cabelo espetado)
+    const idle = Math.sin(now * 6) * 1.5;                 // balanço no ritmo
+    const lean = (laneX(p.lane, 1) - x) * 0.04;           // inclina ao correr
+    g.save();
+    g.translate(x, y + idle * 0.4);
+    g.rotate(lean * 0.05);
+    g.globalAlpha = hurt ? 0.35 : 1;
+    g.shadowColor = hurt ? '#fff' : '#e33b4e';
+    g.shadowBlur = 14 + pulse * 8;
+    const body = g.createLinearGradient(0, -54, 0, 0);
+    body.addColorStop(0, '#ff6b7d');
+    body.addColorStop(1, '#c22035');
+    g.fillStyle = body;
+    g.beginPath(); g.arc(0, -34 + idle * 0.3, 11, 0, Math.PI * 2); g.fill(); // cabeça
+    g.beginPath();                                                            // cabelo
+    g.moveTo(-10, -40); g.lineTo(-4, -52 - idle); g.lineTo(0, -42);
+    g.lineTo(4, -54 - idle); g.lineTo(9, -41); g.closePath(); g.fill();
+    g.fillRect(-8, -26, 16, 20);                                              // tronco
+    g.fillRect(-8, -7, 6, 7);                                                 // pernas
+    g.fillRect(2, -7, 6, 7);
+    g.shadowBlur = 0;
+    // olhos brancos
+    g.fillStyle = '#fff';
+    g.fillRect(-6, -37, 4, 4);
+    g.fillRect(3, -37, 4, 4);
+    g.restore();
+    g.globalAlpha = 1;
+  }
+
+  drawEnemy(g, now, pulse) {
+    const e = this.enemy;
+    const dying = this.state === 'dying';
+    const dieT = dying ? clamp01((now - this.dieT) / 1.4) : 0;
+    e.x = CX + Math.sin(now * 0.7) * 30 * (1 - dieT);
+    e.y = 105 + Math.sin(now * 1.3) * 8;
+    const x = e.x, y = e.y;
+    const scale = (1 + pulse * 0.14) * (1 - dieT * 0.85);
+    const r = 46 * scale;
+    if (r <= 2) return;
+    const hurt = now < e.hurtUntil;
+    const phase = this.phase();
+
+    g.save();
+    if (dying) g.globalAlpha = 1 - dieT;
+
+    // halo
+    const halo = g.createRadialGradient(x, y, r * 0.3, x, y, r * 3);
+    halo.addColorStop(0, `hsla(${275 + pulse * 30}, 90%, 60%, ${0.30 + pulse * 0.2})`);
+    halo.addColorStop(1, 'rgba(0,0,0,0)');
+    g.fillStyle = halo;
+    g.fillRect(x - r * 3, y - r * 3, r * 6, r * 6);
+
+    // espinhos girando (mais agressivos por fase)
+    g.save();
+    g.translate(x, y);
+    g.rotate(now * (0.4 + phase * 0.3));
+    const spikes = 7 + phase * 2;
+    g.fillStyle = hurt ? '#fff' : `hsl(${290 + pulse * 20}, 75%, 45%)`;
+    for (let i = 0; i < spikes; i++) {
+      const a = i * Math.PI * 2 / spikes;
+      const len = r * (1.45 + Math.sin(now * 4 + i) * 0.15);
+      g.save();
+      g.rotate(a);
+      g.beginPath();
+      g.moveTo(0, -r * 0.5);
+      g.lineTo(len, 0);
+      g.lineTo(0, r * 0.5);
+      g.closePath();
+      g.fill();
+      g.restore();
+    }
+    g.restore();
+
+    // blob de vértices ondulantes com gradiente
+    const bodyGrad = g.createRadialGradient(x - r * 0.3, y - r * 0.35, r * 0.15, x, y, r * 1.35);
+    bodyGrad.addColorStop(0, hurt ? '#ffffff' : `hsl(${280 + pulse * 30}, 85%, ${58 + pulse * 12}%)`);
+    bodyGrad.addColorStop(1, hurt ? '#dddddd' : `hsl(${262}, 85%, 26%)`);
+    g.shadowColor = hurt ? '#fff' : '#a44fff';
+    g.shadowBlur = 34;
+    g.fillStyle = bodyGrad;
+    g.beginPath();
+    for (let i = 0; i <= 24; i++) {
+      const a = i * Math.PI * 2 / 24;
+      const rr = r + Math.sin(a * 5 + now * 3) * 8 * scale;
+      const px = x + Math.cos(a) * rr, py = y + Math.sin(a) * rr * 0.85;
+      i ? g.lineTo(px, py) : g.moveTo(px, py);
+    }
+    g.closePath();
+    g.fill();
+    g.shadowBlur = 0;
+
+    // núcleo pulsante
+    g.save();
+    g.globalCompositeOperation = 'lighter';
+    const core = g.createRadialGradient(x, y + r * 0.15, 0, x, y + r * 0.15, r * 0.5);
+    core.addColorStop(0, `hsla(${320 + pulse * 40}, 100%, 75%, ${0.5 + pulse * 0.5})`);
+    core.addColorStop(1, 'rgba(0,0,0,0)');
+    g.fillStyle = core;
+    g.beginPath();
+    g.arc(x, y + r * 0.15, r * 0.5, 0, Math.PI * 2);
+    g.fill();
+    g.restore();
+
+    // orbes em órbita
+    g.save();
+    g.globalCompositeOperation = 'lighter';
+    for (let i = 0; i < 5; i++) {
+      const a = now * 1.6 + i * Math.PI * 2 / 5;
+      const ox = x + Math.cos(a) * r * 1.9;
+      const oy = y + Math.sin(a) * r * 0.9;
+      g.fillStyle = `hsla(${(now * 120 + i * 60) % 360}, 95%, 70%, 0.8)`;
+      g.shadowColor = g.fillStyle;
+      g.shadowBlur = 10;
+      g.beginPath();
+      g.arc(ox, oy, 4 + pulse * 2, 0, Math.PI * 2);
+      g.fill();
+    }
+    g.restore();
+
+    if (!dying) {
+      // olhos que seguem o jogador
+      const look = ((this.player.x - x) / W) * 10;
+      for (const s of [-1, 1]) {
+        const ex = x + s * 16 * scale, ey = y - 6 * scale;
+        g.fillStyle = hurt ? '#000' : '#ffe14f';
+        g.beginPath();
+        g.arc(ex, ey, 7 * scale, 0, Math.PI * 2);
+        g.fill();
+        g.fillStyle = '#1a0526';
+        g.beginPath();
+        g.arc(ex + look, ey + 2, 3 * scale, 0, Math.PI * 2);
+        g.fill();
+        // sobrancelhas bravas na fase final
+        if (phase === 2 && !hurt) {
+          g.strokeStyle = '#1a0526';
+          g.lineWidth = 3 * scale;
+          g.beginPath();
+          g.moveTo(ex - 8 * scale, ey - 12 * scale + s * 0);
+          g.lineTo(ex + 8 * scale, ey - 7 * scale);
+          if (s < 0) { g.beginPath(); g.moveTo(ex - 8 * scale, ey - 7 * scale); g.lineTo(ex + 8 * scale, ey - 12 * scale); }
+          g.stroke();
+        }
+      }
+      // boca
+      g.strokeStyle = '#1a0526';
+      g.lineWidth = 3 * scale;
+      g.beginPath();
+      if (phase === 2) g.arc(x, y + 22 * scale, 9 * scale, Math.PI * 1.15, Math.PI * 1.85); // brava
+      else g.arc(x, y + 12 * scale, 9 * scale, Math.PI * 0.15, Math.PI * 0.85);             // sorriso
+      g.stroke();
+    }
+    g.restore();
+  }
+
+  drawHUD(g, pulse) {
+    const bar = (x, y, w, h, frac, color, glow) => {
+      g.fillStyle = 'rgba(0,0,0,0.6)';
+      g.beginPath(); g.roundRect(x - 3, y - 3, w + 6, h + 6, 6); g.fill();
+      g.strokeStyle = 'rgba(255,255,255,0.35)';
+      g.lineWidth = 1.5;
+      g.beginPath(); g.roundRect(x - 3, y - 3, w + 6, h + 6, 6); g.stroke();
+      if (frac <= 0) return;
+      const grad = g.createLinearGradient(0, y, 0, y + h);
+      grad.addColorStop(0, '#ffffff');
+      grad.addColorStop(0.25, color);
+      grad.addColorStop(1, color);
+      g.save();
+      g.shadowColor = glow ? color : 'transparent';
+      g.shadowBlur = glow ? 10 + pulse * 8 : 0;
+      g.fillStyle = grad;
+      g.beginPath(); g.roundRect(x, y, w * frac, h, 4); g.fill();
+      g.restore();
+    };
+
+    // HP do inimigo
+    bar(CX - 200, 22, 400, 14, Math.max(0, this.enemy.hp) / ENEMY_HP, '#b04dff', true);
+    g.fillStyle = 'rgba(255,255,255,0.8)';
+    g.font = 'bold 13px monospace';
+    g.textAlign = 'center';
+    g.fillText('ESPÍRITO SOMBRIO', CX, 14);
+    g.textAlign = 'left';
+
+    // HP do jogador
+    const low = this.player.hp <= 30;
+    bar(30, H - 42, 240, 18, Math.max(0, this.player.hp) / PLAYER_HP,
+      low ? '#ff4f4f' : '#6dff6d', low);
+    g.fillStyle = 'rgba(255,255,255,0.8)';
+    g.font = 'bold 13px monospace';
+    g.fillText('HP', 30, H - 50);
+
+    // cargas absorvidas
+    g.save();
+    for (let i = 0; i < MAX_CHARGE; i++) {
+      const on = i < this.player.charge;
+      g.shadowColor = on ? '#41e8ff' : 'transparent';
+      g.shadowBlur = on ? 12 + pulse * 6 : 0;
+      g.fillStyle = on ? '#41e8ff' : 'rgba(255,255,255,0.12)';
+      g.beginPath();
+      g.arc(W - 40 - i * 26, H - 32, on ? 9 + pulse * 1.5 : 8, 0, Math.PI * 2);
+      g.fill();
+    }
+    g.restore();
+    g.fillStyle = 'rgba(255,255,255,0.7)';
+    g.font = '13px monospace';
+    g.fillText('Z absorver, X disparar', W - 213, H - 54);
+  }
+
+  // pós-processamento: flashes, vinheta e scanlines
+  drawPost(g, pulse) {
+    if (this.hurtFlash > 0) {
+      g.fillStyle = `rgba(255, 30, 30, ${this.hurtFlash * 0.22})`;
+      g.fillRect(0, 0, W, H);
+    }
+    if (this.hitFlash > 0) {
+      g.fillStyle = `rgba(255, 255, 255, ${this.hitFlash * 0.25})`;
+      g.fillRect(0, 0, W, H);
+    }
+    g.drawImage(this.vignette, 0, 0);
+    g.globalAlpha = 0.5;
+    g.drawImage(this.scanlines, 0, 0);
+    g.globalAlpha = 1;
+  }
+
+  makeVignette() {
+    const c = document.createElement('canvas');
+    c.width = W; c.height = H;
+    const x = c.getContext('2d');
+    const grad = x.createRadialGradient(CX, H / 2, H * 0.42, CX, H / 2, H * 0.85);
+    grad.addColorStop(0, 'rgba(0,0,0,0)');
+    grad.addColorStop(1, 'rgba(0,0,0,0.55)');
+    x.fillStyle = grad;
+    x.fillRect(0, 0, W, H);
+    return c;
+  }
+
+  makeScanlines() {
+    const c = document.createElement('canvas');
+    c.width = W; c.height = H;
+    const x = c.getContext('2d');
+    x.fillStyle = 'rgba(0,0,0,0.14)';
+    for (let y = 0; y < H; y += 4) x.fillRect(0, y, W, 2);
+    return c;
+  }
+
+  drawTitle(g, now) {
+    g.fillStyle = 'rgba(0,0,0,0.72)';
+    g.fillRect(0, 0, W, H);
+    g.textAlign = 'center';
+
+    // título com onda e cor ciclante por letra
+    const title = 'EVERHOOD BATTLE';
+    g.font = 'bold 58px monospace';
+    let tw = 0;
+    const widths = [...title].map(ch => { const w = g.measureText(ch).width; tw += w; return w; });
+    let cx = CX - tw / 2;
+    [...title].forEach((ch, i) => {
+      const yo = Math.sin(now * 3 + i * 0.5) * 8;
+      g.save();
+      g.shadowColor = `hsl(${(now * 60 + i * 24) % 360}, 100%, 60%)`;
+      g.shadowBlur = 18;
+      g.fillStyle = `hsl(${(now * 60 + i * 24) % 360}, 95%, 65%)`;
+      g.textAlign = 'left';
+      g.fillText(ch, cx, 250 + yo);
+      g.restore();
+      cx += widths[i];
+    });
+
+    // painel de controles
+    g.fillStyle = 'rgba(255,255,255,0.06)';
+    g.beginPath(); g.roundRect(CX - 290, 320, 580, 180, 14); g.fill();
+    g.strokeStyle = 'rgba(255,255,255,0.2)';
+    g.stroke();
+    g.fillStyle = '#fff';
+    g.font = '21px monospace';
+    const lines = [
+      'SETAS  mover        ESPAÇO  pular',
+      'Z  absorver nota no tempo certo',
+      'X  disparar energia no inimigo',
+    ];
+    lines.forEach((l, i) => g.fillText(l, CX, 368 + i * 42));
+
+    if (Math.floor(now * 1.6) % 2 === 0) {
+      g.fillStyle = `hsl(${(now * 80) % 360}, 90%, 70%)`;
+      g.font = 'bold 23px monospace';
+      g.fillText('pressione qualquer tecla', CX, 560);
+    }
+    g.textAlign = 'left';
+  }
+
+  drawEnd(g, text, color, now) {
+    g.fillStyle = 'rgba(0,0,0,0.62)';
+    g.fillRect(0, 0, W, H);
+    g.textAlign = 'center';
+    g.save();
+    g.shadowColor = color;
+    g.shadowBlur = 26 + Math.sin(now * 4) * 10;
+    g.fillStyle = color;
+    g.font = 'bold 64px monospace';
+    g.fillText(text, CX, 330 + Math.sin(now * 2.5) * 5);
+    g.restore();
+    g.fillStyle = '#fff';
+    g.font = '22px monospace';
+    if (Math.floor(now * 1.6) % 2 === 0) g.fillText('ENTER para jogar de novo', CX, 400);
+    g.textAlign = 'left';
+  }
+}
+</script>
+<script>
+
+const game = new Game(document.getElementById('game'));
+window.game = game; // depuração/testes
+
+addEventListener('keydown', (e) => {
+  if (['ArrowLeft', 'ArrowRight', 'ArrowUp', ' '].includes(e.key)) e.preventDefault();
+  if (!e.repeat) game.onKey(e);
+});
+
+function loop() {
+  game.update();
+  game.draw();
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body></html>

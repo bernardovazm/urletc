@@ -14,6 +14,10 @@
 // code, sealed over the same per-peer ratchet. It is how a peer you can merely SEE in the
 // online list becomes a peer you can message: they hand you a room to join. Receiving one
 // never joins anything (see onInvite).
+//
+// A fifth stream, 'hist', is the mirror image: it exists only on sessions opened with
+// allowHistory (never presenceOnly, never nearby) and carries only past chat records, so
+// a peer joining a room later can be handed what was said before it arrived.
 
 import { getRelaySockets, joinRoom, selfId, type Room } from 'trystero/nostr'
 import { aesKeyFromBytes, b64ToBytes, bytesToB64, deriveSharedSecret, randomBytes, safetyNumber, sha256, signEd25519, toHex, verifyEd25519 } from '../core/crypto'
@@ -84,6 +88,29 @@ const MAX_INCOMING_FILES = 16 // concurrent in-flight receives
 const MAX_CODE_CHARS = 20 // inbound join code ceiling (the Connect field's own maxlength)
 const MIN_CODE_CHARS = 4 // shorter than this is not a room, it is a typo
 
+// --- Replayable history ---------------------------------------------------------------
+// There is no server, so "what was said before you arrived" lives on the devices that were
+// there. A joiner PULLS it from a peer that already holds it. Four properties keep that
+// from becoming the worst leak in the app (ARCHITECTURE section 9.1):
+//
+//   1. The path exists only on a session opened with `allowHistory`, and never on a
+//      presenceOnly one. Checked here, in the session layer, so a tier cannot be opted in
+//      by someone later editing a list in the console.
+//   2. Answering requires a provider the app installed. No provider is silence, which is
+//      also what an empty room looks like, so the setting itself does not leak.
+//   3. Records are accepted only from a peer we asked, once, capped. Unsolicited history
+//      is dropped: this is a pull, never a push.
+//   4. The stream carries records and nothing else. It cannot make a peer join a room,
+//      publish media, install a tool or run anything.
+const HISTORY_CHUNK = 25 // records per outbound message
+const MAX_HISTORY_ITEMS = 500 // records sent in one answer, and accepted from one peer per session
+const MAX_HISTORY_CHUNK = 50 // inbound records read from a single message; the rest is discarded
+const MAX_HISTORY_FUTURE_MS = 5 * 60_000 // clock skew tolerated on an inbound timestamp
+const MIN_HISTORY_TS = Date.UTC(2020, 0, 1) // sanity floor; retention policy is the app's, not the wire's
+// Message ids are minted by the sender and are the dedupe key on arrival, so they are
+// bounded and character-restricted like every other inbound string.
+const HISTORY_ID_RE = /^[A-Za-z0-9_.:-]{1,64}$/
+
 // --- Uplink adaptation ----------------------------------------------------------------
 // Transport tuning only. It reads this room's own senders and never changes who receives
 // what, so the tier rules in the console still decide routing on their own.
@@ -138,6 +165,9 @@ export interface RosterPeer {
 }
 
 export interface ChatMessage {
+  /** Minted by the SENDER and carried on the wire, so a message replayed later by two
+   *  different peers is recognisably one message. This is the history dedupe key. */
+  id: string
   peerId: string
   deviceId: string
   name: string
@@ -147,6 +177,9 @@ export interface ChatMessage {
 }
 
 export interface ReceivedFile {
+  /** The sender's fileId. Stable across recipients, so a file reference kept in history
+   *  and replayed by two different peers is recognised as one file. */
+  id: string
   name: string
   ftype: string
   url: string
@@ -169,6 +202,22 @@ export interface InviteSignal {
   name: string
   pubKeyHex: string
   code: string // validated 4..20 char code for `offer`, empty otherwise
+}
+
+/**
+ * One replayable feed entry. `kind: 'file'` is a REFERENCE only: `text` is the file name
+ * and `size` its byte count. File bytes are never persisted or replayed, because a blob
+ * URL does not survive a reload and re-sending megabytes to every late joiner is not
+ * what "history" should mean.
+ */
+export interface HistoryRecord {
+  id: string
+  deviceId: string // author, a hash of their identity key (they cannot choose it)
+  name: string
+  text: string
+  ts: number
+  kind: 'chat' | 'file'
+  size?: number
 }
 
 export interface SessionEvents {
@@ -199,7 +248,7 @@ export interface RoomSession {
    * these across tiers (personal/nearby/code) so a device present in two rooms
    * receives each message exactly once. No local echo: the caller renders its own.
    */
-  sendChat(text: string, skipKeys?: ReadonlySet<string>): Promise<string[]>
+  sendChat(text: string, skipKeys?: ReadonlySet<string>, id?: string): Promise<string[]>
   sendFile(file: File, skipKeys?: ReadonlySet<string>): Promise<string[]>
   /** Rename this device live: connected peers get a ratcheted announce; future
    *  handshakes carry the new name. (Names travel only in the handshake otherwise,
@@ -231,6 +280,19 @@ export interface RoomSession {
    * client derives.
    */
   sendInvite(peerId: string, code: string): Promise<boolean>
+  /**
+   * Configure replayable history. Sending and receiving are SEPARATE decisions and are
+   * passed as separate fields: `provide` non-null installs the answerer for inbound
+   * requests, `request` asks every authenticated peer for theirs, `onRecords` receives
+   * what comes back. `{provide: null, request: false, onRecords: null}` makes the session
+   * inert on this path, which is also its state until this is called.
+   *
+   * Ignored outright on a session without `allowHistory`, which is how nearby and
+   * presence stay incapable of carrying history no matter what the caller asks for.
+   */
+  setHistory(cfg: { provide: (() => HistoryRecord[]) | null; request: boolean; onRecords: ((records: HistoryRecord[], fromPeerId: string) => void) | null }): void
+  /** Whether this session may carry history at all. */
+  historyCapable(): boolean
   /** Retract an invite you sent, so their prompt disappears. */
   withdrawInvite(peerId: string): Promise<boolean>
   /** Refuse an invite they sent, so their pending state clears. */
@@ -255,8 +317,12 @@ export function getAllSessions(): RoomSession[] {
 
 type HsPayload = { eph: string; idPub: string; sig: string; name: string }
 type FileChunk = { fileId: string; i: number; iv: string; ct: string }
-type Envelope = { t: 'chat'; text: string } | { t: 'name'; name: string } | { t: 'file'; fileId: string; name: string; ftype: string; size: number; total: number; key: string }
+type Envelope =
+  | { t: 'chat'; id: string; text: string }
+  | { t: 'name'; name: string }
+  | { t: 'file'; fileId: string; name: string; ftype: string; size: number; total: number; key: string }
 type InviteEnvelope = { t: 'offer'; code: string } | { t: 'withdraw' } | { t: 'decline' }
+type HistEnvelope = { t: 'hreq' } | { t: 'hres'; items: HistoryRecord[] }
 
 interface PeerState {
   eph: CryptoKeyPair
@@ -266,6 +332,7 @@ interface PeerState {
 }
 
 interface Incoming {
+  id: string // sender's fileId, carried through to ReceivedFile
   from: string // deviceId of the sender, carried through to ReceivedFile
   name: string
   ftype: string
@@ -307,6 +374,13 @@ export async function joinRoomSession(opts: {
    * tier to a list somewhere else.
    */
   presenceOnly?: boolean
+  /**
+   * Permit the 'hist' stream on this session. Off by default, so a new tier is opted OUT
+   * of replaying what was said before a peer arrived until someone says otherwise, the
+   * same failure direction as MEDIA_TIERS. Never combine with presenceOnly: the two are
+   * ANDed below and presenceOnly wins.
+   */
+  allowHistory?: boolean
   events: SessionEvents
 }): Promise<RoomSession> {
   const ev = opts.events
@@ -345,8 +419,22 @@ export async function joinRoomSession(opts: {
   // the same per-peer channel, which is safe because each SealedMessage carries its own
   // counter `n`, so a message dropped on one stream cannot desync the other.
   const inv = room.makeAction<SealedMessage>('inv')
+  // Same reasoning as 'inv': its own action, so the presenceOnly / allowHistory check that
+  // governs it is one unconditional line at the top of one handler rather than a case
+  // buried in the Envelope switch that someone can later add a branch beside.
+  const hist = room.makeAction<SealedMessage>('hist')
   let toolHandler: ((m: Manifest, fromName: string) => void) | null = null
   let gameHandler: ((payload: unknown, fromPeerId: string) => void) | null = null
+
+  // History capability. presenceOnly wins over allowHistory, so a caller that sets both
+  // gets a session that carries nothing. Everything below stays inert until setHistory().
+  const historyOk = !!opts.allowHistory && !opts.presenceOnly
+  let historyProvide: (() => HistoryRecord[]) | null = null
+  let historyRequest = false
+  let historyRecords: ((records: HistoryRecord[], fromPeerId: string) => void) | null = null
+  const historyServed = new Set<string>() // peers already answered: one answer each, ever
+  const historyAsked = new Set<string>() // peers we asked: ONLY these may hand us records
+  const historyTaken = new Map<string, number>() // records accepted per peer, capped
 
   const emitRoster = () => ev.onRoster?.([...peers.values()].map((p) => p.info))
 
@@ -380,6 +468,9 @@ export async function joinRoomSession(opts: {
   room.onPeerLeave = (peerId: string) => {
     const st = peers.get(peerId)
     peers.delete(peerId)
+    historyServed.delete(peerId)
+    historyAsked.delete(peerId)
+    historyTaken.delete(peerId)
     emitRoster()
     ev.onPeerLeave?.(peerId)
     if (st?.info.ready) ev.onSystem?.(`${st.info.name} left.`)
@@ -430,6 +521,9 @@ export async function joinRoomSession(opts: {
     // meta is always a {kind,label} object (or undefined), a valid JSON value for Trystero.
     for (const [stream, meta] of activeStreams) room.addStream(stream, { target: peerId, metadata: meta as Record<string, string> | undefined })
     runAdaptTick() // the new peer's senders start on the browser default until this asserts the profile
+    // Backfill is requested at exactly this point: after the peer's signature verified and
+    // its ratchet exists, so the ask is authenticated and sealed like everything else.
+    void askHistory(peerId, st)
   }
 
   async function handleChunk(fileId: string, chunk: FileChunk) {
@@ -451,7 +545,7 @@ export async function joinRoomSession(opts: {
         incoming.delete(fileId)
         const url = URL.createObjectURL(blob)
         receivedUrls.add(url)
-        ev.onFileReceived?.({ name: inc.name, ftype: inc.ftype, url, size: inc.size, from: inc.from })
+        ev.onFileReceived?.({ id: inc.id, name: inc.name, ftype: inc.ftype, url, size: inc.size, from: inc.from })
       }
     } catch {
       ev.onSystem?.('⚠ Failed to decrypt a file chunk.')
@@ -475,7 +569,19 @@ export async function joinRoomSession(opts: {
       // the feed.
       const text = String(env.text ?? '').slice(0, MAX_CHAT_CHARS)
       if (!text) return
-      ev.onChat?.({ peerId: ctx.peerId, deviceId: st.info.deviceId, name: st.info.name, text, ts: Date.now(), mine: false })
+      // The id is the SENDER's, so two peers replaying the same message later agree on
+      // what one message is. Bounded like any other inbound string; a peer that sends
+      // none (or a malformed one) gets a local id, which only costs dedupe against it.
+      const rawId = String(env.id ?? '')
+      ev.onChat?.({
+        id: HISTORY_ID_RE.test(rawId) ? rawId : crypto.randomUUID(),
+        peerId: ctx.peerId,
+        deviceId: st.info.deviceId,
+        name: st.info.name,
+        text,
+        ts: Date.now(),
+        mine: false,
+      })
     } else if (env.t === 'name') {
       const name = String(env.name).trim().slice(0, MAX_NAME_CHARS) || 'anon'
       if (st.info.name !== name) {
@@ -483,6 +589,9 @@ export async function joinRoomSession(opts: {
         emitRoster()
       }
     } else if (env.t === 'file') {
+      // fileId keys two maps and now also identifies a stored history record, so it is
+      // bounded here rather than trusted. Ours are UUIDs, which pass.
+      if (!HISTORY_ID_RE.test(String(env.fileId ?? ''))) return
       if (!Number.isInteger(env.total) || env.total < 1 || env.total > MAX_FILE_CHUNKS) {
         ev.onSystem?.('⚠ Rejected an oversized or malformed file offer.')
         return
@@ -503,7 +612,7 @@ export async function joinRoomSession(opts: {
       const ftype = String(env.ftype ?? '').slice(0, MAX_MIME_CHARS)
       const fsize = Number.isFinite(env.size) && env.size >= 0 ? env.size : 0
       const key = await aesKeyFromBytes(b64ToBytes(env.key))
-      incoming.set(env.fileId, { from: st.info.deviceId, name: fname, ftype, size: fsize, total: env.total, key, chunks: new Array(env.total), received: 0 })
+      incoming.set(env.fileId, { id: env.fileId, from: st.info.deviceId, name: fname, ftype, size: fsize, total: env.total, key, chunks: new Array(env.total), received: 0 })
       ev.onSystem?.(`Incoming file "${fname}" (${Math.round(fsize / 1024)} KB)...`)
       const pend = pendingChunks.get(env.fileId)
       if (pend) {
@@ -518,6 +627,7 @@ export async function joinRoomSession(opts: {
     // Only handshake-authenticated peers may send file data (the per-file key was
     // delivered over their ratchet anyway). This + the caps below bound the buffer.
     if (!peers.get(ctx.peerId)?.channel) return
+    if (!HISTORY_ID_RE.test(String(data.fileId ?? ''))) return // same bound as the offer above
     if (!incoming.has(data.fileId)) {
       if (pendingChunks.size >= MAX_PENDING_FILES) return
       const arr = pendingChunks.get(data.fileId) ?? []
@@ -579,6 +689,95 @@ export async function joinRoomSession(opts: {
     } else if (env.t === 'withdraw' || env.t === 'decline') {
       ev.onInvite?.({ ...who, kind: env.t, code: '' })
     }
+  }
+
+  /**
+   * Validate one inbound history record. Every field is peer-controlled, so each is
+   * bounded here at the session boundary exactly like inbound chat text, display names
+   * and file metadata. A record that is not well-formed is DROPPED, never repaired:
+   * a missing id would defeat dedupe, and a bogus timestamp would reorder the replay.
+   */
+  function sanitizeHistory(v: unknown): HistoryRecord | null {
+    if (!v || typeof v !== 'object') return null
+    const r = v as Record<string, unknown>
+    const kind = r.kind === 'file' ? 'file' : r.kind === 'chat' ? 'chat' : null
+    if (!kind) return null
+    const id = String(r.id ?? '')
+    if (!HISTORY_ID_RE.test(id)) return null
+    const ts = Number(r.ts)
+    if (!Number.isFinite(ts) || ts < MIN_HISTORY_TS || ts > Date.now() + MAX_HISTORY_FUTURE_MS) return null
+    // A file record is a name, not bytes, so it is capped as a file name would be.
+    const text = String(r.text ?? '').slice(0, kind === 'file' ? MAX_FILENAME_CHARS : MAX_CHAT_CHARS)
+    if (!text) return null
+    const rawDevice = String(r.deviceId ?? '')
+    const size = Number(r.size)
+    return {
+      id,
+      // deviceId is a SHA-256 hex digest in every record we mint. Anything else is not
+      // an author we can attribute, so it becomes no author rather than a free string.
+      deviceId: /^[0-9a-f]{1,64}$/.test(rawDevice) ? rawDevice : '',
+      name:
+        String(r.name ?? '')
+          .trim()
+          .slice(0, MAX_NAME_CHARS) || 'anon',
+      text,
+      ts: Math.floor(ts),
+      kind,
+      size: Number.isFinite(size) && size >= 0 ? size : 0,
+    }
+  }
+
+  // History channel. Only on sessions that may carry it, only between authenticated
+  // peers, only records, and only as an answer to a request we made.
+  hist.onMessage = async (data, ctx) => {
+    if (!historyOk) return // nearby / presence / any tier not opted in: the stream does not exist here
+    const st = peers.get(ctx.peerId)
+    if (!st?.channel) return // handshake-authenticated peers only
+    let env: HistEnvelope
+    try {
+      // Sealed, so a replayed request is refused by the ratchet before it is parsed.
+      env = JSON.parse(dec.decode(await st.channel.open(data))) as HistEnvelope
+    } catch {
+      return // malformed or replayed: dropped in silence
+    }
+    if (env.t === 'hreq') {
+      // No provider means the app has not agreed to share into this room. That answers
+      // with silence, which is exactly what an empty room answers, so a peer cannot probe
+      // the setting. A second request is ignored: one answer per peer, so a request
+      // cannot be looped to make us re-encrypt and re-send the whole store.
+      if (!historyProvide || historyServed.has(ctx.peerId)) return
+      historyServed.add(ctx.peerId)
+      const all = historyProvide().slice(-MAX_HISTORY_ITEMS)
+      for (let i = 0; i < all.length; i += HISTORY_CHUNK) {
+        const items = all.slice(i, i + HISTORY_CHUNK)
+        await hist.send(await st.channel.seal(enc.encode(JSON.stringify({ t: 'hres', items } satisfies HistEnvelope))), { target: ctx.peerId })
+      }
+      return
+    }
+    if (env.t !== 'hres') return
+    // A pull, never a push. Records from a peer we did not ask are dropped, so no peer
+    // can seed our feed (or our own future replays) on its own initiative.
+    if (!historyRecords || !historyAsked.has(ctx.peerId)) return
+    const taken = historyTaken.get(ctx.peerId) ?? 0
+    if (taken >= MAX_HISTORY_ITEMS) return
+    const raw = Array.isArray(env.items) ? env.items.slice(0, MAX_HISTORY_CHUNK) : []
+    const clean: HistoryRecord[] = []
+    for (const item of raw) {
+      if (taken + clean.length >= MAX_HISTORY_ITEMS) break
+      const rec = sanitizeHistory(item)
+      if (rec) clean.push(rec)
+    }
+    if (!clean.length) return
+    historyTaken.set(ctx.peerId, taken + clean.length)
+    historyRecords(clean, ctx.peerId)
+  }
+
+  /** Ask one authenticated peer for what it holds. Once per peer per session. */
+  async function askHistory(peerId: string, st: PeerState): Promise<void> {
+    if (!historyOk || !historyRequest || !st.channel) return
+    if (historyAsked.has(peerId)) return
+    historyAsked.add(peerId) // set BEFORE the send: this is also the "may answer us" gate
+    await hist.send(await st.channel.seal(enc.encode(JSON.stringify({ t: 'hreq' } satisfies HistEnvelope))), { target: peerId })
   }
 
   /** Seal one invite signal to one authenticated peer. False when that is not possible. */
@@ -799,12 +998,23 @@ export async function joinRoomSession(opts: {
       return sendInviteEnvelope(peerId, { t: 'decline' })
     },
 
-    async sendChat(text: string, skipKeys?: ReadonlySet<string>) {
+    setHistory(cfg) {
+      if (!historyOk) return // the one place a caller's intent is overruled, on purpose
+      historyProvide = cfg.provide
+      historyRequest = cfg.request
+      historyRecords = cfg.onRecords
+      // A setting flipped after the room filled must still reach the peers already in it,
+      // otherwise "ask for history" would only ever take effect on the next join.
+      if (historyRequest) for (const [peerId, st] of peers) if (st.channel) void askHistory(peerId, st)
+    },
+    historyCapable: () => historyOk,
+
+    async sendChat(text: string, skipKeys?: ReadonlySet<string>, id: string = crypto.randomUUID()) {
       if (opts.presenceOnly) return []
       const sent: string[] = []
       for (const [peerId, st] of peers) {
         if (!st.channel || skipKeys?.has(st.info.pubKeyHex)) continue
-        await msg.send(await st.channel.seal(enc.encode(JSON.stringify({ t: 'chat', text } satisfies Envelope))), { target: peerId })
+        await msg.send(await st.channel.seal(enc.encode(JSON.stringify({ t: 'chat', id, text } satisfies Envelope))), { target: peerId })
         sent.push(st.info.pubKeyHex)
       }
       return sent
@@ -876,6 +1086,12 @@ export async function joinRoomSession(opts: {
       pendingChunks.clear()
       toolHandler = null
       gameHandler = null
+      historyProvide = null
+      historyRecords = null
+      historyRequest = false
+      historyServed.clear()
+      historyAsked.clear()
+      historyTaken.clear()
       liveSessions.delete(api)
       if (active === api) active = null
     },

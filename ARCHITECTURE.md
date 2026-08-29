@@ -442,6 +442,13 @@ short list to check a change against.
 - **The nearby and presence tiers are untrusted.** No clipboard auto-share and no local
   media, ever. The presence tier additionally carries no chat, files or gossip in either
   direction, enforced in the session layer and not only in the console.
+- **Feed history is a tier capability, pulled and never pushed.** It is an allow-list of
+  personal and code, never nearby and never presence, and a presenceOnly session is
+  structurally incapable of carrying it. Sending into a code room is opt in and off by
+  default, because a six character code reaches whoever it was forwarded to. Records are
+  only ever accepted from a peer we asked, so nobody can seed another device's feed, and a
+  record replayed to you is never re-served, so one holder's opt-out cannot be laundered
+  through the next peer along.
 - **Crypto.** Native WebCrypto only, never a JS-crypto polyfill, keys non-extractable.
   Encrypted-at-rest is not an XSS control; CSP and Trusted Types are.
 - **Dependencies** are exact-pinned with a committed lockfile. Self-host assets where that

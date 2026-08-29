@@ -1,6 +1,6 @@
 # utilscript
 
-Client-only TypeScript SPA: nineteen offline utility modules plus encrypted
+Client-only TypeScript SPA: more than twenty utility modules plus encrypted
 device-to-device chat, file transfer, voice, video and screen sharing over WebRTC. Vite, no
 UI framework, no backend.
 
@@ -9,15 +9,20 @@ Live: [utilscript.vercel.app](https://utilscript.vercel.app)
 ## Features
 
 - **Utilities.** Clipboard router, image to text, speech to text, text to speech, HTML to
-  text, URL inspector, text tools, JSON, Base64, hashing, diff, timestamps, test data
-  generators, microphone and camera check. Each module is lazily loaded and has its own
-  deep link.
+  text, URL inspector, URL safety scoring, subtitle conversion and retiming, disposable
+  inbox, link shortener, text tools, JSON, Base64, hashing, diff, timestamps, test data
+  generators for any country, session uptime, microphone and camera check. Each module is
+  lazily loaded and has its own deep link. Everything runs on the device except the
+  disposable inbox and the link shortener, which are named as such in the tool list.
 - **Discovery.** Same-network peers, a six character code for anyone anywhere, or a
   permanent pairing between your own devices. Opt-in presence list.
 - **Transport.** Text and files are end to end encrypted with a per-session HKDF ratchet
   for forward secrecy. Audio, video and screen use the browser's own DTLS-SRTP transport.
 - **Stage.** Multi source grid, spotlight and solo layouts, per source fullscreen and
   recording, plus a link usable as an OBS browser source.
+- **History.** A peer joining later can be sent what was already in the feed, so a room is
+  not empty for whoever arrives second. Paired devices sync by default; a code room shares
+  only when you turn it on, because a code travels to whoever it is forwarded to.
 - **Workshop.** Ed25519-signed tools shared between peers, verified before display and run
   in a null-origin sandbox behind two separate approvals.
 

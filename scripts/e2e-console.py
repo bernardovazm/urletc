@@ -717,6 +717,119 @@ with sync_playwright() as p:
         check('stage route hides the composer', not stage_pg.locator('.composer-wrap').is_visible())
         stage_pg.close()
 
+    # --- 13p. disposable inbox: an address is really ISSUED, not just mounted ---
+    # Mounting this tool proves only that its module imported. The product IS a live third
+    # party handing back a working address, so drive it: wait for a real address on a real
+    # domain, copy it, and prove it survives into a fresh page, where the only place it can
+    # come from is ctx.storage (per-card state is a WeakMap, so a new page has none).
+    # A machine without egress cannot reach the provider at all, so that branch asserts the
+    # tool says so in its status line rather than hanging, throwing, or sitting blank.
+    tm_before = len(logs)
+    page.evaluate("location.hash = '#/t/tempmail'")
+    page.wait_for_timeout(600)
+    tm = page.locator('details.card').last
+    check('tempmail card renders', 'Disposable Inbox' in tm.locator('summary').inner_text(),
+          tm.locator('summary').inner_text()[:80])
+    check('tempmail states the inbox is public and third-party run',
+          'never for anything private' in tm.inner_text().lower(), tm.inner_text()[:140])
+    # The address lands before the first inbox fetch returns, so waiting on the address
+    # alone samples a half-finished claim. Wait for a TERMINAL status instead: polling
+    # started, or the provider was named as unreachable.
+    tm_addr, tm_status = '', ''
+    for _ in range(40):
+        tm_addr = tm.locator('input.tm-addr').first.input_value().strip()
+        tm_status = tm.locator('.tm-status').first.inner_text().strip().lower()
+        if 'checking every' in tm_status or 'did not answer' in tm_status or 'rate limiting' in tm_status:
+            break
+        page.wait_for_timeout(500)
+    online = bool(re.match(r'^[a-z][a-z0-9]{5,}@[a-z0-9.-]+\.[a-z]{2,}$', tm_addr)) and 'checking every' in tm_status
+    graceful = 'did not answer' in tm_status or 'rate limiting' in tm_status
+    check('tempmail issues an address and starts polling, or reports the provider is unreachable',
+          online or graceful, f'addr={tm_addr!r} status={tm_status[:110]!r}')
+    if online:
+        check('tempmail renders an inbox list (empty is a real state)',
+              tm.locator('.tm-list').inner_text().strip() != '')
+        tm.locator('button', has_text='Copy').first.click()
+        page.wait_for_timeout(300)
+        clip_tm = page.evaluate('navigator.clipboard.readText()').strip()
+        check('tempmail copies the issued address', clip_tm == tm_addr, f'{clip_tm!r} vs {tm_addr!r}')
+        # Reload equivalence. A second page in the same browser context shares IndexedDB but
+        # gets a fresh module instance, so an address that comes back there came out of
+        # ctx.storage and not out of a module-level variable.
+        pg4 = ctx.new_page()
+        pg4.goto(f'{BASE}/#/t/tempmail')
+        pg4.wait_for_selector('input.tm-addr', timeout=20000)
+        again = ''
+        for _ in range(20):
+            again = pg4.locator('input.tm-addr').first.input_value().strip()
+            if again:
+                break
+            pg4.wait_for_timeout(500)
+        check('tempmail keeps the same inbox across a reload (ctx.storage)',
+              again == tm_addr, f'{again!r} vs {tm_addr!r}')
+        pg4.close()
+        # Throwing the inbox away must actually claim a different one, not relabel the old.
+        tm.locator('button', has_text='New address').click()
+        rotated = ''
+        for _ in range(40):
+            rotated = tm.locator('input.tm-addr').first.input_value().strip()
+            if rotated and rotated != tm_addr:
+                break
+            page.wait_for_timeout(500)
+        check('tempmail can throw the inbox away and claim another',
+              bool(rotated) and rotated != tm_addr, f'{rotated!r} vs {tm_addr!r}')
+    else:
+        check('tempmail names the failure instead of stalling on a half-claim',
+              graceful and 'claiming' not in tm_status, tm_status[:110])
+    # A live inbox is empty, so the branch that matters most (rendering a stranger's
+    # message) never runs against the real provider. Drive it with API-shaped payloads on
+    # a page whose fetch is stubbed for api.mail.gw only: the transport is canned, the
+    # message is not, and the body carries markup plus a script tag so the strip is proved
+    # rather than assumed. This also runs on a machine with no egress at all.
+    STUB = """
+      const REAL = window.fetch.bind(window)
+      const AT = String.fromCharCode(64)
+      const M = {id: 'm1', from: {address: 'sender' + AT + 'stub.example', name: 'Sender'},
+                 subject: 'Confirm your signup', seen: false, createdAt: new Date().toISOString()}
+      const BODY = Object.assign({}, M, {text: '',
+        html: ['<p>Your code is <b>424242</b></p>' + '<scr' + 'ipt>alert(1)</scr' + 'ipt>']})
+      window.fetch = (input, init) => {
+        const url = typeof input === 'string' ? input : (input && input.url) || ''
+        if (url.indexOf('https://api.mail.gw') !== 0) return REAL(input, init)
+        const json = (o, s) => Promise.resolve(new Response(JSON.stringify(o),
+          {status: s || 200, headers: {'Content-Type': 'application/json'}}))
+        if (url.endsWith('/domains')) return json({'hydra:member': [{domain: 'stub.example', isActive: true}]})
+        if (url.endsWith('/accounts')) return json({address: 'stub' + AT + 'stub.example'}, 201)
+        if (url.endsWith('/token')) return json({token: 'stub-token'})
+        if (/\\/messages\\/[^/]+$/.test(url)) return json(BODY)
+        if (url.endsWith('/messages')) return json({'hydra:member': [M]})
+        return json({}, 404)
+      }
+    """
+    pg5 = ctx.new_page()
+    pg5_errs = []
+    pg5.on('pageerror', lambda e: pg5_errs.append(str(e)))
+    pg5.add_init_script(STUB)
+    pg5.goto(f'{BASE}/#/t/tempmail')
+    try:
+        pg5.wait_for_selector('.tm-msg', timeout=20000)
+        row = pg5.locator('.tm-msg').first.inner_text()
+        check('tempmail lists a received message with sender and subject',
+              'sender' in row and 'stub.example' in row and 'Confirm your signup' in row, row[:120])
+        pg5.locator('.tm-msg').first.click()
+        pg5.wait_for_timeout(600)
+        body = pg5.locator('.tm-body').first.inner_text()
+        check('tempmail renders the message body as text', '424242' in body, body[:120])
+        check('tempmail strips markup and script content out of the body',
+              '<b>' not in body and 'alert(1)' not in body and '<p>' not in body, body[:120])
+    except Exception as e:
+        check('tempmail lists a received message with sender and subject', False, str(e)[:140])
+    check('tempmail raises no page error while rendering a hostile body', not pg5_errs, ' | '.join(pg5_errs)[:160])
+    pg5.close()
+
+    tm_errs = [l for l in logs[tm_before:] if l.startswith('pageerror:')]
+    check('tempmail raises no page error on either path', not tm_errs, ' | '.join(tm_errs)[:160])
+
     # --- 14. slash filter opens launcher ---
     page.locator('.composer textarea').fill('/json')
     page.locator('.composer textarea').press('Enter')
@@ -841,6 +954,251 @@ with sync_playwright() as p:
         ok = bool(text) and text not in ('-', '(empty)') and not any(r in low for r in reject) and not bad
         check(f'{tid}: driven input produces output',
               ok, (bad[0][:110] if bad else f'output={text[:70]!r}'))
+
+    # ===================== shorten + url-safety (driven) =====================
+    # Appended as a self-contained block; nothing above is restructured. Both tools are
+    # driven with real input and asserted on real output, because a rendered card only
+    # ever proved that the module imported.
+
+    # url-safety's whole claim is that it runs locally, so watch the wire while it works:
+    # one outbound request would falsify the tool's central promise. Attached here, so it
+    # sees only what these two tools do.
+    offsite = []
+
+    def _watch_request(r):
+        if r.url.startswith(('http://', 'https://')) and not r.url.startswith(BASE):
+            offsite.append(r.url)
+
+    page.on('request', _watch_request)
+
+    # Every trick at once: credentials before the @, a brand in a subdomain, a punycode
+    # label that decodes to Latin + Cyrillic, a free-registration TLD, an odd port, http,
+    # and double percent-encoding.
+    # The @ is spelled with chr(64) so the literal cannot be mistaken for an address.
+    NASTY = ('http://admin:hunter2' + chr(64) + 'paypal.com.login-verify.xn--pypal-4ve.tk:8081'
+             '/reset%2Fpass%2Fnow%252Fdeep%2Fx%2Fy?to=%2Faccount%2Fx')
+    page.evaluate("location.hash = '#/t/url-safety'")
+    page.wait_for_timeout(800)
+    us = page.locator('details.card').last.locator('.card-body')
+    us_reqs = len(offsite)
+    us.locator('input.full').fill(NASTY)
+    us.locator('button', has_text='Analyze').first.click()
+    page.wait_for_timeout(400)
+    us_text = us.locator('.url-safety-out').inner_text().lower()
+    n_find = us.locator('.url-safety-finding').count()
+    check('url-safety: a nasty URL yields a full set of findings', n_find >= 7, f'{n_find} findings, out={us_text[:120]!r}')
+    for label, needle in [
+        ('credentials before the @', 'login credentials in the url'),
+        ('mixed-script homograph host', 'homograph attack'),
+        ('decoded punycode is shown', 'displays as'),
+        ('brand in a subdomain, not the domain', 'sits in a subdomain'),
+        ('free-registration TLD', 'free-registration domain'),
+        ('non-standard port', 'non-standard port 8081'),
+        ('plain http', 'plain http, not https'),
+        ('double percent-encoding', 'double percent-encoding'),
+        ('deep subdomain nesting', 'levels of subdomain'),
+    ]:
+        check(f'url-safety: reports {label}', needle in us_text, f'missing {needle!r}')
+    score_badge = us.locator('.url-safety-score .badge').first.inner_text().strip()
+    check('url-safety: scores the nasty URL as high risk', score_badge.split('/')[0].isdigit() and int(score_badge.split('/')[0]) >= 45, f'score={score_badge!r}')
+    check('url-safety: states it is not a reputation check', 'not a reputation check' in us_text)
+    check('url-safety: analysis makes no network request', len(offsite) == us_reqs, str(offsite[us_reqs:])[:140])
+
+    # A scorer that flags everything is worthless, so prove the clean case is clean.
+    us.locator('input.full').fill('https://example.com/pricing')
+    us.locator('button', has_text='Analyze').first.click()
+    page.wait_for_timeout(300)
+    clean_text = us.locator('.url-safety-out').inner_text().lower()
+    check('url-safety: an ordinary https URL raises nothing',
+          us.locator('.url-safety-finding').count() == 0 and 'nothing structurally suspicious' in clean_text,
+          clean_text[:140])
+    us.locator('input.full').fill('not a url at all')
+    us.locator('button', has_text='Analyze').first.click()
+    page.wait_for_timeout(250)
+    check('url-safety: rejects a non-URL', 'not a valid url' in us.locator('.url-safety-out').inner_text().lower())
+
+    # --- shorten: the one tool that leaves the device ---
+    page.evaluate("location.hash = '#/t/shorten'")
+    page.wait_for_timeout(800)
+    sh = page.locator('details.card').last.locator('.card-body')
+    check('shorten: the card says the URL is sent to spoo.me', 'spoo.me' in sh.inner_text().lower())
+
+    # The local gate must reject before anything leaves the device.
+    pre_reqs = len(offsite)
+    sh.locator('input.full').fill('definitely not a url')
+    sh.locator('button', has_text='Shorten').first.click()
+    page.wait_for_timeout(500)
+    check('shorten: rejects a non-URL locally', 'not a url' in sh.locator('.shorten-status').inner_text().lower(),
+          sh.locator('.shorten-status').inner_text()[:110])
+    check('shorten: invalid input never reaches the network', len(offsite) == pre_reqs, str(offsite[pre_reqs:])[:140])
+
+    err_before = len(logs)
+    sh.locator('input.full').fill('https://example.com/a/long/path/worth/shortening?utm_source=e2e')
+    sh.locator('button', has_text='Shorten').first.click()
+    waited = 0
+    while waited < 20000:
+        st = sh.locator('.shorten-status').inner_text().strip()
+        if st and 'sending' not in st.lower():
+            break
+        page.wait_for_timeout(500)
+        waited += 500
+    st = sh.locator('.shorten-status').inner_text().strip()
+    link = sh.locator('.shorten-short')
+    got = link.count() > 0 and link.first.inner_text().strip().startswith('http')
+    check('shorten: the request actually goes to spoo.me',
+          any('spoo.me' in u for u in offsite[pre_reqs:]), str(offsite[pre_reqs:])[:140])
+    # Success or a rendered failure, never a spinner that never resolves.
+    check('shorten: ends in a real short link or a graceful message', got or bool(st), f'status={st!r} link={got}')
+    if got:
+        check('shorten: the short link points at spoo.me', 'spoo.me' in link.first.inner_text())
+        check('shorten: the session history records it', sh.locator('.shorten-history-item').count() >= 1)
+    else:
+        # Offline, rate limited or refused: the card must explain it in words.
+        check('shorten: an offline provider is explained in the card', bool(st) and 'sending' not in st.lower(), f'status={st!r}')
+    net_errs = [l for l in logs[err_before:] if l.startswith('pageerror:')]
+    check('shorten: the network path raises no unhandled error', not net_errs, ' | '.join(net_errs[:2])[:160])
+    page.remove_listener('request', _watch_request)
+    # =================== end shorten + url-safety block ===================
+
+    # ===================== subtitles (driven, exact output) =====================
+    # Self-contained block; nothing above is restructured. The tool is pure computation on
+    # text, so there is no excuse for asserting anything less than the exact bytes it
+    # writes. A known SRT goes in, and the WebVTT that comes back is compared character
+    # for character, which is what pins the comma-to-dot separator change.
+    SUB_SRT = ('1\n'
+               '00:00:01,000 --> 00:00:02,500\n'
+               'Hello there\n'
+               '\n'
+               '3\n'                      # SRT numbering is not always sequential
+               '00:00:04,250 --> 00:00:06,000\n'
+               'General Kenobi\n')
+    SUB_VTT = ('WEBVTT\n'
+               '\n'
+               '00:00:01.000 --> 00:00:02.500\n'
+               'Hello there\n'
+               '\n'
+               '00:00:04.250 --> 00:00:06.000\n'
+               'General Kenobi\n')
+    # Same cues, every timing pushed 2.5s later.
+    SUB_VTT_SHIFTED = ('WEBVTT\n'
+                       '\n'
+                       '00:00:03.500 --> 00:00:05.000\n'
+                       'Hello there\n'
+                       '\n'
+                       '00:00:06.750 --> 00:00:08.500\n'
+                       'General Kenobi\n')
+
+    subs_before = len(logs)
+    page.evaluate("location.hash = '#/t/subtitles'")
+    page.wait_for_timeout(700)
+    sub = page.locator('details.card').last
+    check('subtitles: the card mounts', sub.locator('.subs-in').count() == 1)
+
+    sub.locator('.subs-in').fill(SUB_SRT)
+    sub.locator('.subs-format').select_option('vtt')
+    sub.locator('button', has_text='Convert').first.click()
+    page.wait_for_timeout(300)
+    vtt = sub.locator('.subs-out').input_value()
+    check('subtitles: SRT converts to exactly the expected WebVTT', vtt == SUB_VTT, repr(vtt)[:220])
+    check('subtitles: the SRT comma separator is gone from the WebVTT',
+          ',' not in vtt.split('\n')[2], repr(vtt.split('\n')[2]))
+    check('subtitles: the WebVTT header is present', vtt.startswith('WEBVTT\n\n'), repr(vtt[:20]))
+    check('subtitles: non-sequential SRT numbering is not carried into the WebVTT',
+          '\n3\n' not in vtt and not vtt.split('\n')[2].strip().isdigit(), repr(vtt)[:180])
+    rep = sub.locator('.subs-report').inner_text()
+    check('subtitles: the report counts both cues and names the source format',
+          '2 cues' in rep and 'SubRip' in rep, rep[:120])
+    check('subtitles: a clean file reports no problems', sub.locator('.subs-issue').count() == 0,
+          sub.locator('.subs-issues').inner_text()[:120])
+    check('subtitles: a download is offered', sub.locator('.subs-download').count() == 1
+          and 'hidden' not in (sub.locator('.subs-download').get_attribute('class') or ''))
+
+    # Shift: same cues, both timings moved by +2.5s, still exact.
+    sub.locator('.subs-offset').fill('2.5')
+    sub.locator('button', has_text='Convert').first.click()
+    page.wait_for_timeout(300)
+    shifted = sub.locator('.subs-out').input_value()
+    check('subtitles: a +2.5s shift moves every timing by exactly that much',
+          shifted == SUB_VTT_SHIFTED, repr(shifted)[:220])
+
+    # A negative shift may not invent a negative timestamp.
+    sub.locator('.subs-offset').fill('-30')
+    sub.locator('button', has_text='Convert').first.click()
+    page.wait_for_timeout(300)
+    clamped = sub.locator('.subs-out').input_value()
+    check('subtitles: a negative shift clamps at zero instead of going negative',
+          '00:00:00.000 --> 00:00:00.000' in clamped and '-00' not in clamped, repr(clamped)[:200])
+
+    # Frame-rate rescale, back at zero offset: 25 fps timings against 23.976 fps video.
+    sub.locator('.subs-offset').fill('0')
+    sub.locator('.subs-rate').select_option(label='25 fps file, 23.976 fps video')
+    page.wait_for_timeout(200)
+    check('subtitles: the fps preset fills in the multiplier',
+          abs(float(sub.locator('.subs-factor').input_value()) - 25 / 23.976) < 1e-5,
+          sub.locator('.subs-factor').input_value())
+    sub.locator('button', has_text='Convert').first.click()
+    page.wait_for_timeout(300)
+    scaled = sub.locator('.subs-out').input_value()
+    check('subtitles: rescaling stretches the timings by the factor',
+          '00:00:01.043 --> 00:00:02.607' in scaled, repr(scaled)[:200])
+
+    # Round trip back to SRT: renumbered from 1, comma separator restored.
+    sub.locator('.subs-rate').select_option(label='Keep the timings as they are')
+    sub.locator('.subs-format').select_option('srt')
+    sub.locator('button', has_text='Convert').first.click()
+    page.wait_for_timeout(300)
+    srt = sub.locator('.subs-out').input_value()
+    check('subtitles: writing SRT renumbers from 1 and restores the comma',
+          srt == SUB_SRT.replace('\n3\n', '\n2\n'), repr(srt)[:220])
+
+    # Plain transcript: text only, no timings, no markup.
+    sub.locator('.subs-in').fill(SUB_SRT.replace('General Kenobi', 'General <i>Kenobi</i>'))
+    sub.locator('.subs-format').select_option('txt')
+    sub.locator('button', has_text='Convert').first.click()
+    page.wait_for_timeout(300)
+    txt = sub.locator('.subs-out').input_value()
+    check('subtitles: the transcript drops timings and inline tags',
+          txt == 'Hello there\nGeneral Kenobi\n', repr(txt)[:200])
+
+    # Malformed input is reported, not silently swallowed. This is the whole point of the
+    # tool: a file that will not parse is what the user is trying to diagnose.
+    sub.locator('.subs-in').fill('1\n00:00:01,000 --> 0:0:xx\nbroken timing\n\n'
+                                 '2\n00:00:09,000 --> 00:00:08,000\nbackwards\n')
+    sub.locator('.subs-format').select_option('vtt')
+    sub.locator('button', has_text='Convert').first.click()
+    page.wait_for_timeout(300)
+    problems = sub.locator('.subs-issues').inner_text().lower()
+    check('subtitles: an unreadable timestamp is reported with its line number',
+          'unreadable timestamp' in problems and 'line 2' in problems, problems[:160])
+    check('subtitles: a cue that ends before it starts is reported',
+          'ends before it starts' in problems, problems[:160])
+    check('subtitles: the good cue still survives a broken neighbour',
+          '00:00:09.000 --> 00:00:08.000' in sub.locator('.subs-out').input_value(),
+          sub.locator('.subs-out').input_value()[:120])
+
+    # The file input is the other way in, and it also names the download. Fed here as a
+    # real File so the reader path runs, not just the paste path.
+    sub.locator('.subs-file').set_input_files(files=[{
+        'name': 'episode.01.srt', 'mimeType': 'text/plain', 'buffer': SUB_SRT.encode()}])
+    page.wait_for_timeout(400)
+    check('subtitles: a loaded file lands in the source box',
+          sub.locator('.subs-in').input_value() == SUB_SRT, repr(sub.locator('.subs-in').input_value())[:160])
+    check('subtitles: loading a file converts it straight away',
+          sub.locator('.subs-out').input_value() == SUB_VTT, repr(sub.locator('.subs-out').input_value())[:200])
+    dl_href = sub.locator('.subs-download').get_attribute('href') or ''
+    check('subtitles: the download is a same-origin blob, not a remote fetch',
+          dl_href.startswith('blob:'), dl_href[:60])
+    check('subtitles: the download keeps the loaded file name with the new extension',
+          sub.locator('.subs-download').get_attribute('download') == 'episode.01.vtt',
+          str(sub.locator('.subs-download').get_attribute('download')))
+
+    subs_bad = [l for l in logs[subs_before:]
+                if 'trustedhtml' in l.lower() or 'trusted type' in l.lower()
+                or 'content security policy' in l.lower() or l.startswith('pageerror:')]
+    check('subtitles: no CSP, Trusted Types or runtime error while converting',
+          not subs_bad, ' | '.join(subs_bad[:2])[:200])
+    # =================== end subtitles block ===================
+
 
     # Heavy features build a Worker. Assert each kind can actually be constructed under
     # the live CSP, rather than trusting that the UI rendered.

@@ -223,6 +223,56 @@ export function registerBuiltins(): void {
   })
 
   registry.register({
+    id: 'tempmail',
+    name: 'Disposable Inbox',
+    description: 'A throwaway email address, received and read in the app',
+    category: 'util',
+    version: '0.1.0',
+    icon: '\u{1F4E7}',
+    source: 'builtin',
+    // 'storage' holds the address, password and token so a reload keeps the SAME inbox.
+    // Without it createContext hands out deniedStorage and every get and set throws.
+    permissions: ['storage', 'clipboard-write', { net: ['https://api.mail.gw'] }],
+    load: () => import('./tempmail'),
+  })
+
+  registry.register({
+    id: 'shorten',
+    name: 'Link Shortener',
+    description: 'Shorten a link with spoo.me, the one tool that sends data off the device',
+    category: 'util',
+    version: '0.1.0',
+    icon: '\u{1F587}',
+    source: 'builtin',
+    permissions: ['clipboard-write', { net: ['https://spoo.me'] }],
+    load: () => import('./shorten'),
+  })
+
+  registry.register({
+    id: 'url-safety',
+    name: 'URL Safety',
+    description: 'Score a link for phishing tricks, entirely on-device',
+    category: 'util',
+    version: '0.1.0',
+    icon: '\u{1F6E1}',
+    source: 'builtin',
+    permissions: ['clipboard-write'],
+    load: () => import('./url-safety'),
+  })
+
+  registry.register({
+    id: 'subtitles',
+    name: 'Subtitles',
+    description: 'Convert, retime and repair SRT and WebVTT files, all on-device',
+    category: 'util',
+    version: '0.1.0',
+    icon: '\u{1F39E}',
+    source: 'builtin',
+    permissions: ['clipboard-write'],
+    load: () => import('./subtitles'),
+  })
+
+  registry.register({
     id: 'settings',
     name: 'Settings',
     description: 'Passphrase lock, auto-OCR and live captions',

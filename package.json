@@ -1,11 +1,11 @@
 {
-  "name": "utilscript",
+  "name": "urletc",
   "version": "0.1.0",
   "private": true,
   "type": "module",
   "description": "Client-only, security-first productivity & P2P toolkit (clipboard/OCR/STT/TTS, WebRTC messenger, sandboxed tool workshop).",
   "license": "MIT",
-  "author": "utilscript contributors",
+  "author": "urletc contributors",
   "keywords": [
     "webrtc",
     "p2p",
@@ -19,11 +19,11 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/bernardovazm/utilscript.git"
+    "url": "git+https://github.com/bernardovazm/urletc.git"
   },
-  "homepage": "https://github.com/bernardovazm/utilscript#readme",
+  "homepage": "https://github.com/bernardovazm/urletc#readme",
   "bugs": {
-    "url": "https://github.com/bernardovazm/utilscript/issues"
+    "url": "https://github.com/bernardovazm/urletc/issues"
   },
   "engines": {
     "node": ">=20.19"

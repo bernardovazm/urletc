@@ -13,8 +13,8 @@ export type SealedMessage = { n: number; iv: string; ct: string }
 async function step(chain: Uint8Array<ArrayBuffer>): Promise<{ msgKey: Uint8Array<ArrayBuffer>; next: Uint8Array<ArrayBuffer> }> {
   // HKDF info strings are wire constants: both peers must derive the same key, so
   // changing them breaks decryption between versions.
-  const msgKey = await hkdfBytes(chain, EMPTY, 'utilscript/msg', 32)
-  const next = await hkdfBytes(chain, EMPTY, 'utilscript/chain', 32)
+  const msgKey = await hkdfBytes(chain, EMPTY, 'urletc/msg', 32)
+  const next = await hkdfBytes(chain, EMPTY, 'urletc/chain', 32)
   return { msgKey, next }
 }
 
@@ -49,7 +49,7 @@ export class SecureChannel {
    * so the two peers mirror each other.
    */
   static async create(sharedSecret: ArrayBuffer, salt: Uint8Array<ArrayBuffer>, initiator: boolean): Promise<SecureChannel> {
-    const root = await hkdfBytes(new Uint8Array(sharedSecret), salt, 'utilscript/root', 64)
+    const root = await hkdfBytes(new Uint8Array(sharedSecret), salt, 'urletc/root', 64)
     const a = root.slice(0, 32)
     const b = root.slice(32, 64)
     return initiator ? new SecureChannel(a, b) : new SecureChannel(b, a)

@@ -1,4 +1,4 @@
-# utilscript: Architecture & Security Study
+# urletc: Architecture & Security Study
 
 > Lead Architect study. Client-only, free-to-host, security-first all-in-one web toolkit.
 > Decisions are opinionated and bound to the feasibility verdicts. Where the feasibility pass
@@ -89,7 +89,7 @@ Ship a single static SPA on Vercel free-tier: **Vite 8 (Rolldown) + TypeScript (
 2. **User-supplied relay URLs vs static CSP `connect-src` is a genuine conflict**. A static header cannot allow arbitrary user-entered `wss://` origins. Resolution in section 10: ship a **curated relay allow-list** in `connect-src`; "bring-your-own-relay" is offered only via the optional **WebRTC `@trystero-p2p/ws-relay`/IPFS strategies** (not `connect-src`-bound the same way) or is gated behind a documented self-host build where the user edits the CSP. We do **not** pretend arbitrary user relays work under the shipped CSP.
 
 ```
-utilscript/
+urletc/
 |-- vercel.json                # headers: COOP/COEP/CSP/Trusted-Types, SPA rewrite
 |-- package.json               # engines.node ">=20.19", exact-pinned deps (no ^/~)
 |-- package-lock.json          # committed (npm)

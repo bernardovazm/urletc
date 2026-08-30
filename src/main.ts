@@ -54,7 +54,7 @@ function renderUnlock(app: HTMLElement, caps: CryptoCaps): void {
   app.append(
     el('div', { class: 'feed' }, [
       el('div', { class: 'feed-inner stack' }, [
-        el('h3', { text: '🔒 utilscript is locked' }),
+        el('h3', { text: '🔒 urletc is locked' }),
         el('div', { class: 'muted', text: 'Enter your vault passphrase to decrypt your on-device data.' }),
         input,
         el('div', { class: 'row' }, [button('Unlock', () => void submit(), 'primary')]),

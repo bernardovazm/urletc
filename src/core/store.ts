@@ -26,7 +26,12 @@ const MIGRATION_ID = 'migration:v1' // present only while a mode switch is mid-f
 const PBKDF2_ITERS = 600_000
 // Plaintext sealed into the vault so a candidate passphrase can be tested. Changing this
 // value invalidates every existing passphrase vault, so treat it as frozen from here on.
-const VERIFIER_TOKEN = 'utilscript-verifier'
+const VERIFIER_TOKEN = 'urletc-verifier'
+// Vaults sealed before the rename hold the old token. A passphrase that unlocks such a
+// vault must keep working, so verification accepts either value and the vault is resealed
+// with the current one on the next write. Dropping this list would lock people out of
+// their own data.
+const LEGACY_VERIFIER_TOKENS = ['utilscript-verifier', 'web-toolkit-verifier']
 const TOOL_QUOTA_BYTES = 1024 * 1024 // 1 MiB per tool namespace (ARCHITECTURE section 8.2)
 
 export type StoreMode = 'device' | 'passphrase'
@@ -148,7 +153,12 @@ export async function unlock(passphrase: string): Promise<boolean> {
   if (!salt || !verifier) throw new Error('no passphrase configured')
   const ppKey = await deriveKey(passphrase, salt)
   try {
-    if (decoder.decode(await aesGcmDecrypt(ppKey, verifier)) !== VERIFIER_TOKEN) return false
+    // Accept the current token or any pre-rename one. The passphrase is what proves the
+    // user; the token only proves the key decrypts, so refusing an older constant would
+    // lock someone out of a vault their passphrase still opens.
+    const seen = decoder.decode(await aesGcmDecrypt(ppKey, verifier))
+    if (seen !== VERIFIER_TOKEN && !LEGACY_VERIFIER_TOKENS.includes(seen)) return false
+    if (seen !== VERIFIER_TOKEN) await set(VERIFIER_ID, await aesGcmEncrypt(ppKey, encoder.encode(VERIFIER_TOKEN)), keyStore)
   } catch {
     return false
   }

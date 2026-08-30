@@ -1,4 +1,4 @@
-# utilscript
+# urletc
 
 Client-only TypeScript SPA: more than twenty utility modules plus encrypted
 device-to-device chat, file transfer, voice, video and screen sharing over WebRTC. Vite, no

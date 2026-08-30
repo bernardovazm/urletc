@@ -1,6 +1,6 @@
 # Security Policy
 
-utilscript is a security-first, client-only application: all data stays in the browser,
+urletc is a security-first, client-only application: all data stays in the browser,
 crypto is native WebCrypto, untrusted tools run in a null-origin sandbox, and P2P traffic
 is end-to-end encrypted. We take vulnerability reports seriously.
 

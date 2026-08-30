@@ -1,5 +1,5 @@
 // Disposable inbox. Client-only like the rest of the app: the browser talks to the
-// provider directly, there is no utilscript backend in the path.
+// provider directly, there is no urletc backend in the path.
 //
 // The provider is load-bearing and was settled from a REAL BROWSER, not curl. mail.tm,
 // tempmail.lol, etempmail, 1secmail and ulvis all answer curl happily and then fail a
@@ -7,7 +7,7 @@
 // the headers, so it is the one; swapping it means re-testing in a browser first, and
 // adding the new origin to connect-src in BOTH vercel.json and vite.config.ts.
 //
-// Four calls make the whole tool:
+// Five calls make the whole tool:
 //   GET  /domains        pick a live domain
 //   POST /accounts       claim <random>@<domain> with a generated password
 //   POST /token          exchange the same credentials for a bearer token
@@ -15,6 +15,11 @@
 //   GET  /messages/{id}  one message, including its text and html parts
 // Collections come back as a hydra envelope by default and as a bare array when the
 // request sets Accept: application/json, so `members()` accepts either.
+//
+// The receive path is verified, not assumed: an address claimed by this tool in a real
+// browser was sent a real message over SMTP by a third party, and it appeared in the card
+// within one poll with nothing clicked. So "no mail arrived" means no mail was sent, or
+// one of the states below was hit. Each of them now says which.
 //
 // Nothing here may write to the console: the e2e suite fails the run on a console error,
 // and a free third-party service WILL be down or rate limiting sometimes. Every failure
@@ -32,8 +37,9 @@ const BODY_MAX = 20_000
 const LIST_MAX = 25
 const KEY = 'account'
 
-const DOWN = 'The mail service did not answer. Use Refresh to try again.'
+const DOWN = 'The mail service did not answer. The next check waits longer, or use Refresh now.'
 const LIMITED = 'The mail service is rate limiting, so the next check waits longer.'
+const UNSAVED = 'This address is not being saved, so a reload will claim a different one.'
 
 interface Account {
   address: string
@@ -148,12 +154,21 @@ async function login(address: string, password: string, signal: AbortSignal): Pr
   return { token: str(r.data.token), status: 200 }
 }
 
-/** Claim a fresh address on a live domain. */
-async function issue(signal: AbortSignal): Promise<{ ok: true; account: Account } | { ok: false; message: string }> {
+const fail = (status: number, message = ''): { ok: false; outcome: Outcome; message: string } =>
+  status === 429 ? { ok: false, outcome: 'limited', message: LIMITED } : { ok: false, outcome: 'down', message: message || DOWN }
+
+/**
+ * Claim a fresh address on a live domain.
+ *
+ * `isActive` is checked strictly: the provider rotates domains and keeps the retired ones
+ * listed, and a retired domain still accepts an account while silently accepting no mail,
+ * which is indistinguishable from a working inbox nobody wrote to.
+ */
+async function issue(signal: AbortSignal): Promise<{ ok: true; account: Account } | { ok: false; outcome: Outcome; message: string }> {
   const d = await req<unknown>('/domains', { signal })
-  if (!d.ok) return { ok: false, message: d.status === 429 ? LIMITED : DOWN }
-  const domain = members<{ domain?: unknown; isActive?: unknown }>(d.data).find((x) => x.isActive !== false && str(x.domain))?.domain
-  if (!str(domain)) return { ok: false, message: 'The mail service has no active domain right now.' }
+  if (!d.ok) return fail(d.status)
+  const domain = members<{ domain?: unknown; isActive?: unknown }>(d.data).find((x) => x.isActive === true && str(x.domain))?.domain
+  if (!str(domain)) return fail(-1, 'The mail service has no active domain right now.')
   const password = randomText(20, ALNUM)
   // A collision on a 10-character local part is vanishingly unlikely, but 422 is the
   // provider's "address taken" and retrying is cheaper than telling the user to click again.
@@ -162,13 +177,16 @@ async function issue(signal: AbortSignal): Promise<{ ok: true; account: Account 
     const acc = await req<unknown>('/accounts', { method: 'POST', body: JSON.stringify({ address, password }), signal })
     if (!acc.ok) {
       if (acc.status === 422) continue
-      return { ok: false, message: acc.status === 429 ? LIMITED : DOWN }
+      return fail(acc.status)
     }
+    // The account now EXISTS on the provider and its address is already receiving. Failing
+    // the token exchange here used to throw the whole thing away and claim a second one,
+    // which orphaned a live inbox on every transient blip; hand back the credentials with
+    // an empty token instead and let the caller log in on its next pass.
     const t = await login(address, password, signal)
-    if (!t.token) return { ok: false, message: t.status === 429 ? LIMITED : DOWN }
     return { ok: true, account: { address, password, token: t.token } }
   }
-  return { ok: false, message: 'Every generated address was already taken. Use New address to retry.' }
+  return fail(-1, 'Every generated address was already taken. Use New address to retry.')
 }
 
 // Per-card teardown keyed by the container. launchTool shares ONE cached module instance
@@ -214,11 +232,16 @@ const tool: ToolModule = {
 
     // ctx.storage is the gated facade and the vault can be locked behind a passphrase, so
     // persistence is best effort: a failure costs the address on reload, never the session.
+    // It is not silent, though. A locked vault makes every reload claim a DIFFERENT
+    // address, so mail sent to the one on screen lands in an inbox this card can no longer
+    // open, which reads exactly like "the mail never arrived". The status line says so.
+    let persists = true
     const save = async (a: Account) => {
       try {
         await ctx.storage.set(KEY, a)
+        persists = true
       } catch {
-        // locked vault or quota; the inbox still works until this tab is closed
+        persists = false
       }
     }
     const forget = async () => {
@@ -246,8 +269,11 @@ const tool: ToolModule = {
       // A hidden tab or an off-screen card must not keep hammering a free service, and a
       // torn-down card must not poll at all. Each re-arms through its own listener rather
       // than ticking on regardless.
-      if (dead || !account || document.hidden || !onScreen) return
-      timer = window.setTimeout(() => void refresh(), pollMs)
+      //
+      // Note there is no `!account` guard: a card that has NO address yet is the case that
+      // most needs the timer, because the claim itself can fail.
+      if (dead || document.hidden || !onScreen) return
+      timer = window.setTimeout(() => void tick(), pollMs)
     }
 
     const openMessage = async (id: string) => {
@@ -287,76 +313,103 @@ const tool: ToolModule = {
       listEl.replaceChildren(el('div', { class: 'group-label', text: `Inbox (${rows.length})` }), ...items)
     }
 
-    const fetchInbox = async (): Promise<Outcome> => {
+    /**
+     * Read the inbox, logging in first whenever there is no usable token.
+     *
+     * Only a 401 on the LOGIN is 'auth', because only that proves the account itself is
+     * gone. A 401 on /messages is an expired token, and a status 0 is a network blip; both
+     * used to be able to end as a re-claim, and a re-claim silently abandons every message
+     * already sitting in the old inbox.
+     */
+    const fetchInbox = async (retried = false): Promise<Outcome> => {
       if (!account) return 'auth'
-      let r = await req<unknown>('/messages', { token: account.token, signal })
-      if (!r.ok && r.status === 401) {
-        // Tokens expire long before the account does, so a 401 means "log in again",
-        // not "start over". Only a 401 on the login itself proves the account is gone;
-        // treating a network blip as gone would throw away a working inbox.
+      if (!account.token) {
         const t = await login(account.address, account.password, signal)
-        if (dead) return 'down'
-        if (!t.token) return t.status === 401 ? 'auth' : 'down'
+        // `account` is re-read because New address can null it across the await.
+        if (dead || !account) return 'down'
+        if (!t.token) return t.status === 401 ? 'auth' : t.status === 429 ? 'limited' : 'down'
         account = { ...account, token: t.token }
         await save(account)
-        if (dead) return 'down'
-        r = await req<unknown>('/messages', { token: account.token, signal })
+        if (dead || !account) return 'down'
+      }
+      const r = await req<unknown>('/messages', { token: account.token, signal })
+      if (dead || !account) return 'down'
+      if (!r.ok && r.status === 401 && !retried) {
+        account = { ...account, token: '' }
+        return fetchInbox(true)
       }
       if (!r.ok) return r.status === 429 ? 'limited' : r.status === 401 ? 'auth' : 'down'
-      if (dead) return 'down'
       renderList(members<Row>(r.data))
       return 'ok'
     }
 
-    const claim = async () => {
-      setStatus('Claiming an address...')
-      addr.value = ''
-      listEl.replaceChildren()
-      bodyHead.textContent = ''
-      bodyEl.textContent = ''
-      const r = await issue(signal)
-      if (dead) return
-      if (!r.ok) {
-        setStatus(r.message)
-        return
-      }
-      account = r.account
-      addr.value = account.address
-      await save(account)
-      if (dead) return
-      await refresh()
-    }
-
-    const refresh = async () => {
-      if (!account || busy || dead) return
+    /**
+     * The whole loop, in one pass: claim an address if there is none, then read the inbox,
+     * then re-arm. Claiming lives INSIDE the loop deliberately. It used to sit outside, so
+     * a claim that failed (the provider rate limits new accounts long before it rate limits
+     * reads) left the card with an empty address box, a status line promising a next check,
+     * and no timer anywhere: 0 further requests until someone pressed Refresh. That is
+     * indistinguishable from a tool that is simply broken.
+     */
+    const tick = async () => {
+      if (busy || dead) return
       busy = true
       let outcome: Outcome = 'down'
+      let message = ''
       try {
-        outcome = await fetchInbox()
+        if (!account) {
+          setStatus('Claiming an address...')
+          addr.value = ''
+          listEl.replaceChildren()
+          bodyHead.textContent = ''
+          bodyEl.textContent = ''
+          const r = await issue(signal)
+          if (dead) return
+          if (r.ok) {
+            account = r.account
+            addr.value = account.address
+            await save(account)
+          } else {
+            outcome = r.outcome
+            message = r.message
+          }
+        }
+        if (account && !dead) outcome = await fetchInbox()
       } finally {
         busy = false
       }
       if (dead) return
       if (outcome === 'auth') {
         // The provider retains an inbox for days, not forever, so a dead account is
-        // expected eventually. Replace it rather than showing a broken one.
+        // expected eventually. Drop it and let the NEXT pass claim, rather than re-claiming
+        // inline: an account that 401s the moment it is created would otherwise spin here,
+        // creating accounts against a free service as fast as the network allows.
         account = null
+        addr.value = ''
         await forget()
-        if (!dead) await claim()
-        return
+        if (dead) return
+        outcome = 'down'
+        message = 'That inbox expired. Claiming another one shortly.'
       }
-      if (outcome === 'limited') pollMs = Math.min(MAX_POLL_MS, pollMs * 2)
-      else if (outcome === 'ok') pollMs = POLL_MS
-      setStatus(outcome === 'ok' ? `Inbox ready, checking every ${Math.round(pollMs / 1000)} seconds.` : outcome === 'limited' ? LIMITED : DOWN)
+      if (outcome === 'ok') pollMs = POLL_MS
+      else pollMs = Math.min(MAX_POLL_MS, pollMs * 2)
+      const secs = Math.round(pollMs / 1000)
+      // "while this card is open" is not filler: polling really does stop when the card is
+      // collapsed, scrolled out of the feed or in a background tab, and a status claiming
+      // an unconditional 15-second check would be false in all three.
+      const ready = `Inbox ready, checking every ${secs} seconds while this card is open.`
+      setStatus(`${outcome === 'ok' ? ready : outcome === 'limited' ? LIMITED : message || DOWN}${persists ? '' : ` ${UNSAVED}`}`)
       schedule()
     }
 
+    // Both resume paths run the full driver, not just a poll: coming back on screen with
+    // no address yet has to retry the claim, which is the state the user is most stuck in.
     const onVis = () => {
       if (document.hidden) {
         window.clearTimeout(timer)
         timer = 0
-      } else if (account && !dead) {
-        void refresh()
+      } else if (!dead) {
+        void tick()
       }
     }
     document.addEventListener('visibilitychange', onVis)
@@ -369,8 +422,8 @@ const tool: ToolModule = {
         if (!onScreen) {
           window.clearTimeout(timer)
           timer = 0
-        } else if (account && !dead) {
-          void refresh()
+        } else if (!dead) {
+          void tick()
         }
       },
       { threshold: 0 },
@@ -380,7 +433,7 @@ const tool: ToolModule = {
     container.append(
       el('div', { class: 'row' }, [addr, copyButton(() => addr.value, ctx.clipboard.write)]),
       el('div', { class: 'row' }, [
-        button('Refresh', () => void (account ? refresh() : claim()), 'primary', 'Check for new mail now'),
+        button('Refresh', () => void tick(), 'primary', 'Check for new mail now'),
         button(
           'New address',
           () => {
@@ -388,7 +441,7 @@ const tool: ToolModule = {
             window.clearTimeout(timer)
             timer = 0
             pollMs = POLL_MS
-            void forget().then(() => (dead ? undefined : claim()))
+            void forget().then(() => (dead ? undefined : tick()))
           },
           'ghost',
           'Throw this inbox away and claim another',
@@ -411,10 +464,8 @@ const tool: ToolModule = {
         account = saved
         addr.value = saved.address
         setStatus('Restoring your inbox...')
-        await refresh()
-        return
       }
-      await claim()
+      await tick()
     })()
 
     detachers.set(container, () => {

@@ -249,14 +249,14 @@ export function registerBuiltins(): void {
   })
 
   registry.register({
-    id: 'url-safety',
-    name: 'URL Safety',
-    description: 'Score a link for phishing tricks, entirely on-device',
+    id: 'url-check',
+    name: 'URL Check',
+    description: 'Check a link against live phishing feeds, plus a local read of the URL itself',
     category: 'util',
-    version: '0.1.0',
+    version: '0.2.0',
     icon: '\u{1F6E1}',
     source: 'builtin',
-    permissions: ['clipboard-write'],
+    permissions: ['clipboard-write', { net: ['https://raw.githubusercontent.com', 'https://cdn.jsdelivr.net'] }],
     load: () => import('./url-safety'),
   })
 

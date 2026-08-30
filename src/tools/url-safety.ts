@@ -1,20 +1,29 @@
-// URL risk analysis that never leaves the device.
+// URL Check: two layers over one link, kept visibly apart because they make claims of
+// very different strength.
 //
-// Why not a reputation lookup: every keyless service in this space (urlvoid and friends)
-// either answers without CORS headers, so a browser cannot read the response at all, or
-// needs an API key. A key shipped in a client-only app is public by construction, so a
-// third-party lookup is not on the table here. What IS on the table is the structural
-// analysis a careful reader does by hand: the tricks below are all visible in the text of
-// the URL itself. That is genuinely useful, completely private, and needs no network.
+//  1. Structural analysis, local and instant. Punycode homographs, a brand parked in a
+//     subdomain, credentials before the @, free-registration TLDs, and the rest of the
+//     tricks that are visible in the text of the URL itself. Never fetches anything.
+//     This is a HEURISTIC: it reads the URL, not the site. "Nothing structurally
+//     suspicious" means the shape of the link is not deceptive, not that it is safe.
 //
-// The honest limit, stated in the card too: this reads the URL, not the site. A clean
-// result means "nothing about the shape of this link is deceptive", not "safe".
+//  2. Blocklist feeds, over the network. A hit here is a FACT with a source and a date:
+//     somebody observed this URL phishing and published it. A miss is only ever "not on
+//     the lists I hold, as of <age>", which is why every result states the feed and how
+//     old the copy is. A stale feed answering "clean" is worse than no answer.
+//
+// Feed selection is constrained by CORS, not by preference: most of the well-known
+// keyless phishing feeds (openphish.com direct, phishunt.io, urlhaus, phishstats,
+// phishing.army) send no access-control headers, so a page cannot read them at all even
+// though curl can. The three below were probed from a real browser and do work.
 //
 // Parsing follows url-info.ts (new URL on the trimmed input, null on failure). The
 // component breakdown stays there; this module only reports risk, never the parts.
 
+import { createStore, del, get, set } from 'idb-keyval'
+import { getItem, setItem } from '../core/store'
 import type { ToolContext, ToolModule } from '../shell/registry'
-import { button, copyButton, el } from '../shell/ui'
+import { button, copyButton, el, toast } from '../shell/ui'
 
 export type Severity = 'high' | 'medium' | 'low'
 
@@ -573,11 +582,431 @@ export function analyzeUrl(input: string): Report | null {
   return finish(raw, u, f)
 }
 
+// ---------------------------------------------------------------- feeds
+
+/**
+ * How strong a listing is. `url` means this exact address was published as phishing.
+ * `host` means a different address on the same hostname was. `domain` means only the
+ * registrable domain matched, so the listed thing may be a sibling subdomain. They are
+ * reported separately on purpose: collapsing them into one "known bad" would let the
+ * weakest evidence borrow the credibility of the strongest.
+ */
+export type MatchKind = 'url' | 'host' | 'domain'
+
+export interface FeedSpec {
+  id: string
+  name: string
+  url: string
+  /** `urls` entries are full addresses; `hosts` entries are bare hostnames. */
+  kind: 'urls' | 'hosts'
+  /** Bulk feeds are megabytes, so they are opt in, downloaded once and cached. */
+  bulk: boolean
+  ttlMs: number
+  size: string
+}
+
+const HOUR = 3_600_000
+
+export const FEEDS: FeedSpec[] = [
+  {
+    id: 'openphish',
+    name: 'OpenPhish',
+    url: 'https://raw.githubusercontent.com/openphish/public_feed/main/feed.txt',
+    kind: 'urls',
+    bulk: false,
+    ttlMs: HOUR / 2,
+    size: 'about 300 live URLs, 15 KB',
+  },
+  {
+    id: 'phishing-database',
+    name: 'Phishing.Database',
+    url: 'https://cdn.jsdelivr.net/gh/mitchellkrogza/Phishing.Database@master/phishing-domains-ACTIVE.txt',
+    kind: 'hosts',
+    bulk: true,
+    ttlMs: 24 * HOUR,
+    size: 'about 390000 hostnames, 3.6 MB compressed',
+  },
+  {
+    id: 'blocklistproject',
+    name: 'The Blocklist Project',
+    url: 'https://raw.githubusercontent.com/blocklistproject/Lists/master/phishing.txt',
+    kind: 'hosts',
+    bulk: true,
+    ttlMs: 24 * HOUR,
+    size: 'about 190000 hostnames, 5.6 MB',
+  },
+]
+
+export function feedById(id: string): FeedSpec | undefined {
+  return FEEDS.find((f) => f.id === id)
+}
+
+// Feed bodies live in their own IndexedDB store, NOT in the encrypted vault. They are
+// public blocklists with nothing personal in them, and putting eleven megabytes in the
+// vault would mean re-wrapping all of it on every passphrase mode switch and losing
+// access to it whenever the vault is locked. Cost with no benefit.
+const feedStore = createStore('wt-feeds', 'kv')
+
+interface CachedFeed {
+  /** Cleaned entries, one per line. Storing the parsed form skips re-reading comments. */
+  text: string
+  fetchedAt: number
+  /** Bytes as delivered, so the card can show what the download actually cost. */
+  bytes: number
+}
+
+export interface FeedState {
+  spec: FeedSpec
+  fetchedAt: number
+  entries: number
+  bytes: number
+  stale: boolean
+}
+
+/**
+ * Parsed indexes, keyed by feed id. Module level and shared across every card on
+ * purpose: unlike per-card UI state this is immutable public data, and rebuilding a
+ * 390000-entry Set per open card would be pure waste.
+ */
+const indexes = new Map<string, { urls: Set<string>; hosts: Set<string>; domains: Set<string>; state: FeedState }>()
+/** In-flight fetches, so two cards pasted at once share one download. */
+const inflight = new Map<string, Promise<FeedState | null>>()
+
+/**
+ * Comparison key for a URL. The scheme is deliberately dropped: feeds list the address
+ * they observed, and http vs https is not the identity of a phishing page. Credentials
+ * and the fragment go too (neither reaches the server), a default port is normalised
+ * away, and a bare "/" path is treated as no path so a pasted "https://x" matches a
+ * listed "https://x/".
+ */
+export function normalizeUrl(raw: string): string | null {
+  let u: URL
+  try {
+    u = new URL(raw.trim())
+  } catch {
+    return null
+  }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return null
+  const host = u.hostname.toLowerCase().replace(/\.$/, '')
+  const dflt = (u.protocol === 'http:' && u.port === '80') || (u.protocol === 'https:' && u.port === '443')
+  const port = u.port && !dflt ? `:${u.port}` : ''
+  const path = u.pathname === '/' ? '' : u.pathname.replace(/\/$/, '')
+  return `${host}${port}${path}${u.search}`
+}
+
+/** The part of a hostname somebody actually bought, using the same suffix table as above. */
+export function registrableDomain(hostname: string): string {
+  const { labels, suffixLen } = splitHost(hostname.toLowerCase().replace(/\.$/, ''))
+  return labels.slice(-(suffixLen + 1)).join('.')
+}
+
+function hostOf(line: string): string | null {
+  // Accepts a bare hostname and the hosts-file form ("0.0.0.0 evil.example").
+  const parts = line.split(/\s+/).filter(Boolean)
+  const h = (parts.length > 1 ? parts[1] : parts[0])?.toLowerCase().replace(/\.$/, '')
+  if (!h || h.includes('/') || !h.includes('.')) return null
+  if (h === '0.0.0.0' || h === 'localhost' || IPV4.test(h)) return null
+  return h
+}
+
+/** Strip comments and blank lines, and reduce every entry to its comparison form. */
+function cleanFeed(body: string, kind: FeedSpec['kind']): string {
+  const out: string[] = []
+  for (const line of body.split('\n')) {
+    const s = line.trim()
+    if (!s || s.startsWith('#') || s.startsWith('!')) continue
+    if (kind === 'urls') {
+      const n = normalizeUrl(s)
+      if (n) out.push(n)
+    } else {
+      const h = hostOf(s)
+      if (h) out.push(h)
+    }
+  }
+  return out.join('\n')
+}
+
+function buildIndex(spec: FeedSpec, cached: CachedFeed): FeedState {
+  const urls = new Set<string>()
+  const hosts = new Set<string>()
+  const domains = new Set<string>()
+  const lines = cached.text ? cached.text.split('\n') : []
+  for (const line of lines) {
+    if (!line) continue
+    if (spec.kind === 'urls') {
+      urls.add(line)
+      const h = line.split('/')[0].split(':')[0]
+      hosts.add(h)
+      domains.add(registrableDomain(h))
+    } else {
+      hosts.add(line)
+      domains.add(registrableDomain(line))
+    }
+  }
+  const state: FeedState = {
+    spec,
+    fetchedAt: cached.fetchedAt,
+    entries: spec.kind === 'urls' ? urls.size : hosts.size,
+    bytes: cached.bytes,
+    stale: Date.now() - cached.fetchedAt > spec.ttlMs,
+  }
+  indexes.set(spec.id, { urls, hosts, domains, state })
+  return state
+}
+
+/** Read the cached copy from IndexedDB (or memory) without touching the network. */
+export async function loadFeed(spec: FeedSpec): Promise<FeedState | null> {
+  const held = indexes.get(spec.id)
+  if (held) {
+    held.state.stale = Date.now() - held.state.fetchedAt > spec.ttlMs
+    return held.state
+  }
+  const cached = await get<CachedFeed>(spec.id, feedStore)
+  return cached ? buildIndex(spec, cached) : null
+}
+
+/** Download and cache a feed. Rejects with a readable message; callers surface it. */
+export async function refreshFeed(spec: FeedSpec): Promise<FeedState> {
+  const running = inflight.get(spec.id)
+  if (running) {
+    const done = await running
+    if (done) return done
+  }
+  const job = (async (): Promise<FeedState | null> => {
+    const res = await fetch(spec.url, { cache: 'no-store' })
+    if (!res.ok) throw new Error(`${spec.name} returned HTTP ${res.status}`)
+    const body = await res.text()
+    const cached: CachedFeed = { text: cleanFeed(body, spec.kind), fetchedAt: Date.now(), bytes: body.length }
+    if (!cached.text) throw new Error(`${spec.name} returned nothing usable`)
+    await set(spec.id, cached, feedStore)
+    return buildIndex(spec, cached)
+  })()
+  inflight.set(spec.id, job)
+  try {
+    const out = await job
+    if (!out) throw new Error(`${spec.name} could not be indexed`)
+    return out
+  } finally {
+    inflight.delete(spec.id)
+  }
+}
+
+export async function deleteFeed(spec: FeedSpec): Promise<void> {
+  indexes.delete(spec.id)
+  await del(spec.id, feedStore)
+}
+
+export interface FeedHit {
+  feed: string
+  match: MatchKind
+  fetchedAt: number
+  entries: number
+}
+
+export interface FeedOutcome {
+  hits: FeedHit[]
+  /** Feeds that answered, hit or not. An empty list means nothing was actually checked. */
+  consulted: FeedState[]
+  /** Bulk feeds the user has not downloaded. Named so a miss is never mistaken for a pass. */
+  absent: FeedSpec[]
+  errors: { feed: string; message: string }[]
+}
+
+function matchIn(id: string, norm: string, host: string, domain: string): MatchKind | null {
+  const idx = indexes.get(id)
+  if (!idx) return null
+  if (idx.urls.has(norm)) return 'url'
+  if (idx.hosts.has(host)) return 'host'
+  if (idx.domains.has(domain)) return 'domain'
+  return null
+}
+
+/**
+ * Check one URL against the feeds. The small feed is fetched on demand and reused for
+ * its TTL; bulk feeds are consulted ONLY when already downloaded, so a check never
+ * silently pulls megabytes. Never throws: a dead feed becomes an entry in `errors`,
+ * because a network failure must not be able to look like a clean result.
+ */
+export async function checkFeeds(input: string): Promise<FeedOutcome> {
+  const out: FeedOutcome = { hits: [], consulted: [], absent: [], errors: [] }
+  const norm = normalizeUrl(input)
+  if (!norm) return out
+  const host = norm.split('/')[0].split(':')[0]
+  const domain = registrableDomain(host)
+
+  for (const spec of FEEDS) {
+    let state = await loadFeed(spec)
+    if (spec.bulk) {
+      // Opt in only. A missing bulk feed is reported, never fetched behind the user.
+      if (!state) {
+        out.absent.push(spec)
+        continue
+      }
+    } else if (!state || state.stale) {
+      try {
+        state = await refreshFeed(spec)
+      } catch (e) {
+        out.errors.push({ feed: spec.name, message: (e as Error).message })
+        if (!state) continue
+      }
+    }
+    if (!state) continue
+    out.consulted.push(state)
+    const m = matchIn(spec.id, norm, host, domain)
+    if (m) out.hits.push({ feed: spec.name, match: m, fetchedAt: state.fetchedAt, entries: state.entries })
+  }
+  // Strongest evidence first, so the headline claim is the one best supported.
+  const rank: MatchKind[] = ['url', 'host', 'domain']
+  out.hits.sort((a, b) => rank.indexOf(a.match) - rank.indexOf(b.match))
+  return out
+}
+
+// ---------------------------------------------------------------- wording
+
+export function ageText(ts: number): string {
+  const s = Math.max(0, Math.round((Date.now() - ts) / 1000))
+  if (s < 90) return `${s}s old`
+  const m = Math.round(s / 60)
+  if (m < 90) return `${m} min old`
+  const h = Math.round(m / 60)
+  return h < 48 ? `${h}h old` : `${Math.round(h / 24)} days old`
+}
+
+export function sizeText(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
+const MATCH_WORD: Record<MatchKind, string> = {
+  url: 'this exact URL is listed',
+  host: 'this hostname is listed',
+  domain: 'the registrable domain is listed',
+}
+
+export function hitText(h: FeedHit): string {
+  return `Listed by ${h.feed}: ${MATCH_WORD[h.match]}. Feed ${ageText(h.fetchedAt)}, ${h.entries} entries.`
+}
+
+/** One line for the top of a card: the fact layer, never the heuristic one. */
+export function feedHeadline(o: FeedOutcome): { cls: string; text: string } {
+  if (o.hits.length) {
+    const top = o.hits[0]
+    const strong = top.match === 'url'
+    return {
+      cls: strong ? 'danger' : 'warn',
+      text: strong ? `Known bad, listed by ${top.feed}` : `Related listing in ${top.feed}`,
+    }
+  }
+  if (!o.consulted.length) return { cls: 'warn', text: 'No feed answered' }
+  const oldest = o.consulted.reduce((a, b) => (a.fetchedAt < b.fetchedAt ? a : b))
+  const where = o.consulted.length === 1 ? o.consulted[0].spec.name : `${o.consulted.length} feeds`
+  // A stale copy answering "clean" is worse than no answer, so it never gets the green
+  // badge: the age is in the text either way, but the colour must not vouch for it.
+  const fresh = o.consulted.some((c) => !c.stale)
+  return { cls: fresh ? 'ok' : 'warn', text: `Not on ${where}, ${ageText(oldest.fetchedAt)}${fresh ? '' : ', not refreshed'}` }
+}
+
 /** Plain-text version of a report, for the copy button. */
-export function reportToText(r: Report): string {
-  const head = `${r.url}\nStructural risk ${r.score}/100, ${r.verdict}`
-  const body = r.findings.map((x) => `\n\n[${x.severity}] ${x.title}\n${x.reason}`).join('')
-  return `${head}${body}\n\nStructural analysis of the URL text only. Not a reputation check.`
+export function reportToText(r: Report, o?: FeedOutcome): string {
+  const lines = [r.url]
+  if (o) {
+    lines.push('', o.hits.length ? o.hits.map(hitText).join('\n') : `Feeds: ${feedHeadline(o).text}`)
+    for (const e of o.errors) lines.push(`${e.feed} unavailable: ${e.message}`)
+    for (const a of o.absent) lines.push(`${a.name} not downloaded, so it was not consulted.`)
+  }
+  lines.push('', `Structural risk ${r.score}/100, ${r.verdict}`)
+  for (const x of r.findings) lines.push('', `[${x.severity}] ${x.title}`, x.reason)
+  lines.push('', 'A listing is a reported fact. The structural score is a heuristic reading of the URL text, not of the site.')
+  return lines.join('\n')
+}
+
+// ---------------------------------------------------------------- shared rendering
+
+const PASTE_KEY = 'url-check-paste'
+
+/** Whether a pasted link is checked without being asked. Defaults on (proactive). */
+export async function pasteCheckEnabled(): Promise<boolean> {
+  try {
+    return ((await getItem<boolean>(PASTE_KEY)) ?? true) !== false
+  } catch {
+    return true
+  }
+}
+
+export async function setPasteCheckEnabled(on: boolean): Promise<void> {
+  try {
+    await setItem(PASTE_KEY, on)
+  } catch {
+    /* vault locked; the default stands for this session */
+  }
+}
+
+/** The fact layer, as DOM. Kept separate from the findings so the two never blur. */
+export function feedBlock(o: FeedOutcome): HTMLElement {
+  const head = feedHeadline(o)
+  const box = el('div', { class: 'stack url-check-feedresult' }, [
+    el('div', { class: 'row' }, [el('span', { class: `badge ${head.cls}`, text: 'feeds' }), el('strong', { text: head.text })]),
+  ])
+  for (const h of o.hits) box.append(el('div', { class: 'small url-check-hit', text: hitText(h) }))
+  if (!o.hits.length && o.consulted.length) {
+    box.append(el('div', { class: 'muted small', text: o.consulted.map((c) => `${c.spec.name} (${c.entries} entries, ${ageText(c.fetchedAt)})`).join(', ') }))
+  }
+  for (const e of o.errors) box.append(el('div', { class: 'muted small url-check-feederror', text: `${e.feed} unavailable: ${e.message}` }))
+  if (o.absent.length) {
+    box.append(el('div', { class: 'muted small', text: `Not consulted, not downloaded: ${o.absent.map((a) => a.name).join(', ')}. Open URL Check to add them.` }))
+  }
+  return box
+}
+
+/** The heuristic layer, as DOM. */
+export function structuralBlock(r: Report): HTMLElement {
+  const box = el('div', { class: 'stack url-check-structural' }, [
+    el('div', { class: 'row url-check-score' }, [
+      el('span', { class: `badge ${r.score >= 45 ? 'danger' : r.score >= 16 ? 'warn' : 'ok'}`, text: `${r.score}/100` }),
+      el('strong', { text: r.verdict }),
+    ]),
+  ])
+  for (const x of r.findings) {
+    box.append(
+      el('div', { class: 'stack url-check-finding' }, [
+        el('div', { class: 'row' }, [el('span', { class: `badge ${BADGE[x.severity]}`, text: x.severity }), el('strong', { text: x.title })]),
+        el('div', { class: 'muted small', text: x.reason }),
+      ]),
+    )
+  }
+  if (!r.findings.length) box.append(el('div', { class: 'muted small', text: 'No structural warning signs in the shape of this link.' }))
+  return box
+}
+
+/**
+ * Proactive check for a link pasted into the console feed (ARCHITECTURE section 4.1).
+ * Renders the local verdict at once and fills the feed answer in when it lands, so the
+ * paste is never blocked on the network. Mirrors the auto-OCR path for images, including
+ * its off switch: with the switch off the caller gets a button instead.
+ */
+export async function renderPasteVerdict(url: string, out: HTMLElement): Promise<void> {
+  const report = analyzeUrl(url)
+  if (!report) return
+  if (!(await pasteCheckEnabled())) {
+    out.replaceChildren(button('Check this link', () => void runPasteVerdict(report, out), 'ghost'))
+    return
+  }
+  await runPasteVerdict(report, out)
+}
+
+async function runPasteVerdict(report: Report, out: HTMLElement): Promise<void> {
+  const pending = el('div', { class: 'muted small url-check-pending', text: 'Checking blocklist feeds...' })
+  out.replaceChildren(structuralBlock(report), pending)
+  let outcome: FeedOutcome
+  try {
+    outcome = await checkFeeds(report.url)
+  } catch (e) {
+    pending.textContent = `Feeds unavailable: ${(e as Error).message}`
+    return
+  }
+  if (!out.isConnected) return
+  out.replaceChildren(feedBlock(outcome), structuralBlock(report))
 }
 
 // ---------------------------------------------------------------- ui
@@ -586,45 +1015,110 @@ const tool: ToolModule = {
   activate(container: HTMLElement, ctx: ToolContext) {
     container.replaceChildren()
     const input = el('input', { type: 'text', class: 'full', placeholder: 'https://example.com/path', autocomplete: 'off', spellcheck: 'false' }) as HTMLInputElement
-    const out = el('div', { class: 'stack url-safety-out' })
+    const out = el('div', { class: 'stack url-check-out' })
+    const feeds = el('div', { class: 'stack url-check-feeds' })
+    // Per-card state: this closure runs once per container, so nothing here is shared
+    // with another open copy of the card.
     let current: Report | null = null
+    let outcome: FeedOutcome | null = null
 
-    const render = () => {
-      current = analyzeUrl(input.value)
+    const paint = () => {
       const r = current
       if (!r) {
-        out.replaceChildren(el('div', { class: 'muted url-safety-score', text: 'Not a valid URL' }))
+        out.replaceChildren(el('div', { class: 'muted url-check-score', text: 'Not a valid URL' }))
         return
       }
-      const head = el('div', { class: 'row url-safety-score' }, [
-        el('span', { class: `badge ${r.score >= 45 ? 'danger' : r.score >= 16 ? 'warn' : 'ok'}`, text: `${r.score}/100` }),
-        el('strong', { text: r.verdict }),
-      ])
-      const items = r.findings.map((x) =>
-        el('div', { class: 'stack url-safety-finding' }, [
-          el('div', { class: 'row' }, [el('span', { class: `badge ${BADGE[x.severity]}`, text: x.severity }), el('strong', { text: x.title })]),
-          el('div', { class: 'muted small', text: x.reason }),
-        ]),
-      )
       out.replaceChildren(
-        head,
-        ...(items.length ? items : [el('div', { class: 'muted small', text: 'No structural warning signs in the shape of this link.' })]),
+        ...(outcome ? [feedBlock(outcome)] : [el('div', { class: 'muted small url-check-pending', text: 'Checking blocklist feeds...' })]),
+        structuralBlock(r),
         el('div', {
           class: 'muted small',
-          text: 'This reads the text of the URL, not the site behind it. It is structural analysis and not a reputation check, so a clean result is not a promise that the destination is safe.',
+          text: 'A listing is a reported fact with a date. The structural score is a heuristic reading of the URL text and not of the site behind it, so a clean score is not a promise that the destination is safe.',
         }),
       )
     }
 
+    const render = () => {
+      current = analyzeUrl(input.value)
+      outcome = null
+      paint()
+      if (!current) return
+      const target = current.url
+      void checkFeeds(target)
+        .then((o) => {
+          // A slow feed must not overwrite a newer check.
+          if (current?.url !== target || !out.isConnected) return
+          outcome = o
+          paint()
+          // A check populates the small feed's cache, so the feed rows below are now
+          // stale: repaint them or the card claims the feed is still undownloaded.
+          void renderFeeds()
+        })
+        .catch((e: Error) => {
+          if (current?.url !== target || !out.isConnected) return
+          outcome = { hits: [], consulted: [], absent: [], errors: [{ feed: 'feeds', message: e.message }] }
+          paint()
+        })
+    }
+
+    async function renderFeeds(): Promise<void> {
+      feeds.replaceChildren(el('div', { class: 'group-label', text: 'Blocklist feeds' }))
+      for (const spec of FEEDS) {
+        const row = el('div', { class: 'stack url-check-feed-row' })
+        const status = el('div', { class: 'muted small url-check-feed-status' })
+        const actions = el('div', { class: 'row' })
+        const state = await loadFeed(spec)
+        status.textContent = state
+          ? `${state.entries} entries, ${sizeText(state.bytes)}, fetched ${ageText(state.fetchedAt)}${state.stale ? ', stale' : ''}`
+          : spec.bulk
+            ? `Not downloaded. ${spec.size}.`
+            : `Fetched automatically when you run a check. ${spec.size}.`
+        const busy = (label: string, job: () => Promise<unknown>) =>
+          button(
+            label,
+            () => {
+              status.textContent = `${label}...`
+              void job()
+                .catch((e: Error) => toast(e.message))
+                .then(() => void renderFeeds())
+            },
+            'ghost',
+          )
+        actions.append(busy(state ? 'Refresh' : 'Download', () => refreshFeed(spec)))
+        if (state) actions.append(busy('Delete', () => deleteFeed(spec)))
+        row.append(
+          el('div', { class: 'row' }, [el('strong', { text: spec.name }), el('span', { class: 'badge', text: spec.kind === 'urls' ? 'URLs' : 'hostnames' })]),
+          status,
+          actions,
+        )
+        feeds.append(row)
+      }
+    }
+
+    const auto = el('input', { type: 'checkbox' }) as HTMLInputElement
+    void pasteCheckEnabled().then((on) => {
+      auto.checked = on
+    })
+    auto.addEventListener('change', () => void setPasteCheckEnabled(auto.checked))
+
     container.append(
       input,
-      el('div', { class: 'row' }, [button('Analyze', render, 'primary'), copyButton(() => (current ? reportToText(current) : ''), ctx.clipboard.write, 'Copy report', 'ghost')]),
-      el('p', { class: 'muted small', text: 'Runs entirely on this device. The link is never fetched and nothing is sent anywhere.' }),
+      el('div', { class: 'row' }, [
+        button('Check', render, 'primary'),
+        copyButton(() => (current ? reportToText(current, outcome ?? undefined) : ''), ctx.clipboard.write, 'Copy report', 'ghost'),
+      ]),
+      el('p', {
+        class: 'muted small',
+        text: 'The structural read is local and never fetches the link. Feed lookups compare the address against published phishing lists downloaded here; the link itself is still never opened.',
+      }),
       out,
+      el('label', { class: 'row small url-check-auto' }, [auto, el('span', { text: 'Check links pasted into the feed automatically' })]),
+      feeds,
     )
     input.addEventListener('keydown', (e) => {
       if ((e as KeyboardEvent).key === 'Enter') render()
     })
+    void renderFeeds()
   },
 }
 

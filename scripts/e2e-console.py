@@ -1,4 +1,4 @@
-"""E2E: utilscript console. Mount, launcher (hover/grid/reorder), generators,
+"""E2E: urletc console. Mount, launcher (hover/grid/reorder), generators,
 TTS, collapsible cards + sidebar groups, feed deletion, code chip, theme, connect modal,
 every text tool DRIVEN with real input, and the service worker precache install."""
 import io
@@ -36,6 +36,21 @@ def tool_ids():
     ids = re.findall(r"^\s*id: '([a-z0-9-]+)',", src, re.M)
     assert len(ids) >= 15, f'expected the full tool registry, parsed only {ids}'
     return ids
+
+
+def tool_id_for(module):
+    """The registered id of the tool whose `load:` imports `module`.
+
+    Resolved from source rather than hardcoded because ids get renamed. A stale literal
+    would leave the tool untested while the suite still reported green.
+    """
+    src = io.open(os.path.join(os.path.dirname(__file__), '..', 'src', 'tools', 'index.ts'), encoding='utf-8').read()
+    for block in re.findall(r'registry\.register\(\{(.*?)\n  \}\)', src, re.S):
+        if f"import('./{module}')" in block:
+            m = re.search(r"id: '([a-z0-9-]+)'", block)
+            if m:
+                return m.group(1)
+    raise AssertionError(f'no registered tool loads ./{module}')
 
 
 # Third-party relays flap, so a handful of lines is tolerated. Above this the relay list
@@ -87,7 +102,7 @@ with sync_playwright() as p:
     # --- 1. mount / shell ---
     # inner_text() returns RENDERED text, so it reflects text-transform; assert the DOM
     # text and the presentation separately rather than coupling them.
-    check('brand mounted', page.locator('.topbar .brand').text_content() == 'utilscript')
+    check('brand mounted', page.locator('.topbar .brand').text_content() == 'urletc')
     check('brand uses the tracked uppercase treatment',
           page.eval_on_selector('.topbar .brand',
                                 "e => getComputedStyle(e).textTransform") == 'uppercase')
@@ -111,7 +126,7 @@ with sync_playwright() as p:
     titles = page.eval_on_selector_all('.composer .bar button', 'els => els.map(e => e.title)')
     check('composer buttons have tooltips', all(t for t in titles), str(titles))
 
-    # --- 2b. hermetic runs: any OTHER utilscript behind this public IP (a stray
+    # --- 2b. hermetic runs: any OTHER urletc behind this public IP (a stray
     # tab, another checkout) connects via Nearby and turns the "0 peers" queue
     # tests into real sends. Switch Nearby off exactly as a user would. ---
     page.evaluate("location.hash = '#/t/settings'")
@@ -466,7 +481,7 @@ with sync_playwright() as p:
       const g = c.getContext('2d')
       g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height)
       g.fillStyle = '#000'; g.font = 'bold 76px Georgia, serif'; g.textBaseline = 'middle'
-      g.fillText('Hello utilscript', 18, 74)
+      g.fillText('Hello urletc', 18, 74)
       const blob = await new Promise(r => c.toBlob(r, 'image/png'))
       const dt = new DataTransfer()
       dt.items.add(new File([blob], 'shot.png', { type: 'image/png' }))
@@ -502,7 +517,7 @@ with sync_playwright() as p:
         ocr_text = t_
     check('OCR worker starts under Trusted Types',
           'TrustedScriptURL' not in ocr_text and 'Failed to construct' not in ocr_text, ocr_text[:160])
-    check('OCR actually reads the pasted image', 'utilscript' in ocr_text.lower(), ocr_text[:160])
+    check('OCR actually reads the pasted image', 'urletc' in ocr_text.lower(), ocr_text[:160])
 
     # --- 13h. locale drives the default generator region, pt-BR gives Brazil ---
     ctx2 = browser.new_context(locale='pt-BR')
@@ -827,6 +842,88 @@ with sync_playwright() as p:
     check('tempmail raises no page error while rendering a hostile body', not pg5_errs, ' | '.join(pg5_errs)[:160])
     pg5.close()
 
+    # Rendering a message that was already there proves only the render. The PRODUCT is mail
+    # that shows up on its own, so hold the inbox empty for the first check and open it on
+    # the next: the row can then only come from a second, unprompted fetch. Nothing is
+    # clicked. A tool that renders on demand but never polls looks exactly like a tool that
+    # is not receiving mail, which is the complaint that sent us here.
+    def mailgw_stub(body):
+        return """
+          const REAL = window.fetch.bind(window)
+          const AT = String.fromCharCode(64)
+          window.__polls = 0
+          window.__accounts = 0
+          window.__tokens = 0
+          const M = {id: 'm2', from: {address: 'later' + AT + 'stub.example', name: 'Later'},
+                     subject: 'Arrived while you waited', seen: false,
+                     createdAt: new Date().toISOString(), text: 'body 987654'}
+          window.fetch = (input, init) => {
+            const url = typeof input === 'string' ? input : (input && input.url) || ''
+            if (url.indexOf('https://api.mail.gw') !== 0) return REAL(input, init)
+            const json = (o, s) => Promise.resolve(new Response(JSON.stringify(o),
+              {status: s || 200, headers: {'Content-Type': 'application/json'}}))
+            if (url.endsWith('/domains')) return json({'hydra:member': [{domain: 'stub.example', isActive: true}]})
+            if (url.endsWith('/accounts')) { window.__accounts++; %s }
+            if (url.endsWith('/token')) { window.__tokens++; return json({token: 'stub-token'}) }
+            if (/\\/messages\\/[^/]+$/.test(url)) return json(M)
+            if (url.endsWith('/messages')) { window.__polls++; %s }
+            return json({}, 404)
+          }
+        """ % body
+
+    def drive_stub(script, want, budget=45):
+        """Open the tool on a stubbed page and wait for `want(page)`. Returns (page, met).
+
+        Its OWN browser context, not `ctx`: the tool restores a saved address from
+        IndexedDB, so a page sharing storage with the live run above never reaches the
+        claim path at all, and every assertion about claiming would pass or fail for the
+        wrong reason. A fresh context is the only way to test a first-run inbox.
+        """
+        c = browser.new_context()
+        pg = c.new_page()
+        pg.add_init_script(script)
+        pg.goto(f'{BASE}/#/t/tempmail')
+        pg.wait_for_selector('input.tm-addr', timeout=20000)
+        for _ in range(budget):
+            if want(pg):
+                return (pg, c), True
+            pg.wait_for_timeout(1000)
+        return (pg, c), False
+
+    ARRIVES = mailgw_stub(("return json({address: 'stub' + AT + 'stub.example'}, 201)",
+                           "return json({'hydra:member': window.__polls > 1 ? [M] : []})"))
+    (pg6, cx6), arrived = drive_stub(ARRIVES, lambda p: p.locator('.tm-msg').count() > 0)
+    check('tempmail shows mail that arrives after the first check, with nothing clicked',
+          arrived, f'polls={pg6.evaluate("window.__polls")} status={pg6.locator(".tm-status").first.inner_text()[:80]!r}')
+    check('tempmail re-reads the one inbox it claimed instead of claiming another per poll',
+          pg6.evaluate('window.__accounts') == 1, f'accounts={pg6.evaluate("window.__accounts")}')
+    cx6.close()
+
+    # A refused claim is the only state with NO address on screen, so it is the one that most
+    # needs to retry itself. It used to stop dead: the status promised a next check, no timer
+    # was ever armed, and nothing happened again until someone pressed Refresh. Two attempts
+    # is the whole assertion; one is the wedge.
+    REFUSED = mailgw_stub(('return json({}, 429)', "return json({'hydra:member': []})"))
+    (pg7, cx7), retried = drive_stub(REFUSED, lambda p: p.evaluate('window.__accounts') >= 2, budget=40)
+    check('tempmail retries a claim the provider refused instead of wedging with no address',
+          retried, f'accounts={pg7.evaluate("window.__accounts")}')
+    check('tempmail names the rate limit while it keeps retrying',
+          'rate limiting' in pg7.locator('.tm-status').first.inner_text().lower(),
+          pg7.locator('.tm-status').first.inner_text()[:110])
+    cx7.close()
+
+    # A 401 on /messages is an EXPIRED TOKEN, not a dead account. Re-claiming on it throws
+    # away an inbox that may already hold mail, so the tool has to log in again and keep the
+    # address it is showing.
+    EXPIRED = mailgw_stub(("return json({address: 'stub' + AT + 'stub.example'}, 201)",
+                           "if (window.__polls === 1) return json({}, 401);\n"
+                           "              return json({'hydra:member': [M]})"))
+    (pg8, cx8), recovered = drive_stub(EXPIRED, lambda p: p.locator('.tm-msg').count() > 0)
+    check('tempmail logs in again on an expired token rather than abandoning the inbox',
+          recovered and pg8.evaluate('window.__accounts') == 1 and pg8.evaluate('window.__tokens') >= 2,
+          f'accounts={pg8.evaluate("window.__accounts")} tokens={pg8.evaluate("window.__tokens")}')
+    cx8.close()
+
     tm_errs = [l for l in logs[tm_before:] if l.startswith('pageerror:')]
     check('tempmail raises no page error on either path', not tm_errs, ' | '.join(tm_errs)[:160])
 
@@ -922,7 +1019,7 @@ with sync_playwright() as p:
     # that something non-empty and non-error came back.
     # (id, [(selector, nth, value)], trigger button text or None, output selector, reject substrings)
     SMOKE = [
-        ('base64', [('textarea', 0, 'utilscript')], 'Encode', 'pre', ('error', 'invalid')),
+        ('base64', [('textarea', 0, 'urletc')], 'Encode', 'pre', ('error', 'invalid')),
         ('hash', [('textarea', 0, 'abc')], 'Hash text', 'pre', ('failed', 'hex digest')),
         ('json-format', [('textarea', 0, '{"b":1,"a":[2,3]}')], 'Format', 'pre', ('invalid json',)),
         ('url-info', [('input.full', 0, 'https://example.com:8080/p?q=1#h')], 'Parse', '.stack', ('not a valid url',)),
@@ -955,14 +1052,13 @@ with sync_playwright() as p:
         check(f'{tid}: driven input produces output',
               ok, (bad[0][:110] if bad else f'output={text[:70]!r}'))
 
-    # ===================== shorten + url-safety (driven) =====================
+    # ===================== url check + shorten (driven) =====================
     # Appended as a self-contained block; nothing above is restructured. Both tools are
     # driven with real input and asserted on real output, because a rendered card only
     # ever proved that the module imported.
 
-    # url-safety's whole claim is that it runs locally, so watch the wire while it works:
-    # one outbound request would falsify the tool's central promise. Attached here, so it
-    # sees only what these two tools do.
+    # The link itself must never be fetched, and the 3.6 MB bulk feed must never be
+    # pulled behind the user's back. Both are watched on the wire.
     offsite = []
 
     def _watch_request(r):
@@ -971,22 +1067,54 @@ with sync_playwright() as p:
 
     page.on('request', _watch_request)
 
-    # Every trick at once: credentials before the @, a brand in a subdomain, a punycode
-    # label that decodes to Latin + Cyrillic, a free-registration TLD, an odd port, http,
-    # and double percent-encoding.
+    UC = tool_id_for('url-safety')
+
+    # A live known-bad URL, taken from OpenPhish AT TEST TIME. Hardcoding one is useless:
+    # the feed rotates, so a literal would silently stop being listed and the assertion
+    # would pass for the wrong reason (or fail forever). Fetched out of band via
+    # Playwright's request context, so picking the sample is independent of whether the
+    # page itself can reach the feed.
+    OPENPHISH = 'https://raw.githubusercontent.com/openphish/public_feed/main/feed.txt'
+    sample, feed_lines = None, 0
+    try:
+        fr = page.request.get(OPENPHISH, timeout=30000)
+        if fr.ok:
+            for ln in fr.text().splitlines():
+                ln = ln.strip()
+                if ln.startswith(('http://', 'https://')) and ' ' not in ln:
+                    feed_lines += 1
+                    if sample is None:
+                        sample = ln
+    except Exception:
+        sample = None
+    check('url-check: the OpenPhish feed is reachable and non-empty', bool(sample) and feed_lines > 10,
+          f'{feed_lines} usable lines')
+    sample_host = re.sub(r'^https?://', '', sample or '').split('/')[0].split(':')[0] if sample else ''
+
+    # Every structural trick at once: credentials before the @, a brand in a subdomain, a
+    # punycode label that decodes to Latin + Cyrillic, a free-registration TLD, an odd
+    # port, http, and double percent-encoding.
     # The @ is spelled with chr(64) so the literal cannot be mistaken for an address.
     NASTY = ('http://admin:hunter2' + chr(64) + 'paypal.com.login-verify.xn--pypal-4ve.tk:8081'
              '/reset%2Fpass%2Fnow%252Fdeep%2Fx%2Fy?to=%2Faccount%2Fx')
-    page.evaluate("location.hash = '#/t/url-safety'")
+    page.evaluate(f"location.hash = '#/t/{UC}'")
     page.wait_for_timeout(800)
     us = page.locator('details.card').last.locator('.card-body')
-    us_reqs = len(offsite)
-    us.locator('input.full').fill(NASTY)
-    us.locator('button', has_text='Analyze').first.click()
-    page.wait_for_timeout(400)
-    us_text = us.locator('.url-safety-out').inner_text().lower()
-    n_find = us.locator('.url-safety-finding').count()
-    check('url-safety: a nasty URL yields a full set of findings', n_find >= 7, f'{n_find} findings, out={us_text[:120]!r}')
+
+    def uc_run(value, want_feeds=True, budget=25):
+        # Type a URL, press Check, and wait for the FEED layer, not just the local one.
+        us.locator('input.full').fill(value)
+        us.locator('button', has_text='Check').first.click()
+        for _ in range(budget):
+            page.wait_for_timeout(500)
+            if not want_feeds or us.locator('.url-check-feedresult').count() == 1:
+                break
+        return us.locator('.url-check-out').inner_text().lower()
+
+    us_text = uc_run(NASTY)
+    n_find = us.locator('.url-check-finding').count()
+    check('url-check: a nasty URL yields a full set of structural findings', n_find >= 7,
+          f'{n_find} findings, out={us_text[:120]!r}')
     for label, needle in [
         ('credentials before the @', 'login credentials in the url'),
         ('mixed-script homograph host', 'homograph attack'),
@@ -998,27 +1126,147 @@ with sync_playwright() as p:
         ('double percent-encoding', 'double percent-encoding'),
         ('deep subdomain nesting', 'levels of subdomain'),
     ]:
-        check(f'url-safety: reports {label}', needle in us_text, f'missing {needle!r}')
-    score_badge = us.locator('.url-safety-score .badge').first.inner_text().strip()
-    check('url-safety: scores the nasty URL as high risk', score_badge.split('/')[0].isdigit() and int(score_badge.split('/')[0]) >= 45, f'score={score_badge!r}')
-    check('url-safety: states it is not a reputation check', 'not a reputation check' in us_text)
-    check('url-safety: analysis makes no network request', len(offsite) == us_reqs, str(offsite[us_reqs:])[:140])
+        check(f'url-check: reports {label}', needle in us_text, f'missing {needle!r}')
+    score_badge = us.locator('.url-check-score .badge').first.inner_text().strip()
+    check('url-check: scores the nasty URL as high risk',
+          score_badge.split('/')[0].isdigit() and int(score_badge.split('/')[0]) >= 45, f'score={score_badge!r}')
+    check('url-check: separates the heuristic layer from the fact layer',
+          us.locator('.url-check-structural').count() == 1 and 'heuristic' in us_text, us_text[-200:])
+    # The whole point of the local layer: it reads the text, it does not open the link.
+    check('url-check: never fetches the link it is judging',
+          not any('login-verify' in u or 'xn--pypal' in u for u in offsite), str(offsite[-4:])[:160])
 
-    # A scorer that flags everything is worthless, so prove the clean case is clean.
-    us.locator('input.full').fill('https://example.com/pricing')
-    us.locator('button', has_text='Analyze').first.click()
-    page.wait_for_timeout(300)
-    clean_text = us.locator('.url-safety-out').inner_text().lower()
-    check('url-safety: an ordinary https URL raises nothing',
-          us.locator('.url-safety-finding').count() == 0 and 'nothing structurally suspicious' in clean_text,
+    # --- the fact layer: a URL the feed actually lists right now ---
+    if sample:
+        bad_text = uc_run(sample)
+        listed = us.locator('.url-check-feedresult').inner_text().lower()
+        check('url-check: a live OpenPhish URL is reported as listed', 'listed by openphish' in listed, listed[:200])
+        check('url-check: an exact URL hit is named as an exact URL hit',
+              'this exact url is listed' in listed, listed[:200])
+        check('url-check: the listing states the age of the feed',
+              ' old' in listed and 'entries' in listed, listed[:200])
+        check('url-check: a listing reads as a fact, not a score',
+              us.locator('.url-check-feedresult .badge.danger').count() == 1, listed[:200])
+        check('url-check: the feed lookup really goes to the OpenPhish feed',
+              any('openphish/public_feed' in u for u in offsite), str(offsite[-5:])[:200])
+        check('url-check: checking a listed URL still never fetches it',
+              sample_host == '' or not any(sample_host in u for u in offsite), str(offsite[-4:])[:200])
+        check('url-check: the copy-report text carries the listing',
+              'openphish' in bad_text, bad_text[:160])
+
+    # A verdict that flags everything is worthless, so prove the clean case is clean in
+    # BOTH layers: no structural findings and no listing.
+    clean_text = uc_run('https://example.com/pricing')
+    clean_feeds = us.locator('.url-check-feedresult').inner_text().lower()
+    check('url-check: an ordinary https URL raises nothing structural',
+          us.locator('.url-check-finding').count() == 0 and 'nothing structurally suspicious' in clean_text,
           clean_text[:140])
-    us.locator('input.full').fill('not a url at all')
-    us.locator('button', has_text='Analyze').first.click()
-    page.wait_for_timeout(250)
-    check('url-safety: rejects a non-URL', 'not a valid url' in us.locator('.url-safety-out').inner_text().lower())
+    check('url-check: an ordinary https URL is not reported as listed',
+          'listed by' not in clean_feeds and 'not on' in clean_feeds, clean_feeds[:200])
+    check('url-check: a clean answer still names the feed and its age',
+          'openphish' in clean_feeds and ' old' in clean_feeds, clean_feeds[:200])
+
+    check('url-check: rejects a non-URL', 'not a valid url' in uc_run('not a url at all', want_feeds=False))
+
+    # The 3.6 MB list is opt in. Nothing may pull it on load or on a check.
+    check('url-check: the bulk feed is never downloaded unasked',
+          not any('phishing-domains-ACTIVE' in u for u in offsite), str([u for u in offsite if 'jsdelivr' in u])[:200])
+    rows = us.locator('.url-check-feed-row')
+    check('url-check: every feed is listed with its state', rows.count() == 3, f'{rows.count()} rows')
+    check('url-check: the undownloaded bulk feed says so, with its size',
+          'not downloaded' in rows.nth(1).inner_text().lower() and 'mb' in rows.nth(1).inner_text().lower(),
+          rows.nth(1).inner_text()[:160])
+    check('url-check: a cached feed shows entry count, size and age',
+          re.search(r'\d+ entries.*(kb|mb).*fetched.*old', rows.nth(0).inner_text().lower(), re.S) is not None,
+          rows.nth(0).inner_text()[:160])
+    check('url-check: a cached feed can be refreshed and deleted',
+          rows.nth(0).locator('button', has_text='Refresh').count() == 1
+          and rows.nth(0).locator('button', has_text='Delete').count() == 1)
+
+    # --- paste: the verdict must land on the card without opening the tool ---
+    PASTE_JS = '''(url) => {
+      if (document.activeElement && document.activeElement.blur) document.activeElement.blur()
+      const dt = new DataTransfer()
+      dt.setData('text/plain', url)
+      document.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }))
+    }'''
+
+    def paste_verdict(url):
+        # Peers in the code room push their own cards while this runs, so `.feed-item`
+        # .last is not the pasted one. Address the verdict directly instead.
+        page.evaluate("location.hash = '#/'")
+        page.wait_for_timeout(400)
+        before = page.locator('.url-check-card').count()
+        page.evaluate(PASTE_JS, url)
+        # The card is built behind two dynamic imports, so poll instead of guessing a
+        # delay: a fixed wait turns a slow chunk load into a phantom failure.
+        for _ in range(40):
+            page.wait_for_timeout(250)
+            if page.locator('.url-check-card').count() > before:
+                break
+        return before, page.locator('.url-check-card').last
+
+    # The off switch has to be real, not decorative: with it off a pasted link gets a
+    # button and nothing else, and that button still has to produce the full verdict.
+    # The mount-all pass above already left a URL Check card in the feed, so scope this
+    # to the card this block opened rather than matching both.
+    auto = page.locator('.url-check-auto input[type="checkbox"]').last
+    check('url-check: pasted links are checked by default', auto.is_checked())
+    auto.uncheck()
+    page.wait_for_timeout(300)
+    _, offv = paste_verdict('https://example.org/quiet')
+    check('url-check: with the switch off a pasted link is not checked automatically',
+          offv.locator('.url-check-structural').count() == 0
+          and offv.locator('button', has_text='Check this link').count() == 1,
+          offv.inner_text()[:160])
+    offv.locator('button', has_text='Check this link').first.click()
+    manual = ''
+    for _ in range(30):
+        page.wait_for_timeout(500)
+        if offv.locator('.url-check-feedresult').count() == 1:
+            manual = offv.locator('.url-check-feedresult').inner_text().lower()
+            break
+    check('url-check: the manual button on a pasted card produces the full verdict',
+          offv.locator('.url-check-structural').count() == 1 and 'openphish' in manual,
+          manual[:160] or 'no verdict rendered')
+    auto.check()
+    page.wait_for_timeout(300)
+
+    if sample:
+        before, vc = paste_verdict(sample)
+        check('pasted link is checked without opening the tool',
+              page.locator('.url-check-card').count() == before + 1, f'{before} verdict cards before')
+        # The local layer paints before the network answers: that is why the paste is
+        # not blocked. Asserted while the feed answer may still be pending.
+        check('pasted link shows the instant local verdict first',
+              vc.locator('.url-check-structural').count() == 1, 'no structural block on the card')
+        verdict = ''
+        for _ in range(40):
+            if vc.locator('.url-check-feedresult').count() == 1:
+                verdict = vc.locator('.url-check-feedresult').inner_text().lower()
+                break
+            page.wait_for_timeout(500)
+        check('pasted known-bad link is reported as listed, on the card',
+              'listed by openphish' in verdict, verdict[:200] or 'no verdict rendered')
+        check('pasted verdict names the strength of the match',
+              'this exact url is listed' in verdict, verdict[:200])
+
+    before, cvc = paste_verdict('https://example.com/pricing')
+    check('clean url paste is checked on the card too',
+          page.locator('.url-check-card').count() == before + 1, f'{before} verdict cards before')
+    cverdict = ''
+    for _ in range(30):
+        if cvc.locator('.url-check-feedresult').count() == 1:
+            cverdict = cvc.locator('.url-check-feedresult').inner_text().lower()
+            break
+        page.wait_for_timeout(500)
+    check('pasted clean link is not reported as listed',
+          bool(cverdict) and 'listed by' not in cverdict, cverdict[:200] or 'no verdict rendered')
+    check('pasted clean link still names the feed it was checked against',
+          'openphish' in cverdict, cverdict[:200])
 
     # --- shorten: the one tool that leaves the device ---
-    page.evaluate("location.hash = '#/t/shorten'")
+    page.evaluate(f"location.hash = '#/t/{tool_id_for('shorten')}'")
     page.wait_for_timeout(800)
     sh = page.locator('details.card').last.locator('.card-body')
     check('shorten: the card says the URL is sent to spoo.me', 'spoo.me' in sh.inner_text().lower())
@@ -1058,7 +1306,7 @@ with sync_playwright() as p:
     net_errs = [l for l in logs[err_before:] if l.startswith('pageerror:')]
     check('shorten: the network path raises no unhandled error', not net_errs, ' | '.join(net_errs[:2])[:160])
     page.remove_listener('request', _watch_request)
-    # =================== end shorten + url-safety block ===================
+    # =================== end url check + shorten block ===================
 
     # ===================== subtitles (driven, exact output) =====================
     # Self-contained block; nothing above is restructured. The tool is pure computation on

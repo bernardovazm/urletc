@@ -8,6 +8,7 @@
 #   E2E_VENV       venv dir (default .venv-e2e, gitignored)
 #   E2E_NO_SERVER  =1 to skip build+preview and test an already-running E2E_BASE
 #   E2E_WITH_DEPS  =1 to `playwright install --with-deps` (CI; needs root)
+#   E2E_NO_HISTORY =1 to skip the slow two-context history replay harness
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -48,3 +49,10 @@ done
 
 # 4. Run the suite.
 E2E_BASE="$BASE" "$PY" scripts/e2e-console.py
+
+# 5. Two-context history replay. Its own harness because it needs a SECOND browser
+#    context and real rendezvous between them, which the single-page suite above is not
+#    shaped for. Slower than everything else here, hence the opt-out.
+if [ "${E2E_NO_HISTORY:-0}" != "1" ]; then
+  E2E_BASE="$BASE" "$PY" scripts/e2e-history.py
+fi

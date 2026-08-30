@@ -28,7 +28,7 @@ import { SecureChannel, type SealedMessage } from './ratchet'
 
 // Trystero namespace. Every room id derives from it, so changing this value moves the
 // whole app to a fresh namespace and older clients can no longer see newer ones.
-const APP_ID = 'utilscript'
+const APP_ID = 'urletc'
 // Rendezvous relays, chosen by measurement rather than reputation. The previous set
 // (relay.damus.io, nos.lol, relay.nostr.band) refused essentially every announce: damus
 // answered "rate-limited: you are noting too much", nos.lol demanded 28 bits of
@@ -97,7 +97,10 @@ const MIN_CODE_CHARS = 4 // shorter than this is not a room, it is a typo
 //      presenceOnly one. Checked here, in the session layer, so a tier cannot be opted in
 //      by someone later editing a list in the console.
 //   2. Answering requires a provider the app installed. No provider is silence, which is
-//      also what an empty room looks like, so the setting itself does not leak.
+//      also what an empty room looks like, so the setting itself does not leak. The
+//      request is REMEMBERED though, because a peer asks exactly once (at handshake):
+//      without that, agreeing to share a moment later could only ever help the NEXT
+//      joiner, never the person actually waiting.
 //   3. Records are accepted only from a peer we asked, once, capped. Unsolicited history
 //      is dropped: this is a pull, never a push.
 //   4. The stream carries records and nothing else. It cannot make a peer join a room,
@@ -107,6 +110,7 @@ const MAX_HISTORY_ITEMS = 500 // records sent in one answer, and accepted from o
 const MAX_HISTORY_CHUNK = 50 // inbound records read from a single message; the rest is discarded
 const MAX_HISTORY_FUTURE_MS = 5 * 60_000 // clock skew tolerated on an inbound timestamp
 const MIN_HISTORY_TS = Date.UTC(2020, 0, 1) // sanity floor; retention policy is the app's, not the wire's
+const MAX_PENDING_HISTORY_ASKS = 32 // peers whose unanswered request we remember, so a later grant can honour it
 // Message ids are minted by the sender and are the dedupe key on arrival, so they are
 // bounded and character-restricted like every other inbound string.
 const HISTORY_ID_RE = /^[A-Za-z0-9_.:-]{1,64}$/
@@ -235,6 +239,13 @@ export interface SessionEvents {
    * they control, which is the vulnerability the chat-code path was already fixed for.
    */
   onInvite?: (sig: InviteSignal) => void
+  /**
+   * An authenticated peer asked for history and we answered with silence, because no
+   * provider is installed. Reported so the app can ASK the user at the only moment the
+   * question is meaningful, instead of leaving the setting to be found in a modal.
+   * Purely informational: the peer is told nothing until `answerHistory` is called.
+   */
+  onHistoryRequest?: (peerId: string) => void
 }
 
 export interface RoomSession {
@@ -291,6 +302,13 @@ export interface RoomSession {
    * presence stay incapable of carrying history no matter what the caller asks for.
    */
   setHistory(cfg: { provide: (() => HistoryRecord[]) | null; request: boolean; onRecords: ((records: HistoryRecord[], fromPeerId: string) => void) | null }): void
+  /**
+   * Answer ONE peer that already asked, without installing a provider for the room.
+   * This is the per-person grant: it is still a pull, because the peer's own request is
+   * the precondition. Returns false when the peer never asked, has already been answered,
+   * is not authenticated, or the session cannot carry history at all.
+   */
+  answerHistory(peerId: string, records: HistoryRecord[]): Promise<boolean>
   /** Whether this session may carry history at all. */
   historyCapable(): boolean
   /** Retract an invite you sent, so their prompt disappears. */
@@ -433,6 +451,7 @@ export async function joinRoomSession(opts: {
   let historyRequest = false
   let historyRecords: ((records: HistoryRecord[], fromPeerId: string) => void) | null = null
   const historyServed = new Set<string>() // peers already answered: one answer each, ever
+  const historyPending = new Set<string>() // peers that asked while no provider existed
   const historyAsked = new Set<string>() // peers we asked: ONLY these may hand us records
   const historyTaken = new Map<string, number>() // records accepted per peer, capped
 
@@ -469,6 +488,7 @@ export async function joinRoomSession(opts: {
     const st = peers.get(peerId)
     peers.delete(peerId)
     historyServed.delete(peerId)
+    historyPending.delete(peerId)
     historyAsked.delete(peerId)
     historyTaken.delete(peerId)
     emitRoster()
@@ -741,17 +761,19 @@ export async function joinRoomSession(opts: {
       return // malformed or replayed: dropped in silence
     }
     if (env.t === 'hreq') {
+      // A second request is ignored: one answer per peer, so a request cannot be looped
+      // to make us re-encrypt and re-send the whole store.
+      if (historyServed.has(ctx.peerId)) return
       // No provider means the app has not agreed to share into this room. That answers
       // with silence, which is exactly what an empty room answers, so a peer cannot probe
-      // the setting. A second request is ignored: one answer per peer, so a request
-      // cannot be looped to make us re-encrypt and re-send the whole store.
-      if (!historyProvide || historyServed.has(ctx.peerId)) return
-      historyServed.add(ctx.peerId)
-      const all = historyProvide().slice(-MAX_HISTORY_ITEMS)
-      for (let i = 0; i < all.length; i += HISTORY_CHUNK) {
-        const items = all.slice(i, i + HISTORY_CHUNK)
-        await hist.send(await st.channel.seal(enc.encode(JSON.stringify({ t: 'hres', items } satisfies HistEnvelope))), { target: ctx.peerId })
+      // the setting. The ASK is kept locally (bounded, and never told to them) so that a
+      // grant made seconds later can still reach the person who is waiting for it.
+      if (!historyProvide) {
+        if (historyPending.size < MAX_PENDING_HISTORY_ASKS) historyPending.add(ctx.peerId)
+        ev.onHistoryRequest?.(ctx.peerId)
+        return
       }
+      await serveHistory(ctx.peerId, historyProvide())
       return
     }
     if (env.t !== 'hres') return
@@ -770,6 +792,24 @@ export async function joinRoomSession(opts: {
     if (!clean.length) return
     historyTaken.set(ctx.peerId, taken + clean.length)
     historyRecords(clean, ctx.peerId)
+  }
+
+  /**
+   * Send our records to one peer that asked. The single outbound path for history, so
+   * the "one answer per peer, ever" rule and the outbound cap are enforced in one place
+   * whether the answer is automatic (a provider is installed) or granted by hand.
+   */
+  async function serveHistory(peerId: string, records: HistoryRecord[]): Promise<boolean> {
+    const st = peers.get(peerId)
+    if (!st?.channel || historyServed.has(peerId)) return false
+    historyServed.add(peerId)
+    historyPending.delete(peerId)
+    const all = records.slice(-MAX_HISTORY_ITEMS)
+    for (let i = 0; i < all.length; i += HISTORY_CHUNK) {
+      const items = all.slice(i, i + HISTORY_CHUNK)
+      await hist.send(await st.channel.seal(enc.encode(JSON.stringify({ t: 'hres', items } satisfies HistEnvelope))), { target: peerId })
+    }
+    return true
   }
 
   /** Ask one authenticated peer for what it holds. Once per peer per session. */
@@ -1003,9 +1043,21 @@ export async function joinRoomSession(opts: {
       historyProvide = cfg.provide
       historyRequest = cfg.request
       historyRecords = cfg.onRecords
+      // A provider installed AFTER a peer asked answers that peer now. Without this the
+      // switch only ever helped the NEXT joiner, because a peer asks once and never again.
+      if (historyProvide && historyPending.size) {
+        const owed = historyProvide() // read once: every waiting peer is answered from the same snapshot
+        for (const peerId of [...historyPending]) void serveHistory(peerId, owed)
+      }
       // A setting flipped after the room filled must still reach the peers already in it,
       // otherwise "ask for history" would only ever take effect on the next join.
       if (historyRequest) for (const [peerId, st] of peers) if (st.channel) void askHistory(peerId, st)
+    },
+    async answerHistory(peerId, records) {
+      // Still a pull: only a peer whose own request is outstanding can be answered, so
+      // this cannot be turned into a way to push history at someone who never asked.
+      if (!historyOk || !historyPending.has(peerId)) return false
+      return serveHistory(peerId, records)
     },
     historyCapable: () => historyOk,
 
@@ -1090,6 +1142,7 @@ export async function joinRoomSession(opts: {
       historyRecords = null
       historyRequest = false
       historyServed.clear()
+      historyPending.clear()
       historyAsked.clear()
       historyTaken.clear()
       liveSessions.delete(api)

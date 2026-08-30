@@ -56,6 +56,7 @@ const HISTORY_MAX = 500 // records kept on this device
 const HISTORY_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000 // 30 days
 const HISTORY_MAX_BYTES = 256 * 1024 // serialized backstop: 500 x 4000 chars would be 2 MB
 const HISTORY_BATCH_MS = 800 // quiet time before a peer's chunks render as one card
+const MAX_HISTORY_PROMPTS = 8 // simultaneous "they asked for earlier messages" cards
 const MAX_PENDING_STREAMS = 16
 const INVITE_TIMEOUT = 90_000 // an invite nobody answers stops claiming to be pending
 const MAX_INBOUND_INVITES = 8 // prompts on screen at once, so a peer cannot paper the feed
@@ -209,7 +210,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   const feedInner = el('div', { class: 'feed-inner' })
   const feed = el('div', { class: 'feed' }, [feedInner])
   const empty = el('div', { class: 'empty' }, [
-    el('div', { class: 'big', text: 'utilscript' }),
+    el('div', { class: 'big', text: 'urletc' }),
     el('div', { text: p2pReady ? 'Paste, drop or attach. Type / for tools. Nearby devices connect automatically.' : 'Paste, drop or attach. Type / for tools.' }),
   ])
   feedInner.append(empty)
@@ -386,6 +387,67 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     sys(`Replayed ${hit.recs.length} earlier message${hit.recs.length === 1 ? '' : 's'} from ${who}.`)
   }
 
+  // A peer asked and we said nothing, because sharing into this tier is off. Rather than
+  // leave the switch to be discovered in a modal (which is what made the feature look
+  // broken: you share a link, they join, nothing happens and nothing explains why), ask
+  // here, once per peer, at the only moment the question means anything. The default
+  // stays off, so a code forwarded on to a stranger still replays nothing on its own:
+  // what changes is that a person is now present to decide, instead of silence.
+  const historyPrompts = new Map<string, { card: HTMLElement; tier: Tier }>()
+  /** Retire every open question for a tier. Used when the answer stops being per-person:
+   *  saying "always" answers everyone still waiting, so their cards must not sit there
+   *  asking something that is already decided. */
+  const dropHistoryPrompts = (tier: Tier) => {
+    for (const [peerId, p] of [...historyPrompts]) {
+      if (p.tier !== tier) continue
+      historyPrompts.delete(peerId)
+      p.card.remove()
+    }
+  }
+  function askToShareHistory(peerId: string, tier: Tier): void {
+    if (historyPrompts.has(peerId) || historyPrompts.size >= MAX_HISTORY_PROMPTS) return
+    const records = shareableHistory()
+    if (!records.length) return // nothing to offer: never nag about an empty store
+    const who = mergedPeers().find((x) => x.peer.peerId === peerId)?.peer.name ?? 'a device'
+    const n = records.length
+    const drop = () => {
+      const p = historyPrompts.get(peerId)
+      historyPrompts.delete(peerId)
+      p?.card.remove()
+    }
+    const card = el('div', { class: 'sys' })
+    const send = button(
+      'Send them',
+      () => {
+        drop()
+        // Records are re-read here, not captured above: what is sent is what is stored
+        // at the moment of consent, not at the moment the question was asked.
+        void sessions
+          .get(tier)
+          ?.answerHistory(peerId, shareableHistory())
+          .then((ok) => sys(ok ? `Sent ${n} earlier message${n === 1 ? '' : 's'} to ${who}.` : `Could not send earlier messages to ${who}.`))
+      },
+      'ghost small',
+      'Send this person the messages from before they arrived. Only them, only this once',
+    )
+    const always = button(
+      'Always in code rooms',
+      () => {
+        dropHistoryPrompts(tier)
+        shareToCode = true
+        void setItem('history-share-code', shareToCode)
+        applyHistory() // installs the provider, which answers everyone still waiting
+        sys('Earlier messages will be sent to people who join by code. Change it under Connect, "Earlier messages".')
+      },
+      'ghost small',
+      'Answer everyone who joins by code from now on, including this person',
+    )
+    const no = button('No', drop, 'ghost small', 'Keep them to yourself. They are told nothing')
+    card.append(el('span', { text: `${who} joined and asked for the ${n} earlier message${n === 1 ? '' : 's'} stored here. ` }), send, always, no)
+    historyPrompts.set(peerId, { card, tier })
+    addCard(card, () => historyPrompts.delete(peerId))
+  }
+
   /** Replayed entries render as ONE collapsed card, never as loose bubbles, so what was
    *  said before you arrived is never mistaken for what just arrived. Each line also
    *  carries its own date, which a live message keeps in a hover title. */
@@ -461,7 +523,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
    *  say it. Presence is the case that needed saying: it reads like a list of connections
    *  and is a list of strangers you may ask to connect. */
   const TIER_NOTE: Partial<Record<Tier, string>> = {
-    presence: 'Everyone running utilscript now. Visible only: press 🔗 on a row to connect before you can message.',
+    presence: 'Everyone running urletc now. Visible only: press 🔗 on a row to connect before you can message.',
   }
 
   /** How a peer is addressed in a control's accessible name. Every row renders the same
@@ -702,7 +764,12 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
       const box = el('div', { class: 'stack' })
       if (parts) for (const p of parts) box.append(el('div', { class: 'row' }, [el('span', { class: 'muted small', text: `${p.label}:` }), el('span', { text: p.value })]))
       actions.append(copyBtn(() => d.text ?? ''))
-      body.append(el('div', { class: 'muted small', text: 'Parsed (never auto-fetched)' }), box, actions)
+      // Proactive URL Check, mirroring auto-OCR for images: the structural verdict paints
+      // immediately and the blocklist answer fills in when it lands, so the paste is never
+      // blocked on the network. The tool card carries the off switch.
+      const verdict = el('div', { class: 'stack url-check-card' })
+      body.append(el('div', { class: 'muted small', text: 'Parsed (never auto-fetched)' }), box, verdict, actions)
+      void import('../tools/url-safety').then((m) => m.renderPasteVerdict(d.text ?? '', verdict))
     } else {
       const { textStats } = await import('../tools/text-utils')
       const s = textStats(d.text ?? '')
@@ -1542,6 +1609,10 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
       remember({ id: f.id, deviceId: f.from, name: senderLabel(f.from), text: f.name, ts: Date.now(), kind: 'file', size: f.size, tier })
       addCard(fileCard(f))
     },
+    onHistoryRequest: (peerId) => {
+      if (isDropped(peerId)) return // `dropped` is keyed by deviceId, so ask through the peerId helper
+      askToShareHistory(peerId, tier)
+    },
     onPeerStream: (peerId, stream, meta) => maybeAttachStream(peerId, stream, meta),
     onPeerLeave: (peerId) => {
       if (!isPresent(peerId)) dropPeerMedia(peerId)
@@ -1628,7 +1699,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     if (`${base}${h}` !== next) history.replaceState(null, '', next)
   }
 
-  /** The link that IS the invite: it opens utilscript already joined to our code room. */
+  /** The link that IS the invite: it opens urletc already joined to our code room. */
   const inviteLink = (code: string) => `${location.origin}${location.pathname}#/join/${code}${presenceWanted ? '?p=1' : ''}`
 
   /** Switch the code room: null = just leave; a code = leave current + join that one.
@@ -1868,14 +1939,14 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
 
       content.append(el('div', { class: 'group-label', text: codeLabel ? 'Or have them join you' : 'Or create a code to share' }))
       if (codeLabel) {
-        // The invite link spares the other person any typing: it opens utilscript
+        // The invite link spares the other person any typing: it opens urletc
         // already joined to this room (#/join/<code>, see the router).
         const invite = inviteLink(codeLabel)
         content.append(
           el('div', { class: 'code-big', text: codeLabel }),
           el('div', { class: 'row' }, [
             button('Copy code', () => void copyText(codeLabel), 'ghost', 'Send it over any channel, then they type it on their device'),
-            button('Copy invite link', () => void copyText(invite), 'ghost', 'Zero typing for them: the link opens utilscript already joined to your room'),
+            button('Copy invite link', () => void copyText(invite), 'ghost', 'Zero typing for them: the link opens urletc already joined to your room'),
             button(
               'New random code',
               async () => {
@@ -2029,7 +2100,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
       // Nearby is automatic; just report state.
       const nearbyText =
         nearbyState === 'on'
-          ? `On: anyone on this network running utilscript appears under "Nearby". They stay untrusted until you verify them.`
+          ? `On: anyone on this network running urletc appears under "Nearby". They stay untrusted until you verify them.`
           : nearbyState === 'searching'
             ? 'Checking this network...'
             : nearbyState === 'off'
@@ -2151,7 +2222,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   applySidebar()
 
   const topbar = el('div', { class: 'topbar' }, [
-    el('span', { class: 'brand', text: 'utilscript' }),
+    el('span', { class: 'brand', text: 'urletc' }),
     statusChip,
     codeChip,
     el('span', { class: 'spacer' }),

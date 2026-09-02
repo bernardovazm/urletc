@@ -1,0 +1,11 @@
+node_modules
+dist
+dev-dist
+.vercel
+.DS_Store
+*.local
+.local
+.venv
+.venv-e2e
+__pycache__
+*.log

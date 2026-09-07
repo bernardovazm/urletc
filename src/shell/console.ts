@@ -10,18 +10,18 @@
 //
 // Four rendezvous tiers can be live at once, deduped by peerId:
 //   personal: your own devices (pair link, persistent, gets media + auto-share)
-//   nearby:   same public IP, zero-touch (untrusted: NO auto-share, NO local media)
+//   nearby:   same public IP, zero-touch (untrusted: no auto-share, no local media)
 //   code:     short speakable join code, ephemeral (gets media)
-//   presence: opt-in "who is online", VISIBLE but not REACHABLE (carries no content)
+//   presence: opt-in "who is online", visible but not reachable (carries no content)
 //
-// Visible and reachable are different states and the roster says which one each row is
-// in, because a list that looks like a connection list and is not one is the single
-// thing users misread here. A presence row carries a 🔗 that invites that peer into the
-// code room, which is the only way a visible peer becomes a reachable one.
+// Visible and reachable are different states, and the roster labels which one each row
+// is in. A presence row carries a 🔗 that invites that peer into the code room, which is
+// the only way a visible peer becomes a reachable one.
 
 import type { CryptoCaps } from '../core/crypto'
 import { detectItems, detectText, kindLabel, type Detected } from '../core/clipboard'
 import { CryptoUnsupportedError } from '../core/identity'
+import { getOcrMode } from '../core/prefs'
 import { getItem, removeItem, setItem } from '../core/store'
 import { codeRoom, generateJoinCode, nearbyRoom, normalizeJoinCode, publicIp } from '../p2p/discovery'
 import { ensurePersonalSecret, pairLink, personalRoom, resetPersonalSecret } from '../p2p/personal'
@@ -33,22 +33,22 @@ import { setStudio, type SourceKind, type StageLayout, type StreamMeta, type Stu
 import { button, copyText, el, toast } from './ui'
 
 type Tier = 'personal' | 'nearby' | 'code' | 'presence'
-/** `presence` is LAST so mergedPeers()'s first-tier-wins dedupe always renders a device
+/** `presence` is last in this order so mergedPeers()'s first-tier-wins dedupe always renders a device
  *  you can also reach privately under its trusted tier, never as an anonymous stranger. */
 const TIER_ORDER: Tier[] = ['personal', 'nearby', 'code', 'presence']
 /** Tiers that carry composer traffic (chat + files). `presence` answers "who is online"
  *  and nothing else, so it is excluded here as well as from MEDIA_TIERS; the session it
  *  opens is additionally `presenceOnly`, which enforces the same thing one layer down. */
 const BROADCAST_TIERS: Tier[] = ['personal', 'nearby', 'code']
-/** Tiers allowed to receive LOCAL camera/mic/screen. This is deliberately an allow-list:
- *  as a deny-list (`t !== 'nearby'`) every tier added later was silently opted IN to
- *  publishing the user's camera to it, which is the wrong default to fail towards. */
+/** Tiers allowed to receive local camera/mic/screen. An allow-list on purpose: written as
+ *  a deny-list (`t !== 'nearby'`), every tier added later would be opted in to publishing
+ *  the local camera to it. */
 const MEDIA_TIERS: Tier[] = ['personal', 'code']
 /** Tiers whose sessions may replay what was said before a peer arrived. An allow-list for
  *  the same reason MEDIA_TIERS is one: `nearby` is strangers who happen to share a public
- *  IP and `presence` is every stranger running the app, so as a deny-list each new tier
- *  would be silently opted IN to the worst leak this app could produce. joinRoomSession
- *  refuses it a second time, in the session layer, per ARCHITECTURE section 9.1. */
+ *  IP and `presence` is every stranger running the app, so a deny-list would opt each new
+ *  tier in to replaying the feed to them. joinRoomSession refuses it a second time, in the
+ *  session layer, per ARCHITECTURE section 9.1. */
 const HISTORY_TIERS: Tier[] = ['personal', 'code']
 const HISTORY_KEY = 'history:v1'
 const HISTORY_MAX = 500 // records kept on this device
@@ -78,12 +78,12 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   const verified = new Set<string>((await getItem<string[]>('verified')) ?? [])
 
   // ---------- replayable feed history ----------
-  // Local, encrypted at rest, capped by count AND age AND serialized size. Two extra
+  // Local, encrypted at rest, capped by count, age and serialized size. Two extra
   // fields on top of the wire record decide what may ever leave this device:
   //   tier      where the entry came from. A nearby stranger's message is kept (it is
   //             your feed) but is never replayed to anyone, because their words are not
   //             yours to hand on.
-  //   replayed  set on anything a PEER handed us. Those are never re-served, so history
+  //   replayed  set on anything a peer handed us. Those are never re-served, so history
   //             cannot launder through a chain of peers and one holder's opt-out cannot
   //             be undone by the next holder along. You only ever share what you saw live.
   type StoredRecord = HistoryRecord & { tier: Tier | 'me'; replayed?: boolean }
@@ -96,8 +96,9 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   }
   const seenIds = new Set<string>(transcript.map((r) => r.id))
   // Sending and receiving are separate decisions with separate defaults. Paired devices
-  // are your own machines, so ON. A code room is not: a six character code travels, and
-  // whoever it was forwarded to would otherwise get everything said before they arrived.
+  // are your own machines, so sending defaults on there. A code room defaults off: a six
+  // character code travels, and whoever it was forwarded to would otherwise get everything
+  // said before they arrived.
   let shareToDevices = (await getItem<boolean>('history-share-devices')) ?? true
   let shareToCode = (await getItem<boolean>('history-share-code')) ?? false
   let askOnJoin = (await getItem<boolean>('history-ask')) ?? true
@@ -107,7 +108,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   // chat, files and invites are ignored. It is not a persisted block, and it is not a
   // disconnect, because a Trystero room is joined rather than peered.
   const dropped = new Set<string>()
-  // Invites we SENT, keyed by the target's pubKeyHex, so a row can show pending state and
+  // Invites sent from here, keyed by the target's pubKeyHex, so a row can show pending state and
   // offer a cancel. Cleared when they become reachable, decline, or the timeout fires.
   const pendingInvites = new Map<string, { peerId: string; code: string; timer: number }>()
   // Inbound invite prompts still on screen, keyed by peerId: at most one per peer.
@@ -120,7 +121,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   const pendingStreams = new Map<string, Array<[MediaStream, unknown]>>()
   const localStreams = new Map<MediaStream, StreamMeta>() // own published streams and their metadata
 
-  // Chromeless stage view for OBS/scenes: #/stage/<code> renders ONLY the video stage,
+  // Chromeless stage view for OBS/scenes: #/stage/<code> renders only the video stage,
   // joins just that code room, and publishes nothing (pure viewer). Detected at mount so
   // the auto-pilot can skip the personal/nearby tiers.
   // A shared #/join link can carry "?p=1", meaning the sender has the online list on.
@@ -145,12 +146,12 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     return out
   }
   const connectedCount = () => mergedPeers().filter((x) => x.peer.ready).length
-  /** Peers a message can actually REACH. Distinct from connectedCount(), which includes
-   *  the presence tier: someone visible in the online list is not somewhere to send to,
-   *  so composing while only they are online must still queue to the outbox. */
+  /** Peers a message can actually reach. Distinct from connectedCount(), which includes
+   *  the presence tier: the online list carries no content, so composing while only
+   *  presence peers are connected must still queue to the outbox. */
   const reachableCount = () => mergedPeers().filter((x) => x.peer.ready && BROADCAST_TIERS.includes(x.tier)).length
   const isPresent = (peerId: string) => mergedPeers().some((x) => x.peer.peerId === peerId)
-  /** True when this peerId is a device the user dropped. Reads the RAW tier rosters,
+  /** True when this peerId is a device the user dropped. Reads the raw tier rosters,
    *  because mergedPeers() has already filtered dropped devices out. */
   const isDropped = (peerId: string) => [...rosters.values()].some((list) => list.some((p) => p.peerId === peerId && dropped.has(p.deviceId)))
 
@@ -221,7 +222,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   const feed = el('div', { class: 'feed' }, [feedInner])
   // Back to the newest item after scrolling up. addCard follows new content by pinning
   // scrollTop to scrollHeight, which only ever moves the feed one way; this is the way back.
-  // The control docks on a zero-height sticky rail INSIDE the scrollport (see .jump-dock),
+  // The control docks on a zero-height sticky rail inside the scrollport (see .jump-dock),
   // so it costs the last card no layout height and it inherits the feed's own content box,
   // which is what keeps it inside the stable scrollbar gutter the composer is aligned to.
   const jumpToLatest = () => {
@@ -238,7 +239,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     jumpDock.classList.toggle('on', feed.scrollHeight - feed.scrollTop - feed.clientHeight > AT_BOTTOM_PX)
   }
   feed.addEventListener('scroll', syncJumpLatest, { passive: true })
-  // Content that grows AFTER it is appended (an image decoding, an OCR result landing, a
+  // Content that grows after it is appended (an image decoding, an OCR result landing, a
   // card being collapsed) changes the distance to the bottom with no scroll event of its own.
   if ('ResizeObserver' in window) new ResizeObserver(syncJumpLatest).observe(feedInner)
   const empty = el('div', { class: 'empty' }, [
@@ -250,19 +251,83 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   // button, revealed on hover where there is one and always visible where there is not;
   // `onRemove` lets tool cards deactivate cleanly first.
   const removers = new WeakMap<Element, () => void>()
+  // Touch has no hover to reveal the per-card delete control with. Revealing it for every
+  // card wherever hover was absent put a delete icon on every row of a full feed, so a tap
+  // on a card reveals that card's control, exactly one at a time, and a tap anywhere else
+  // puts it away. The tap also arms it, so touch costs two deliberate acts (tap the card,
+  // tap the red control) and matches the mouse, which costs a hover it gets for free plus
+  // two clicks. Keyed by pointerType and not by a media query: a hybrid device with both a
+  // mouse and a screen gets the hover path from one and this path from the other.
+  const TOUCH_REVEAL_MS = 6000
+  const touchDelete = new WeakMap<Element, { arm: (ms?: number) => void; disarm: () => void }>()
+  let revealedItem: HTMLElement | null = null
+  const clearRevealed = () => {
+    if (!revealedItem) return
+    touchDelete.get(revealedItem)?.disarm()
+    revealedItem = null
+  }
+  // Anything that handles its own pointer input is not a tap on the card. `canvas` and
+  // `video` are here for the tool cards that are themselves a pointer surface: a game rendered in the
+  // feed would otherwise pop a delete control on every move.
+  const INTERACTIVE = 'button, a, input, select, textarea, label, summary, canvas, video, [contenteditable], [role="button"], [tabindex]'
+  let tapItem: HTMLElement | null = null
+  let tapX = 0
+  let tapY = 0
+  let tapScroll = 0
+  const elOf = (t: EventTarget | null): HTMLElement | null => (t instanceof Element ? (t as HTMLElement) : null)
+  document.addEventListener('pointerdown', (e) => {
+    if (e.pointerType !== 'touch') return
+    const t = elOf(e.target)
+    tapItem = t?.closest<HTMLElement>('.feed-item') ?? null
+    tapX = e.clientX
+    tapY = e.clientY
+    tapScroll = feed.scrollTop
+    // Anything that starts outside the open card dismisses it: the composer, the topbar,
+    // another card. Starting inside it does not, or the tap aimed at the control would
+    // remove the control first.
+    if (revealedItem && !(t && revealedItem.contains(t))) clearRevealed()
+  })
+  document.addEventListener('pointerup', (e) => {
+    if (e.pointerType !== 'touch') return
+    const item = tapItem
+    tapItem = null
+    const t = elOf(e.target)
+    if (t?.closest('button.del')) return // the control takes its own tap
+    if (!item?.isConnected) return
+    // A drag, a scroll and a text selection are all not taps. The scroll check is separate
+    // because a flick that starts and ends on the same pixel still scrolls the feed.
+    if (Math.abs(e.clientX - tapX) > 10 || Math.abs(e.clientY - tapY) > 10) return
+    if (feed.scrollTop !== tapScroll) return
+    if (t?.closest(INTERACTIVE)) return
+    if (!(window.getSelection()?.isCollapsed ?? true)) return
+    // `revealedItem` can point at a card whose reveal already expired on the timeout, and
+    // treating that as "open" would swallow the next tap on it and do nothing.
+    if (item === revealedItem && item.classList.contains('revealed')) {
+      clearRevealed() // tapping the open card again puts it away
+      return
+    }
+    clearRevealed()
+    const entry = touchDelete.get(item)
+    if (!entry) return
+    item.classList.add('revealed')
+    entry.arm(TOUCH_REVEAL_MS)
+    revealedItem = item
+  })
   const addCard = (node: HTMLElement, onRemove?: () => void, place: 'top' | 'bottom' = 'bottom') => {
     empty.remove()
     const wrap = el('div', { class: 'feed-item' })
     if (onRemove) removers.set(wrap, onRemove)
-    // Two clicks, because this control sits under a thumb on a phone and one stray tap
-    // used to take a card with it. The first click ARMS (red, and the accessible name
-    // changes with it, so the state is not carried by colour alone); the second deletes.
-    // It disarms on a timeout and when the pointer or focus leaves, so a card cannot sit
-    // armed waiting to be triggered by an unrelated tap later.
+    // Two presses, because this control sits under a thumb on a phone where one stray tap
+    // would take a card with it. The first press arms (red, and the accessible name changes
+    // with it, so the state is not carried by colour alone); the second deletes. It disarms
+    // on a timeout and when the pointer or focus leaves, so a card cannot sit armed waiting
+    // to be triggered by an unrelated tap later. On touch the tap that reveals the control
+    // arms it too, so the count is the same on both.
     const ARM_MS = 3000
     let armed = false
     let armTimer = 0
     const disarm = () => {
+      wrap.classList.remove('revealed') // the tap-revealed state expires with the arm
       if (!armed) return
       armed = false
       window.clearTimeout(armTimer)
@@ -271,17 +336,21 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
       del.setAttribute('aria-label', 'Remove from feed')
       del.setAttribute('title', 'Remove from feed')
     }
+    const arm = (ms = ARM_MS) => {
+      armed = true
+      del.classList.add('armed')
+      del.setAttribute('aria-pressed', 'true')
+      del.setAttribute('aria-label', 'Remove from feed: press again to confirm')
+      del.setAttribute('title', 'Press again to remove')
+      window.clearTimeout(armTimer)
+      armTimer = window.setTimeout(disarm, ms)
+    }
+    touchDelete.set(wrap, { arm, disarm })
     const del = button(
       '🗑',
       () => {
         if (!armed) {
-          armed = true
-          del.classList.add('armed')
-          del.setAttribute('aria-pressed', 'true')
-          del.setAttribute('aria-label', 'Remove from feed: press again to confirm')
-          del.setAttribute('title', 'Press again to remove')
-          window.clearTimeout(armTimer)
-          armTimer = window.setTimeout(disarm, ARM_MS)
+          arm()
           return
         }
         window.clearTimeout(armTimer)
@@ -290,6 +359,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
         } catch {
           /* ignore */
         }
+        if (revealedItem === wrap) revealedItem = null
         wrap.remove()
       },
       'icon sm del',
@@ -299,15 +369,14 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     // state changing, which a class and a colour cannot do on their own.
     del.setAttribute('aria-pressed', 'false')
     // A touch pointer stops existing right after `pointerup`, so `pointerleave` fires at the
-    // end of EVERY tap: the card armed and disarmed inside one gesture and the second tap
-    // re-armed instead of confirming, which is why this control did nothing on a phone.
-    // Departure only means "no longer aimed at this" where a pointer can rest somewhere, so
-    // the listener is asked for a hover-capable device rather than assumed one. The 3s
+    // end of every tap: the card armed and disarmed inside one gesture and the second tap
+    // re-armed instead of confirming. Departure only means "no longer aimed at this" where a
+    // pointer can rest somewhere, so the listener is gated on a hover-capable device. The 3s
     // timeout and the blur disarm still run everywhere, so an armed card cannot sit waiting.
     if (window.matchMedia('(hover: hover)').matches) del.addEventListener('pointerleave', disarm)
     del.addEventListener('blur', disarm)
     wrap.append(node, del)
-    // Replayed history goes to the TOP: every entry in it is older than everything the
+    // Replayed history goes to the top: every entry in it is older than everything the
     // feed already holds, and appending it under live messages would misdate the room.
     if (place === 'top') {
       feedInner.prepend(wrap)
@@ -337,9 +406,9 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     syncJumpLatest()
     toast(`Cleared ${items.length} ${items.length === 1 ? 'item' : 'items'}`)
     // The feed is a view; the transcript behind it is a file on this device. Clearing one
-    // silently while the other survives is a lie the next reload exposes, so the delete is
-    // offered here, where it is relevant, instead of turning a one-click control into a
-    // dialog for everyone who only wanted a clean screen.
+    // while the other survives means the next reload brings the cleared items back, so the
+    // delete is offered here, where it is relevant, instead of turning a one-click control
+    // into a dialog for everyone who only wanted a clean screen.
     if (!transcript.length) return
     const del = button(
       'Delete stored history',
@@ -395,7 +464,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
       void setItem(HISTORY_KEY, transcript).catch(() => {})
     }, 600)
   }
-  /** Keep one entry. Dedupe is by the SENDER's id, which is what lets a peer with two
+  /** Keep one entry. Dedupe is by the sender's id, which is what lets a peer with two
    *  history sources hold one copy instead of two. Returns whether it was new. */
   const remember = (rec: StoredRecord): boolean => {
     if (!rec.text || seenIds.has(rec.id)) return false
@@ -419,7 +488,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
       .filter((r) => !r.replayed && (r.tier === 'me' || HISTORY_TIERS.includes(r.tier)))
       .map(({ id, deviceId, name, text, ts, kind, size }) => ({ id, deviceId, name, text, ts, kind, size }))
 
-  /** Whether we ANSWER history requests in this tier. Two switches, two defaults. */
+  /** Whether we answer history requests in this tier. Two switches, two defaults. */
   const sharesTo = (tier: Tier) => (tier === 'personal' ? shareToDevices : tier === 'code' ? shareToCode : false)
 
   /** Push the current settings into every live session, so a switch moved now takes
@@ -460,12 +529,11 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     sys(`Replayed ${hit.recs.length} earlier message${hit.recs.length === 1 ? '' : 's'} from ${who}.`)
   }
 
-  // A peer asked and we said nothing, because sharing into this tier is off. Rather than
-  // leave the switch to be discovered in a modal (which is what made the feature look
-  // broken: you share a link, they join, nothing happens and nothing explains why), ask
-  // here, once per peer, at the only moment the question means anything. The default
-  // stays off, so a code forwarded on to a stranger still replays nothing on its own:
-  // what changes is that a person is now present to decide, instead of silence.
+  // A peer asked and we said nothing, because sharing into this tier is off. With the
+  // switch only reachable in a modal, the peer joins and nothing happens with no
+  // explanation, so ask here instead, once per peer, at the moment the question means
+  // anything. The default stays off, so a code forwarded on to a stranger still replays
+  // nothing until someone answers this prompt.
   const historyPrompts = new Map<string, { card: HTMLElement; tier: Tier }>()
   /** Retire every open question for a tier. Used when the answer stops being per-person:
    *  saying "always" answers everyone still waiting, so their cards must not sit there
@@ -493,8 +561,8 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
       'Send them',
       () => {
         drop()
-        // Records are re-read here, not captured above: what is sent is what is stored
-        // at the moment of consent, not at the moment the question was asked.
+        // Records are re-read here rather than captured above, so what is sent is what is
+        // stored at the moment of consent rather than when the question was asked.
         void sessions
           .get(tier)
           ?.answerHistory(peerId, shareableHistory())
@@ -521,7 +589,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     addCard(card, () => historyPrompts.delete(peerId))
   }
 
-  /** Replayed entries render as ONE collapsed card, never as loose bubbles, so what was
+  /** Replayed entries render as one collapsed card, never as loose bubbles, so what was
    *  said before you arrived is never mistaken for what just arrived. Each line also
    *  carries its own date, which a live message keeps in a hover title. */
   const historyCard = (recs: HistoryRecord[], from: string): HTMLElement => {
@@ -562,9 +630,9 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   const statusChip = el('span', { class: 'badge' })
   const updateStatus = () => {
     // Say something only when there is something to say. Searching/idle states
-    // ("looking for devices...") added noise without information, so the chip hides.
-    // Connected and visible are counted apart: one number covering both is what made
-    // people think the online list was a set of connections.
+    // ("looking for devices...") add noise without information, so the chip hides.
+    // Connected and visible are counted apart, because one number covering both reads as a
+    // count of connections when the online list carries no traffic.
     const n = reachableCount()
     const seen = connectedCount() - n
     const label = n ? `${n} connected${seen ? `, ${seen} visible` : ''}` : seen ? `${seen} visible only` : !p2pReady ? 'tools-only' : ''
@@ -592,9 +660,9 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     code: 'Waiting for someone with the code...',
     presence: 'No one else online right now.',
   }
-  /** A line under a group summary saying what the group IS, where the rows alone do not
-   *  say it. Presence is the case that needed saying: it reads like a list of connections
-   *  and is a list of strangers you may ask to connect. */
+  /** A line under a group summary saying what the group is, where the rows alone do not
+   *  say it. Presence needs it: the rows look like connections while every one of them is a
+   *  stranger you may ask to connect. */
   const TIER_NOTE: Partial<Record<Tier, string>> = {
     presence: 'Everyone running urletc now. Visible only: press 🔗 on a row to connect before you can message.',
   }
@@ -653,8 +721,8 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     }
     if (p.ready && p.pubKeyHex && !isVerified) ctl.append(button('🔒', () => verifyPeer(p), 'icon sm', `Verify ${who} by comparing safety numbers`))
     if (p.deviceId) ctl.append(button('🗑', () => dropPeer(p, tier), 'icon sm', `Remove ${who} from this list and stop their audio and video`))
-    // State in words, not in a colour: reachable now, visible only, or still shaking
-    // hands. This is the distinction the whole presence tier turned on.
+    // State in words rather than a colour: reachable now, visible only, or still shaking
+    // hands.
     const reachable = p.ready && BROADCAST_TIERS.includes(tier)
     const state = el('span', { class: `badge peer-state${reachable ? ' ok' : ''}`, text: pending ? 'inviting' : reachable ? 'connected' : p.ready ? 'visible' : 'connecting' })
     // In the presence list a peer is a stranger, and `name` is whatever they typed, so
@@ -673,7 +741,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     ])
   }
 
-  // presence starts open: seeing who is online is the entire point of that group
+  // presence starts open: the group exists to report who is online
   const groupOpen: Record<Tier, boolean> = { personal: true, nearby: true, code: true, presence: true }
   const renderRoster = () => {
     peersBox.replaceChildren()
@@ -710,9 +778,9 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
 
   const fileCard = (f: ReceivedFile) => {
     const who = senderLabel(f.from)
-    // A file with no author is a file you cannot judge, and images arrive with nothing
-    // else identifying on them. The sender sits in the summary rather than the body so
-    // it survives collapsing, and reads like the author line over a chat bubble.
+    // Images arrive with nothing else identifying them, so a file card names its sender.
+    // The sender sits in the summary rather than the body so it survives collapsing, and
+    // reads like the author line over a chat bubble.
     const { card, body } = collapsibleCard([
       el('strong', { text: f.name }),
       el('span', { class: 'muted small', text: `${Math.round(f.size / 1024)} KB` }),
@@ -729,8 +797,8 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
 
   const copyBtn = (get: () => string) => button('Copy', () => void copyText(get()), 'ghost')
 
-  // Always offered, not only while someone is connected. Cards used to snapshot
-  // connectivity at render time, so a card made before a peer joined could never send.
+  // Offered whether or not anyone is connected: snapshotting connectivity at render time
+  // leaves a card made before a peer joined unable to ever send.
   const sendTextBtn = (get: () => string) =>
     p2pReady
       ? button(
@@ -750,9 +818,9 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
             const f = file()
             void sendFileAll(f)
               .catch((e: unknown) => {
-                // Before this a peer dropping mid-file rejected the whole send and the
-                // failure surfaced only as an unhandled rejection: no toast, no card, no
-                // clue. Report it where the click happened.
+                // A peer dropping mid-file rejects the whole send, and without this the
+                // failure surfaces only as an unhandled rejection. Report it where the
+                // click happened.
                 toast(`Could not send ${f.name || 'the file'}: ${(e as Error).message}`)
                 return 0
               })
@@ -770,10 +838,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   // Images that land in the feed are usually here for their text (screenshots of
   // errors, receipts, slides), so OCR runs proactively and, by default, the result
   // is already on the clipboard. Settings ⚙ tunes it: copy / show / off.
-  const ocrMode = async (): Promise<'off' | 'show' | 'copy'> => {
-    const v = await getItem<string>('image-ocr')
-    return v === 'off' || v === 'show' ? v : 'copy'
-  }
+  const ocrMode = getOcrMode
   async function runOcrInto(blob: Blob, out: HTMLElement, copyAfter: boolean): Promise<void> {
     out.classList.remove('hidden')
     out.textContent = 'Reading text (OCR)...'
@@ -840,11 +905,9 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
       if (st) actions.append(st)
       body.append(out, actions)
     } else if (d.kind === 'url') {
-      // The verdict IS this card. It used to open with the same host/path/query breakdown
-      // the URL Info tool already gives, which pushed the one thing a pasted link is
-      // actually asking below the fold. What is left reads like a transparency report:
-      // the link, then a one-line answer about whether it is listed and by which feed of
-      // what age, with the structural reading kept underneath as the secondary layer
+      // The verdict is what this card is for, so it leads: the link, then a one-line answer
+      // about whether it is listed and by which feed of what age. The host/path/query
+      // breakdown the URL Info tool also gives stays underneath as the secondary layer
       // (renderPasteVerdict paints the feed answer above the findings).
       const verdict = el('div', { class: 'stack url-check-card' }, [el('div', { class: 'muted small', text: 'Checking blocklist feeds...' })])
       actions.append(copyBtn(() => d.text ?? ''))
@@ -859,13 +922,12 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
       actions.append(copyBtn(() => d.text ?? ''))
       const st = sendTextBtn(() => d.text ?? '')
       if (st) actions.append(st)
-      // The text first. This card used to open with "N words, N chars", so a copied paragraph
-      // arrived as a measurement of itself with the paragraph somewhere underneath. The count
-      // is still here, under the thing it counts.
+      // The text leads and the "N words, N chars" count sits under it, so a copied paragraph
+      // opens with the paragraph rather than with a measurement of it.
       body.append(out, el('div', { class: 'muted small', text: `${s.words} words, ${s.chars} chars` }), actions)
     }
 
-    // Auto-share goes to YOUR paired devices only, never to nearby/code peers.
+    // Auto-share goes to this account's paired devices only, never to nearby/code peers.
     const personal = sessions.get('personal')
     if (autoShare && personal && personal.peerCount() > 0) {
       if (d.kind === 'image' && d.blob) void personal.sendFile(new File([d.blob], 'clipboard-image.png', { type: d.blob.type || 'image/png' }))
@@ -876,7 +938,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
 
   // ---------- media / stage (VDO.ninja-style multi-source A/V) ----------
   // The console is the single owner of live streams (security-critical routing). The
-  // "stage" is a shared multi-source view: the composer buttons AND the Studio tool both
+  // "stage" is a shared multi-source view: the composer buttons and the Studio tool both
   // publish through here, and the Studio tool drives layout + per-source controls via the
   // exported controller (see setStudio at the end). A "source" is one published stream,
   // local or remote, labelled by kind (cam/screen/mic) carried in the stream metadata.
@@ -903,9 +965,9 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     for (const f of stageSubs) f()
   }
 
-  // Nothing listened for fullscreenchange, so the button glyph and its aria-label kept saying
-  // "Fullscreen" while already fullscreen, and Esc dropped you back into a grid with the
-  // source you had been watching un-pinned.
+  // Without a fullscreenchange listener the button glyph and its aria-label keep saying
+  // "Fullscreen" while already fullscreen, and Esc drops back into a grid with the source
+  // you were watching un-pinned.
   document.addEventListener('fullscreenchange', () => {
     const fsEl = document.fullscreenElement
     for (const t of stageTiles) {
@@ -946,25 +1008,23 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     notifyStage()
   }
 
-  // The row above the stage held one static word and a chevron while the controls that
-  // steer the stage lived in a Studio card rendered BELOW the feed, so you scrolled
-  // away from the thing you were adjusting. It now carries layout, expand and a count;
-  // Studio keeps devices/resolution/recording/the OBS link.
+  // The head carries layout, expand and a count, next to the stage they steer; Studio keeps
+  // devices/resolution/recording/the OBS link. Stage controls in the Studio card rendered
+  // below the feed meant scrolling away from the stage to adjust it.
   const setStageLayout = (l: StageLayout) => {
     stageLayout = l
     notifyStage()
   }
-  // These used to run together as the single word "GridFocusSolo" because button.icon.sm
-  // was a fixed 28px square with a 1.6px gap. That was the real defect and it is fixed in
-  // tokens.css, where the icon ladder is now a min-width floor with padding and a real gap.
+  // These ran together as "GridFocusSolo" while button.icon.sm was a fixed 28px square with
+  // a 1.6px gap; the fix is in tokens.css, where the icon ladder is a min-width floor with
+  // padding and a real gap.
   //
-  // The labels stay as words rather than becoming pictograms. Emoji has no glyph that
-  // reads as grid against focus against solo: the literal candidates (a brick wall, a
-  // flashlight, a television) are bright red, cyan and teal, which is the opposite of the
-  // flat faceless set the rest of the app uses, and the neutral alternatives are all
-  // variations of a square and are indistinguishable at 28px. Three short words are
-  // unambiguous, they match the Tools and Connect buttons beside them, and they cost one
-  // extra glyph of width each.
+  // The labels stay as words rather than pictograms. No emoji reads as grid against focus
+  // against solo: the literal candidates (a brick wall, a flashlight, a television) are
+  // bright red, cyan and teal against the flat faceless set the rest of the app uses, and
+  // the neutral alternatives are all variations of a square and are indistinguishable at
+  // 28px. Three short words are unambiguous, they match the Tools and Connect buttons
+  // beside them, and they cost one extra glyph of width each.
   const layoutBtns: Array<{ l: StageLayout; g: string; n: string; t: string }> = [
     { l: 'grid', g: 'Grid', n: 'Grid', t: 'Grid: every source the same size' },
     { l: 'spotlight', g: 'Focus', n: 'Focus', t: 'Focus: one source large, the others as thumbnails' },
@@ -1060,7 +1120,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
       fsBtn: null,
     }
     if (hasVideo) {
-      // Fullscreen targets the WRAPPER, not the <video>: fullscreening the media element
+      // Fullscreen targets the wrapper, not the <video>: fullscreening the media element
       // alone drops the nameplate and the overlay controls out of the fullscreen layer.
       const wrap = el('div', { class: `stage-tile kind-${opts.kind}`, tabindex: '0' })
       const toggleFs = () => {
@@ -1094,7 +1154,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
           `Windowed mode for ${opts.label}: float it above other applications`,
         )
         // The browser also leaves PiP on its own (the floating window's close button, a
-        // second video taking the slot), so the glyph follows the element, not the click.
+        // second video taking the slot), so the glyph follows the element rather than the click.
         const syncPip = () => {
           const on = document.pictureInPictureElement === vid
           pipBtn.classList.toggle('on', on)
@@ -1123,8 +1183,8 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
         ctl.append(mb)
       }
       if (opts.peerId === null) {
-        // unpublish() was correct but only ever reachable through "stop everything";
-        // sharing cam + screen and wanting to drop just the screen was impossible.
+        // Per-source stop: unpublish() is otherwise only reachable through "stop everything",
+        // so dropping just the screen while sharing cam + screen is impossible.
         ctl.append(button('⏹', () => unpublish(opts.stream), 'icon sm', `Stop sharing ${opts.label}`))
       } else {
         ctl.append(button('🚫', () => removeStageTile(tile), 'icon sm', `Remove ${opts.label} from the stage (they keep sending; re-appears if they restart)`))
@@ -1164,8 +1224,8 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     const arr = peerMedia.get(peerId) ?? []
     arr.push(tile.media)
     peerMedia.set(peerId, arr)
-    // Drop the tile once the sender stops. Otherwise a stopped screen-share froze on its
-    // last frame forever.
+    // Drop the tile once the sender stops. Otherwise a stopped screen-share stays frozen on
+    // its last frame.
     const gone = () => {
       if (stream.getTracks().some((t) => t.readyState === 'live' && !t.muted)) return
       if (stageTiles.includes(tile)) removeStageTile(tile)
@@ -1255,7 +1315,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     captionsEl.classList.remove('cap-min')
     capMinBtn.textContent = '🔽'
   }
-  // Stop AND free the Whisper worker/decoder. Used when the user turns captions off or
+  // Stop and free the Whisper worker/decoder. Used when the user turns captions off or
   // stops sharing, so the model doesn't stay resident for the page's life.
   function endCaptions() {
     stopCaptions()
@@ -1351,11 +1411,11 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   /** Every local track of one kind, across all published streams. */
   const localTracksOf = (k: 'audio' | 'video') => [...localStreams.keys()].flatMap((st) => (k === 'audio' ? st.getAudioTracks() : st.getVideoTracks()))
 
-  /** Mute the mic / blank the camera by flipping `track.enabled`. This is deliberately
-   *  NOT the same as stopping the track: stopping tears the source down, removes it from
-   *  every session and forces a fresh getUserMedia with a NEW stream id on resume, so
-   *  peers watch you disappear and come back. Flipping `enabled` keeps the transport and
-   *  the id; you just go quiet/black. Returns the new on-state. */
+  /** Mute the mic / blank the camera by flipping `track.enabled`, deliberately not by
+   *  stopping the track: stopping tears the source down, removes it from every session and
+   *  forces a fresh getUserMedia with a new stream id on resume, so peers watch you
+   *  disappear and come back. Flipping `enabled` keeps the transport and the id; you go
+   *  quiet/black. Returns the new on-state. */
   function setLocalEnabled(k: 'audio' | 'video', on: boolean): void {
     for (const t of localTracksOf(k)) t.enabled = on
     syncMediaButtons()
@@ -1673,7 +1733,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
       if (dropped.has(m.deviceId)) return
       remember({ id: m.id, deviceId: m.deviceId, name: m.name, text: m.text, ts: m.ts, kind: 'chat', tier })
       const node = chatCard(m)
-      // A code that arrives in a PEER's message always requires an explicit click,
+      // A code that arrives in a peer's message always requires an explicit click,
       // never the auto-join branch the composer uses for text you typed yourself.
       // Auto-joining on inbound text let any peer who can chat you (including an
       // untrusted `nearby` stranger) send one digit-bearing word to pull you out of
@@ -1774,9 +1834,9 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
    *  and the view-only #/stage/<code> route are left exactly as the visitor typed them,
    *  and since nothing in the app navigates by hash, "own" is decided per write.
    *
-   *  The optional `?p=1` suffix rides along when WE are on the online list, so copying the
-   *  address bar propagates that opt-in as a question. It is written from our own state,
-   *  which is what makes declining an inbound flag stick: the next write drops it. */
+   *  The optional `?p=1` suffix rides along when this device is on the online list, so
+   *  copying the address bar propagates that opt-in as a question. It is written from our
+   *  own state, so declining an inbound flag sticks: the next write drops it. */
   const syncCodeUrl = () => {
     if (stageView) return
     const h = location.hash
@@ -1786,7 +1846,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     if (`${base}${h}` !== next) history.replaceState(null, '', next)
   }
 
-  /** The link that IS the invite: it opens urletc already joined to our code room. */
+  /** The link that is the invite: it opens urletc already joined to our code room. */
   const inviteLink = (code: string) => `${location.origin}${location.pathname}#/join/${code}${presenceWanted ? '?p=1' : ''}`
 
   /** Switch the code room: null = just leave; a code = leave current + join that one.
@@ -1996,9 +2056,9 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
       // The same field is in the roster, so both are built by nameField().
       content.append(el('div', { class: 'group-label', text: 'This device' }), nameField())
 
-      // Code is the fast path to reach anyone. Joining someone comes first (it is the
-      // #1 ask: "I got a code, now what?"); sharing yours follows. All routes go
-      // through setCode(), so either side's code becomes the room for both.
+      // Code is the fast path to reach anyone. Joining someone comes first, sharing yours
+      // follows. All routes go through setCode(), so either side's code becomes the room
+      // for both.
       content.append(
         el('div', { class: 'group-label', text: 'Join someone with their code' }),
         el('div', { class: 'muted small', text: 'Ask them for the code in their topbar (or send yours below). Same code = same room. Typing it in the message box also works.' }),
@@ -2215,7 +2275,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
       content.append(el('div', { class: 'row' }, [el('span', { class: 'spacer' }), button('Close', close, 'ghost')]))
     }
     await render()
-    content.querySelector<HTMLElement>('input, button, select, textarea')?.focus() // land focus inside the dialog
+    content.querySelector<HTMLElement>('input, button, select, textarea')?.focus()
   }
 
   // ---------- topbar + sidebar ----------
@@ -2254,7 +2314,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
         toast('Room link copied')
       })()
     },
-    'icon',
+    'icon room-link',
     'Copy the room link to share',
   )
   const toolsBtn = hoverTools(button('Tools', () => openTools('', toolsBtn), 'ghost', 'All tools. Hover to open, drag to reorder'))
@@ -2318,14 +2378,14 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   if (stageView) document.documentElement.classList.add('stage-view') // chromeless: CSS shows only the stage
 
   // ---------- on-screen keyboard ----------
-  // Opening the keyboard leaves the LAYOUT viewport alone and shrinks the VISUAL one, and
+  // Opening the keyboard leaves the layout viewport alone and shrinks the visual one, and
   // .app-shell is a fixed grid that clips its overflow, so the page cannot scroll the field
   // into view the way an ordinary document would: the composer simply ends up underneath the
   // keyboard. Publish the occluded height and let the sheet inset the shell by it, which
-  // keeps the feed on screen too instead of trading one for the other. visualViewport is the
-  // only signal worth trusting here; window.innerHeight moves on some browsers and not
-  // others. Where it is absent (older Safari, any non-browser host) this whole block is a
-  // no-op and the layout is exactly what it was.
+  // keeps the feed on screen too instead of trading one for the other. visualViewport is
+  // the signal read here; window.innerHeight moves on some browsers and not others. Where
+  // visualViewport is absent (older Safari, any non-browser host) this whole block is a
+  // no-op and the layout is unchanged.
   const vviewport = window.visualViewport
   if (vviewport) {
     const root = document.documentElement
@@ -2471,7 +2531,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     const dt = e.clipboardData
     if (!dt) return
     // Never hijack a paste aimed at another text field (the Connect modal's inputs,
-    // a tool's textarea...). Those pastes are the browser's business, not the feed's.
+    // a tool's textarea...). Those pastes belong to the browser rather than the feed.
     const ae = document.activeElement as HTMLElement | null
     const editingElsewhere = !!ae && ae !== ta && (ae instanceof HTMLInputElement || ae instanceof HTMLTextAreaElement || ae.isContentEditable)
     if (editingElsewhere) return
@@ -2498,26 +2558,25 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     }
   })
 
-  // ---------- AUTO-PILOT ----------
-  // Chromeless stage view (#/stage/<code>, e.g. an OBS browser source): join ONLY that
+  // ---------- auto-pilot ----------
+  // Chromeless stage view (#/stage/<code>, e.g. an OBS browser source): join only that
   // code room, as a pure viewer (publishes nothing), and skip clipboard/personal/nearby.
   if (stageView && p2pReady) {
     void setCode(normalizeJoinCode(stageViewCode!))
     return
   }
 
-  // 1) Open with the clipboard already read, but ONLY when the browser has already granted
+  // 1) Open with the clipboard already read, but only where the browser has already granted
   //    clipboard-read. Calling read() unconditionally makes merely loading the page fire a
-  //    permission prompt, which is hostile, so state 'prompt' is treated as a no. Firefox
-  //    and Safari do not expose this permission at all, and there the paste listener is the
-  //    whole story. Every failure is silent: a blocked clipboard is not an error to report.
+  //    permission prompt, so state 'prompt' is treated as a no. Firefox and Safari do not
+  //    expose this permission at all, and there the paste listener covers it. Every failure
+  //    is silent: a blocked clipboard is not worth reporting.
   //
-  //    What opens is the Clipboard TOOL card, not a per-item detection card. The tool is the
-  //    surface that keeps itself current (it re-scans on focus, on by default), so opening it
-  //    once is the whole feature; a detection card is a snapshot of one moment that goes
-  //    stale as soon as anything else is copied, which is what was reported.
+  //    What opens is the Clipboard tool card. The tool re-scans on focus (on by default), so
+  //    it keeps itself current, while a per-item detection card is a snapshot of one moment
+  //    that goes stale as soon as anything else is copied.
   const clipboardTool = registry.get('clipboard')
-  /** Detected clipboard content, but ONLY where clipboard-read is ALREADY granted. Every
+  /** Detected clipboard content, but only where clipboard-read is already granted. Every
    *  other outcome is an empty array and never a throw: no Permissions API, state 'prompt' or
    *  'denied', a rejected read, an empty clipboard.
    *
@@ -2540,7 +2599,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
    *  been a duplicate anyway and never opens the wrong one. */
   const clipboardSignature = (items: Detected[]) => JSON.stringify(items.map((d) => [d.kind, d.text ?? '', d.blob ? `${d.blob.size}/${d.blob.type}` : '']))
   let lastClipboardSig = ''
-  /** ONE owner, deliberately: the tool owns keeping an OPEN card current (its own
+  /** One owner, deliberately: the tool owns keeping an open card current (its own
    *  re-scan-on-focus switch, on by default), and this owns whether there is a card at all.
    *  Split any other way, a tab collects a fresh card on every focus while an older card
    *  updates itself underneath it. */
@@ -2551,10 +2610,10 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   }
   const bootClipboard = await readClipboardIfGranted()
   if (bootClipboard.length) void openClipboardTool(bootClipboard)
-  // Returning to the tab re-reads under the identical gate, so content copied AFTER load is
-  // not lost to a one-shot boot read: an image copied later never appeared, which is the
-  // reported bug. Deduplicated against the last content seen, so refocusing an unchanged
-  // clipboard appends nothing.
+  // Returning to the tab re-reads under the identical gate, so content copied after load is
+  // not lost to a one-shot boot read, which never surfaced an image copied later.
+  // Deduplicated against the last content seen, so refocusing an unchanged clipboard
+  // appends nothing.
   window.addEventListener('focus', () => {
     void (async () => {
       const items = await readClipboardIfGranted()
@@ -2582,7 +2641,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   //    quick opt-out can't race the slow join (publicIp alone may take seconds).
   let nearbyWanted = true
   /** `announce` is off for the boot pass: a fresh load already says the room is open, and
-   *  three more cards about tiers nobody asked for is noise. A later Settings toggle does
+   *  three more cards announcing tiers is noise. A later Settings toggle does
    *  announce, so turning it back on is acknowledged the same way turning it off is. */
   const startNearby = async (announce = true) => {
     nearbyState = 'searching'
@@ -2613,7 +2672,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     else nearbyState = 'off'
   })()
 
-  // Presence tier: one fixed room, opt-in and OFF by default because joining it
+  // Presence tier: one fixed room, opt-in and off by default because joining it
   // announces that you are online to everyone else running the app. `presenceWanted`
   // (declared with the other console state, since syncCodeUrl reads it) is re-checked
   // after the await so a fast opt-out cannot race the join.
@@ -2630,12 +2689,11 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     }
   }
   /**
-   * A link carrying ?p=1 propagates the sender's opt-in, and stops at a question. Being on
-   * the online list makes you visible to every stranger running the app, so flipping it
-   * from a URL somebody else authored would be spending the recipient's privacy on their
-   * behalf. Carrying the flag still removes the work: one click instead of a hunt through
-   * Settings. Declining costs nothing and leaves no trace, because syncCodeUrl writes the
-   * flag from our own state, so the link we hand on drops it.
+   * A link carrying ?p=1 propagates the sender's opt-in and stops at a question. Being on
+   * the online list makes this device visible to every stranger running the app, so a URL
+   * somebody else authored must never flip it directly. Carrying the flag still saves the
+   * hunt through Settings: one click. Declining leaves no trace, because syncCodeUrl writes
+   * the flag from our own state, so the link we hand on drops it.
    */
   const offerPresence = () => {
     const enable = button(
@@ -2683,8 +2741,8 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
 
   // 4) join code: ready the moment you enter, so "let me give you my code" needs
   //    zero clicks. Reuse the code from last visit if there is one; only mint a fresh
-  //    one for a first-timer. It announces nothing: setCode() puts it in the topbar chip
-  //    and in the address bar, which is the whole message.
+  //    one for a first-timer. It announces nothing beyond setCode() putting it in the
+  //    topbar chip and in the address bar.
   void (async () => {
     if (codeLabel) return // an invite link (#/join/...) already claimed the code room
     const saved = normalizeJoinCode((await getItem<string>('join-code')) ?? '')

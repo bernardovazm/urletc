@@ -9,10 +9,12 @@ on:
 permissions:
   contents: read
 
-# Cancel superseded runs on the same ref.
+# Supersede pull request runs, never pushes to main. Cancelling on main meant a run of
+# commits landed with two of them cancelled and no verdict, which is indistinguishable
+# from not having run them at all.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   verify:
@@ -25,8 +27,15 @@ jobs:
           node-version: 20
           cache: npm
 
+      # --ignore-scripts: onnxruntime-node, a transitive dependency of the transformers
+      # packages, downloads a native binary from a third-party host in its install script.
+      # This is a browser-only app that never loads the Node ONNX runtime, and the download
+      # timed out and failed the whole run. The other five install scripts are a macOS
+      # watcher, a donation banner, a protobuf CLI and sharp's native check, none of which
+      # typecheck, lint, build or the browser suite touch. Skipping them also keeps install
+      # scripts, a known supply-chain sink, from running against exact-pinned deps.
       - name: Install dependencies
-        run: npm ci
+        run: npm ci --ignore-scripts
 
       - name: Typecheck
         run: npm run typecheck

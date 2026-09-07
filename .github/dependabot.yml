@@ -11,6 +11,12 @@ updates:
         patterns: ['eslint*', 'prettier*', 'typescript*', 'vite*', '@eslint/*', 'globals']
       runtime:
         patterns: ['*']
+    ignore:
+      # typescript-eslint refuses to load against the TS 7.0 API, so a grouped bump to
+      # TS 7 fails Lint and blocks the other eight updates in the same pull request.
+      # Drop this entry once typescript-eslint supports TS >= 7.1.
+      - dependency-name: typescript
+        versions: ['>=7.0.0']
   - package-ecosystem: github-actions
     directory: /
     schedule:

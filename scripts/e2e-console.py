@@ -2283,6 +2283,17 @@ with sync_playwright() as p:
             break
     check('clipboard: an image copied after load surfaces on refocus', gimg,
           f'feed={feed_text(gpg)[:200]!r}')
+    # Mounting a preview is not reading the image. This branch rendered a manual Run OCR
+    # button and ignored the auto-OCR mode, so an image on the clipboard was read
+    # automatically in the feed and left untouched here. Default mode is 'copy', so assert
+    # no button and the recognised text, not the presence of the card.
+    _runocr = gpg.locator(CLIP_TOOL).locator('button', has_text='Run OCR')
+    check('clipboard: the image card needs no Run OCR button in the default mode',
+          _runocr.count() == 0, f'{_runocr.count()} buttons')
+    _gpre = gpg.locator(CLIP_TOOL + ' pre')
+    _gocr = ocr_settle(gpg, _gpre.last) if _gpre.count() else '(no output area)'
+    check('clipboard: the image card reads the text out of the image',
+          'clip' in _gocr.lower(), _gocr[:140])
     check('clipboard: refocus re-read the clipboard instead of reusing the boot read',
           (gpg.evaluate('window.__clipReads') or 0) > greads,
           f'{greads} reads before, {gpg.evaluate("window.__clipReads")} after')

@@ -7,6 +7,7 @@
 #   E2E_BASE       target URL (default http://localhost:$E2E_PORT)
 #   E2E_VENV       venv dir (default .venv-e2e, gitignored)
 #   E2E_NO_SERVER  =1 to skip build+preview and test an already-running E2E_BASE
+#   E2E_SKIP_BUILD =1 to reuse the existing dist/ instead of rebuilding
 #   E2E_WITH_DEPS  =1 to `playwright install --with-deps` (CI; needs root)
 #   E2E_NO_HISTORY =1 to skip the slow two-context history replay harness
 set -euo pipefail
@@ -33,9 +34,17 @@ fi
 # 2. Build + preview (unless pointed at an already-running server).
 SERVER_PID=""
 if [ "${E2E_NO_SERVER:-0}" != "1" ]; then
-  [ -f dist/index.html ] || npm run build
+  # Build unless told not to. Reusing an existing dist/ by default lets a run pass
+  # against a build from an older commit, so rebuilding is the default and skipping it
+  # has to be asked for explicitly.
+  if [ "${E2E_SKIP_BUILD:-0}" = "1" ]; then
+    echo "> E2E_SKIP_BUILD=1, using the existing dist/"
+    [ -f dist/index.html ] || { echo "no dist/index.html to test"; exit 1; }
+  else
+    npm run build
+  fi
   echo "> starting preview on :$PORT"
-  npm run preview -- --port "$PORT" --strictPort >/tmp/wt-e2e-preview.log 2>&1 &
+  npm run preview -- --port "$PORT" --strictPort >/tmp/urletc-e2e-preview.log 2>&1 &
   SERVER_PID=$!
   trap '[ -n "$SERVER_PID" ] && kill "$SERVER_PID" 2>/dev/null || true' EXIT
 fi
@@ -50,7 +59,7 @@ done
 # 4. Run the suite.
 E2E_BASE="$BASE" "$PY" scripts/e2e-console.py
 
-# 5. Two-context history replay. Its own harness because it needs a SECOND browser
+# 5. Two-context history replay. Its own harness because it needs a second browser
 #    context and real rendezvous between them, which the single-page suite above is not
 #    shaped for. Slower than everything else here, hence the opt-out.
 if [ "${E2E_NO_HISTORY:-0}" != "1" ]; then

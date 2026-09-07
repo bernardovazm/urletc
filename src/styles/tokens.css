@@ -2,12 +2,12 @@
    no framework, only subtle transitions. CSP-safe: all styles live in this sheet (no inline). */
 :root {
   /* Palette: near-black ground, hairline borders, pure-white ink. Geometry is square,
-     with radius 0 everywhere except avatars/dots, and no shadows: elevation is carried
-     by a border, not a blur. --fg-mute is deliberately lighter than the reference
-     design's grey, which fails WCAG AA at the 0.68-0.82rem sizes this token is used at. */
-  /* Tie browser-painted controls to OUR theme, not the OS. The index.html meta says
-     "dark light", so an OS set to light painted this near-black app's checkboxes as
-     solid white squares, which read as already ticked. */
+     with radius 0 everywhere except avatars/dots, and no shadows: a border carries
+     elevation. --fg-mute is lighter than the reference design's grey, which fails WCAG AA
+     at the 0.68-0.82rem sizes this token is used at. */
+  /* Tie browser-painted controls to the app theme rather than the OS. The index.html meta
+     says "dark light", so an OS set to light painted this near-black app's checkboxes as
+     solid white squares that read as already ticked. */
   color-scheme: dark;
   --bg: #060707;
   --surface: #0a0b0c;
@@ -41,11 +41,11 @@
      attribute). 0 everywhere else, including every desktop, so the shell geometry below
      is unchanged when nothing is occluding the page. */
   --kb-inset: 0px;
-  /* One overlay scale, so stacking is decided here and not by whichever rule was edited
-     last. Lowest is the drawer: it is furniture the user parked open, so anything opened
-     on top of it is newer and more specific. Then menus, then the flyout a menu spawns
-     (it must cover its own menu), then toasts, then the modal, which owns the screen.
-     Anything below 20 (the card delete button at 2) is in-flow overlap, not an overlay. */
+  /* One overlay scale, so stacking is decided here rather than by whichever rule was
+     edited last. The drawer sits lowest: the user parked it open, so anything opened on
+     top of it is newer and more specific. Then menus, then the flyout a menu spawns (it
+     must cover its own menu), then toasts, then the modal, which owns the screen. Values
+     below 20 (the card delete button at 2) are in-flow overlap rather than overlays. */
   --z-drawer: 20;
   --z-menu: 40;
   --z-flyout: 50;
@@ -163,14 +163,14 @@ button.ghost:hover {
   border-color: var(--border-strong);
   background: var(--surface-2);
 }
-/* The icon ladder is a SQUARE FLOOR, not a fixed square. The size is min-width plus a
-   fixed height, so one glyph sits in an exact 36/28/24px square while a label that is
-   wider than the square (a word, a two-codepoint emoji, a wide fallback font) pushes the
-   button out sideways instead of spilling its text over the neighbour. `flex: none` stops
-   a tight flex row from shrinking the squares back under their own content, and nowrap
-   stops a wide label from wrapping to a second line and blowing the fixed height. Before
-   this, three 28px squares carrying "Grid" / "Focus" / "Solo" rendered as the run-on word
-   "GridFocusSolo". Every row that holds these must carry a real gap (see .row.tight). */
+/* A square floor rather than a fixed square: min-width plus a fixed height, so one glyph
+   sits in an exact 36/28/24px square while a label wider than the square (a word, a
+   two-codepoint emoji, a wide fallback font) pushes the button out sideways instead of
+   spilling its text over the neighbour. `flex: none` stops a tight flex row from shrinking
+   the squares back under their own content, and nowrap stops a wide label from wrapping to
+   a second line and blowing the fixed height. At a fixed 28px, three squares carrying
+   "Grid" / "Focus" / "Solo" rendered as the run-on word "GridFocusSolo", so every row that
+   holds these must also carry a real gap (see .row.tight). */
 button.icon {
   padding: 0 0.25rem;
   border-radius: var(--pill);
@@ -285,11 +285,11 @@ label.row {
   /* The shell is a fixed grid that clips its overflow, so an on-screen keyboard cannot be
      scrolled out of the way the way it would be in a normal document: the layout viewport
      does not move and the composer ends up under the keyboard. Giving back the occluded
-     strip keeps the composer AND the feed on the part of the screen that is still visible.
-     --kb-inset is 0px unless a keyboard is actually open. */
+     strip keeps both the composer and the feed on the part of the screen that is still
+     visible. --kb-inset is 0px unless a keyboard is actually open. */
   height: calc(100% - var(--kb-inset));
   /* An implicit `auto` column resolves to the widest descendant's min-content, so one
-     wide row (the composer bar) used to stretch the whole shell past the viewport.
+     wide row (the composer bar) would stretch the whole shell past the viewport.
      minmax(0, 1fr) pins every row to the shell width instead. */
   grid-template-columns: minmax(0, 1fr);
   overflow: hidden;
@@ -347,7 +347,7 @@ label.row {
   min-height: 0;
   min-width: 0;
 }
-/* Each row is assigned by CLASS, never by source position. The stage and the captions strip
+/* Each row is assigned by class, never by source position. The stage and the captions strip
    are both display:none while idle, and a display:none child is not a grid item, so with
    positional placement the remaining children slid up a row: the feed landed on the `auto`
    row, grew to its full content height, and pushed the composer past the bottom of the
@@ -373,12 +373,12 @@ label.row {
   width: 100%;
   margin: 0 auto;
 }
-/* The feed is the only scrolling row in the column, so its scrollbar used to eat width
-   from its content box the moment the feed overflowed: .feed-inner re-centred inside the
-   narrower box while .composer, whose wrapper never scrolls, did not, and the card edges
-   jumped by a scrollbar width. `both-edges` reserves the gutter on each side, so the
-   centre never moves and the width never changes with the scroll state; .composer-wrap
-   and .tiles-region reserve the identical gutter so all three rows share one column. */
+/* The feed is the only scrolling row in the column, so its scrollbar takes width from its
+   content box the moment the feed overflows: .feed-inner re-centres inside the narrower box
+   while .composer, whose wrapper never scrolls, does not, and the card edges jump by a
+   scrollbar width. `both-edges` reserves the gutter on each side, so the centre never moves
+   and the width never changes with the scroll state; .composer-wrap and .tiles-region
+   reserve the identical gutter so all three rows share one column. */
 .feed {
   overflow-y: auto;
   overflow-x: hidden;
@@ -395,8 +395,10 @@ label.row {
   min-width: 0;
   width: 100%;
 }
-/* every feed item can be removed; the delete button appears on hover/focus, and is always
-   on where there is no hover to appear from (see the (hover: none) block) */
+/* Every feed item can be removed. The control appears on hover/focus where there is a
+   pointer that can rest, and on a touch screen it appears only for the item you tapped
+   (`.revealed`, set in addCard). Revealing it for every card at once instead put a delete
+   icon on every row of a full feed. */
 .feed-item {
   position: relative;
   min-width: 0;
@@ -417,20 +419,26 @@ label.row {
 .feed-item:focus-within > .del {
   opacity: 1;
 }
-/* Armed: one click reddens the control, the second removes the card. Staying visible while
-   armed keeps the second tap on a target that is still there, but it never made the control
-   usable on touch by itself: you cannot arm what you cannot see, and until the (hover: none)
-   block below revealed `.del` this rule only ever fired on a device that had hover anyway.
-   The state is also carried in the button's accessible name (see addCard), so colour is
-   never the only signal. */
+/* The touch counterpart of :hover, and deliberately not a media query: it is set from the
+   pointerdown/up pair in addCard, so a tap sets it and a mouse on the same hybrid device
+   still gets hover. Exactly one item carries it at a time. */
+.feed-item.revealed > .del {
+  opacity: 1;
+}
+/* Armed: the control is red and the next press removes the card. On a mouse that state is
+   reached by clicking the revealed control once; on touch the tap that reveals the control
+   also arms it, so both paths cost two deliberate acts and neither leaves a bare delete
+   button sitting under a thumb. Staying visible while armed keeps the second press on a
+   target that is still there. The state is also carried in the button's accessible name
+   (see addCard), so colour is never the only signal. */
 .feed-item > .del.armed {
   opacity: 1;
   color: var(--bg);
   background: var(--danger);
   border-color: var(--danger);
 }
-/* the pasted link itself, above its verdict: readable but plainly secondary to the
-   answer under it, and it must wrap rather than widen the feed column */
+/* the pasted link itself, above its verdict: readable but plainly secondary to the verdict
+   below it, and it must wrap rather than widen the feed column */
 .url-paste-link {
   font-family: var(--mono);
   font-size: 0.85rem;
@@ -455,7 +463,7 @@ label.row {
    on one column is honoured without measuring it a second time. Centred rather than lower
    right: every card carries its own delete button at its top-right corner, so at the right
    edge this control would sit on whichever card happens to end at the bottom of the
-   scrollport, and which card that is depends on how far you scrolled. */
+   scrollport, which varies with scroll position. */
 .jump-dock {
   position: sticky;
   bottom: 0.45rem;
@@ -475,9 +483,9 @@ label.row {
   font-size: 0.85rem;
   padding: 0.35rem 0.7rem;
   white-space: nowrap;
-  /* Hidden means hidden. `visibility` takes the control out of the tab order and out of hit
-     testing; `opacity: 0` alone leaves a control that is invisible and still clickable, which
-     is exactly the shape of the bug the per-card delete button shipped with. */
+  /* `visibility` takes the control out of the tab order and out of hit testing; `opacity: 0`
+     alone leaves a control that is invisible and still clickable, which is how the per-card
+     delete button once took blind taps. */
   visibility: hidden;
   opacity: 0;
   transition: opacity 0.12s;
@@ -577,10 +585,9 @@ details.card[open] > summary .chev {
   transform: rotate(90deg);
 }
 /* Sender attribution on a received file card. A file and a chat message are both things
-   someone sent you, so they say so in one visual language: this is `.msg .who` at the same
-   size and the same muted ink, sitting in the card summary instead of over a bubble. It is
-   metadata, so it never competes with the filename: it holds its width while the filename
-   is what ellipsizes. */
+   someone sent you, so this is `.msg .who` at the same size and the same muted ink, sitting
+   in the card summary instead of over a bubble. It is metadata, so it holds its width while
+   the filename is what ellipsizes. */
 .card-from {
   font-size: 0.74rem;
   color: var(--fg-mute);
@@ -923,9 +930,9 @@ button.gen-value:hover {
 .tiles-region.tiles-collapsed .tiles {
   display: none;
 }
-/* The layout group in .tiles-head. 0.1rem is 1.6px, which is not a gap: adjacent icon
-   buttons read as one control with a hairline through it. 0.25rem is the smallest gap
-   that still groups them while keeping each button its own object. */
+/* The layout group in .tiles-head. 0.1rem is 1.6px, too small to read as a gap: adjacent
+   icon buttons then look like one control with a hairline through it. 0.25rem is the
+   smallest gap that still groups them while keeping each button its own object. */
 .row.tight {
   display: inline-flex;
   align-items: center;
@@ -1038,11 +1045,11 @@ video.tile {
   white-space: nowrap;
   pointer-events: none;
 }
-/* The overlay grew from two controls to as many as four (spotlight, fullscreen, windowed
-   mode, mute). It is anchored to the tile's top-right and wraps back under itself rather
-   than running off the left edge of a spotlight thumbnail, which is the narrowest tile
-   the stage produces. Every button in here is `icon sm`, so windowed mode inherits the
-   fullscreen button's size, hover reveal and touch rule with no extra styling. */
+/* Up to four controls (spotlight, fullscreen, windowed mode, mute), anchored to the tile's
+   top-right and wrapping back under themselves rather than running off the left edge of a
+   spotlight thumbnail, the narrowest tile the stage produces. Every button in here is
+   `icon sm`, so windowed mode inherits the fullscreen button's size, hover reveal and touch
+   rule with no extra styling. */
 .tile-ctl {
   position: absolute;
   top: 0.3rem;
@@ -1059,14 +1066,11 @@ video.tile {
 .stage-tile:focus-within .tile-ctl {
   opacity: 1;
 }
-/* Touch devices never hover, so a hover-only control is unreachable there. */
-/* No hover means no way to reveal a hover-only control, so anything that fades in for a
-   mouse has to be permanently visible here instead. `.del` was missing from this block: it
-   sat at opacity 0 on every phone while still taking taps, which is why a blind tap used to
-   delete a card and the control looked like it worked. */
+/* Touch devices never hover, so anything that fades in for a mouse has to be permanently
+   visible here instead. Every hover-revealed control must be listed here: `.del` was
+   omitted once and sat at opacity 0 on every phone while still taking taps. */
 @media (hover: none) {
-  .tile-ctl,
-  .feed-item > .del {
+  .tile-ctl {
     opacity: 1;
   }
 }
@@ -1076,7 +1080,7 @@ video.tile {
 }
 
 /* A shared screen must never be cropped. `cover` on a 16:10 tile cuts off the edges of
-   someone's desktop, which is exactly where the content usually is. */
+   someone's desktop, where the content usually is. */
 .stage-tile.kind-screen video.tile {
   object-fit: contain;
 }
@@ -1351,7 +1355,7 @@ details > summary {
   cursor: pointer;
 }
 
-/* workshop html apps: chrome (name + trust badge) stays OUTSIDE the frame so an
+/* workshop html apps: chrome (name + trust badge) stays outside the frame so an
    app can't spoof the host UI; the frame itself is visibly bounded */
 .ws-app-mount {
   margin-top: 0.4rem;
@@ -1368,14 +1372,16 @@ iframe.ws-app-frame {
    rules only beat the base .feed / .feed-item / .composer-wrap / .captions rules by
    sitting after them.
 
-   The topbar carries nine controls, more than 360-390px can hold, so it sheds them in
-   value order: below 560px the brand goes and everything left gets tighter, below 470px
-   the status chip goes (80px of text the roster drawer also reports), below 380px the
-   drawer toggle goes as well. The code chip, the room link, the clear-feed button, Tools
-   and Connect survive every step. The theme toggle used to survive them too for lack of
-   another entry point; it lives in Settings now and is off the bar entirely, which is
-   where the extra slack came from. Measured at 360px this leaves 74px of slack in the
-   topbar, 68px at 390px and 215px at 768px. */
+   The topbar carries eight controls, more than 320-390px can hold, so it sheds them in
+   value order, by what survives elsewhere rather than by what is least used: below 560px
+   the brand goes (decorative), below 470px the status chip goes (80px of text the roster
+   drawer also reports), below 360px the room link goes (Connect holds the same action, and
+   the address bar holds the link). The code chip, the clear-feed button, the roster toggle,
+   Tools and Connect survive every step. The theme toggle lives in Settings and is off the
+   bar entirely, which is where the room came from. Measured with the drawer toggle on the
+   bar, the flexible spacer still holds 34px at 320px, 58px at 344px, 74px at 360px (the
+   room link is gone by then), 58px at 380px, 68px at 390px and 215px at 768px, and no
+   control is clipped or pushed past the right edge at any of them. */
 @media (max-width: 560px) {
   .topbar {
     padding: 0 0.4rem;
@@ -1399,8 +1405,8 @@ iframe.ws-app-frame {
     padding: 0.8rem 0.7rem;
   }
   /* the delete button hangs outside its card by design; on a phone that is off-screen, so
-     it moves inside. At this width it is usually also a touch screen, where the (hover: none)
-     block has already made it permanently visible rather than revealed on hover. */
+     it moves inside. At this width it is usually also a touch screen, where it is revealed
+     by tapping the card rather than by a hover that cannot happen. */
   .feed-item > .del {
     top: 0.15rem;
     right: 0.15rem;
@@ -1421,13 +1427,13 @@ iframe.ws-app-frame {
     display: none;
   }
 }
-@media (max-width: 380px) {
-  /* The 👥 roster toggle. `.roster-toggle` is the contract: console.ts puts it on the
-     topbar button that opens the devices & people panel, and this rule sheds that button
-     and nothing else. Position and tooltip are both free to change. The title-prefix
-     selector below it is the pre-contract fallback and can be deleted once the class is
-     on the button, so the rule no longer depends on tooltip wording. */
-  .topbar button.roster-toggle {
+@media (max-width: 360px) {
+  /* The room link 🔗 goes here. The 👥 drawer toggle must not: it is the one control
+     on this bar with no alternative anywhere else, and shedding it left devices & people
+     with no entry point at all on a 344px foldable cover screen. The room link has two
+     alternatives: Connect carries "Copy invite link" and never sheds, and the active code
+     already sits in the address bar as #/join/<code>. */
+  .topbar button.room-link {
     display: none;
   }
 }

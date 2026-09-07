@@ -1,19 +1,19 @@
 // Host-side sandbox runner (ARCHITECTURE section 8). Untrusted script source executes in a
-// NULL-ORIGIN iframe (blob: + sandbox="allow-scripts", NO allow-same-origin) whose
-// own inner CSP is `default-src 'none'; connect-src 'none'`, so the guest has no DOM
-// loads and NO network (no exfiltration). The iframe is defence-in-depth; the real
-// boundary is the enumerated postMessage capability API below: the guest has zero
-// ambient authority, every capability is host-mediated + permission-gated + validated,
-// and the iframe is destroyed on a 30 s deadline. Caller must obtain consent first
-// (never autorun). Swapping the guest's eval for QuickJS-WASM is the planned upgrade
-// for preemptive interruption + interpreter isolation.
+// null-origin iframe (blob: plus sandbox="allow-scripts", with no allow-same-origin) whose
+// own inner CSP is `default-src 'none'; connect-src 'none'`, so the guest has no DOM loads
+// and no network to exfiltrate over. The iframe is defence-in-depth and the boundary is the
+// enumerated postMessage capability API below: the guest has zero ambient authority, every
+// capability is host-mediated, permission-gated and validated, and the iframe is destroyed
+// on a 30 s deadline. The caller must obtain consent first and NEVER autorun. Swapping the
+// guest's eval for QuickJS-WASM is the planned upgrade, for preemptive interruption and
+// interpreter isolation.
 
 export interface SandboxPermissions {
   clipboardRead: boolean
   clipboardWrite: boolean
   storage: boolean
-  net: string[] // allowed origins (must ALSO be in the app CSP connect-src to actually fetch)
-  p2pRoom: boolean // room-channel relay for html apps (game-channel semantics; see runHtmlApp)
+  net: string[] // allowed origins (must also be in the app CSP connect-src to fetch)
+  p2pRoom: boolean // room-channel relay for html apps, with game-channel semantics (see runHtmlApp)
 }
 
 export interface SandboxCallbacks {
@@ -31,15 +31,16 @@ export interface SandboxResult {
   error?: string
 }
 
-// Static guest document. The untrusted source is delivered via postMessage AFTER
-// 'ready', never interpolated into this markup.
+// Static guest document. The untrusted source is delivered via postMessage after 'ready'
+// and never interpolated into this markup.
 const GUEST_HTML = `<!doctype html><html><head>
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval'; connect-src 'none'; style-src 'none'">
 </head><body><script>
 (function(){
-  // CSP connect-src 'none' does NOT govern WebRTC, so a guest could exfiltrate via
-  // ICE/STUN/TURN or DNS. Poison the WebRTC constructors before the untrusted source
-  // (delivered later via the 'exec' message) ever runs. Browser-enforced, CSP-independent.
+  // CSP connect-src 'none' does not govern WebRTC, so a guest could exfiltrate over
+  // ICE/STUN/TURN or DNS. Poison the WebRTC constructors before the untrusted source,
+  // delivered later via the 'exec' message, ever runs. Browser-enforced and independent
+  // of CSP.
   try {
     ['RTCPeerConnection','webkitRTCPeerConnection','mozRTCPeerConnection','RTCDataChannel'].forEach(function(n){
       try { delete window[n]; } catch(e){}
@@ -80,7 +81,7 @@ export function runInSandbox(source: string, perms: SandboxPermissions, cb: Sand
     const url = URL.createObjectURL(new Blob([GUEST_HTML], { type: 'text/html' }))
     const iframe = document.createElement('iframe')
     iframe.className = 'hidden'
-    iframe.setAttribute('sandbox', 'allow-scripts') // deliberately NO allow-same-origin, so the origin is opaque
+    iframe.setAttribute('sandbox', 'allow-scripts') // no allow-same-origin, so the origin is opaque
     iframe.src = url
 
     let done = false
@@ -132,11 +133,11 @@ export function runInSandbox(source: string, perms: SandboxPermissions, cb: Sand
     }
 
     const onMsg = (e: MessageEvent) => {
-      // The guest is a sandboxed (opaque) iframe, so its origin is the string "null".
+      // The guest is a sandboxed, opaque iframe, so its origin is the string "null".
       if (e.source !== iframe.contentWindow || e.origin !== 'null') return
       const d = (e.data ?? {}) as { k?: string; id?: number; method?: string; args?: unknown[]; msg?: unknown; value?: unknown; error?: unknown }
       if (d.k === 'ready') {
-        if (started) return // guest can't make us re-exec by spamming 'ready'
+        if (started) return // a guest spamming 'ready' cannot make us re-exec
         started = true
         post({ k: 'exec', source })
       } else if (d.k === 'log') cb.log(String(d.msg).slice(0, 2000))
@@ -150,7 +151,7 @@ export function runInSandbox(source: string, perms: SandboxPermissions, cb: Sand
   })
 }
 
-/** Host-mediated fetch for a sandboxed tool: credential-free, size-capped, no off-list redirects. */
+/** Host-mediated fetch for a sandboxed tool. Credential-free, size-capped, no off-list redirects. */
 export async function hostFetch(url: string, init: { method?: string; body?: string; headers?: Record<string, string> }): Promise<{ status: number; body: string }> {
   const res = await fetch(url, {
     method: init.method ?? 'GET',
@@ -165,22 +166,22 @@ export async function hostFetch(url: string, init: { method?: string; body?: str
 }
 
 // ---------------------------------------------------------------------------
-// HTML apps (Workshop `type:'html'`): the same boundary, made visible & durable.
-// The app executes in the SAME null-origin blob: iframe configuration as scripts
+// HTML apps (Workshop `type:'html'`) use the same boundary, made visible and durable.
+// The app executes in the same null-origin blob: iframe configuration as scripts
 // (`sandbox="allow-scripts"`, inner CSP with no network, WebRTC poisoned before any
-// untrusted code) behind the SAME enumerated postMessage capability API, plus an
-// opt-in `room` channel the host relays over the authenticated best-effort `game`
-// channel (ARCHITECTURE section 5.4 semantics: state/scores, transport-encrypted, never
-// secrets, never the ratchet). Differences from runInSandbox, deliberately minimal:
-//   - the iframe is VISIBLE (mounted where the caller says) and has NO deadline;
-//     teardown is an explicit close() (user gesture or tool deactivation).
-//   - styles may exist INSIDE the guest document (its own CSP: style-src
-//     'unsafe-inline'); the host page CSP is untouched.
-//   - the app HTML is still delivered via postMessage after 'ready', never
-//     interpolated into the static guest markup. The bootstrap mounts it with
-//     DOMParser and re-creates <script> nodes so they execute in document order.
-// The guest can render arbitrary UI, so the host chrome MUST keep the app name +
-// trust badge visible OUTSIDE the frame. The frame can imitate anything inside.
+// untrusted code) behind the same enumerated postMessage capability API, plus an opt-in
+// `room` channel the host relays over the authenticated best-effort `game` channel
+// (ARCHITECTURE section 5.4 semantics: state and scores, transport-encrypted, never
+// secrets and never the ratchet). Differences from runInSandbox, kept minimal:
+//   - the iframe is visible, mounted where the caller says, and has no deadline; teardown
+//     is an explicit close() from a user gesture or tool deactivation.
+//   - styles may exist inside the guest document, whose own CSP allows style-src
+//     'unsafe-inline'; the host page CSP is untouched.
+//   - the app HTML is still delivered via postMessage after 'ready' and never
+//     interpolated into the static guest markup. The bootstrap mounts it with DOMParser
+//     and re-creates <script> nodes so they execute in document order.
+// The guest can render arbitrary UI, so the host chrome must keep the app name and trust
+// badge visible outside the frame, since the frame can imitate anything inside.
 
 export interface AppCallbacks extends SandboxCallbacks {
   /** Relay app data to authenticated room peers running the same content hash. */
@@ -194,7 +195,7 @@ export interface AppHandle {
   close(): void
 }
 
-const ROOM_MSG_MAX = 16_384 // JSON chars: a compact map chunk fits, bulk exfil doesn't
+const ROOM_MSG_MAX = 16_384 // JSON chars; a compact map chunk fits, a bulk transfer does not
 const ROOM_MIN_INTERVAL_MS = 15 // about 66 msg/s ceiling per app
 
 const GUEST_APP_HTML = `<!doctype html><html><head>
@@ -259,7 +260,7 @@ export function runHtmlApp(source: string, perms: SandboxPermissions, cb: AppCal
   const url = URL.createObjectURL(new Blob([GUEST_APP_HTML], { type: 'text/html' }))
   const iframe = document.createElement('iframe')
   iframe.className = 'ws-app-frame'
-  iframe.setAttribute('sandbox', 'allow-scripts') // deliberately NO allow-same-origin, so the origin is opaque
+  iframe.setAttribute('sandbox', 'allow-scripts') // no allow-same-origin, so the origin is opaque
   iframe.src = url
 
   let closed = false
@@ -314,7 +315,7 @@ export function runHtmlApp(source: string, perms: SandboxPermissions, cb: AppCal
   }
 
   const onMsg = (e: MessageEvent) => {
-    // Same authentication as runInSandbox: an opaque-origin iframe reports origin === 'null'.
+    // Same authentication as runInSandbox; an opaque-origin iframe reports origin === 'null'.
     if (e.source !== iframe.contentWindow || e.origin !== 'null') return
     const d = (e.data ?? {}) as { k?: string; id?: number; method?: string; args?: unknown[]; msg?: unknown }
     if (d.k === 'ready') {

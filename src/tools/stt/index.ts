@@ -2,10 +2,10 @@ import type { ToolContext, ToolModule } from '../../shell/registry'
 import { button, consent, el, toast } from '../../shell/ui'
 
 // Speech-to-text (ARCHITECTURE section 4.3). Files and mic recordings transcribe
-// PRIVATELY on-device via Whisper, running transformers.js in a worker. Audio is decoded
-// and resampled to 16 kHz mono with the Web Audio API; there is no ffmpeg yet, so video
-// may fail until that add-on lands. The live path uses the browser SpeechRecognition
-// service and is opt-in plus warned, because it sends audio to a third party.
+// on-device via Whisper, running transformers.js in a worker. Audio is decoded and
+// resampled to 16 kHz mono with the Web Audio API. There is no ffmpeg yet, so video may
+// fail until that add-on lands. The live path uses the browser SpeechRecognition service
+// and is opt-in and warned, because it sends audio to a third party.
 
 const MODELS = [
   { id: 'Xenova/whisper-base', label: 'whisper-base: multilingual, more accurate' },
@@ -21,9 +21,9 @@ const LANGS: Array<{ v: string; label: string; bcp: string }> = [
   { v: 'german', label: 'German', bcp: 'de-DE' },
 ]
 
-// The Whisper worker is deliberately one shared instance (loading the model twice would
-// double the memory/download); requests are routed by monotonic `reqSeq` id, so several
-// cards can share it safely. Teardown is per-card (keyed by container) and refcounted so
+// The Whisper worker is one shared instance, because loading the model twice would double
+// the memory and the download. Requests are routed by monotonic `reqSeq` id, so several
+// cards can share it safely. Teardown is per-card, keyed by container, and refcounted so
 // closing one card never terminates a worker another card is still using.
 let worker: Worker | null = null
 let consented = false
@@ -83,7 +83,7 @@ function transcribe(audio: Float32Array, model: string, language: string, onStat
 const tool: ToolModule = {
   activate(container: HTMLElement, ctx: ToolContext) {
     liveInstances++
-    let torn = false // set on deactivate: teardown must not transcribe or respawn the worker
+    let torn = false // set on deactivate; teardown must not transcribe or respawn the worker
     const modelSel = el('select') as HTMLSelectElement
     modelSel.append(...MODELS.map((m) => el('option', { value: m.id, text: m.label })))
     const langSel = el('select') as HTMLSelectElement
@@ -104,7 +104,7 @@ const tool: ToolModule = {
     }
 
     const runAudio = async (blob: Blob, append: boolean) => {
-      if (torn) return // deactivated before/while this fired: never respawn the worker or prompt
+      if (torn) return // deactivated before or while this fired, so never respawn or prompt
       if (!(await ensureConsent())) return
       status.textContent = 'Decoding audio...'
       try {
@@ -148,7 +148,7 @@ const tool: ToolModule = {
         recorder.onstop = () => {
           stream.getTracks().forEach((t) => t.stop())
           recBtn.textContent = '🔴 Record'
-          if (torn) return // stopped by teardown, not the user: don't transcribe
+          if (torn) return // stopped by teardown rather than by a click, so do not transcribe
           const blob = new Blob(chunks, { type: chunks[0]?.type || 'audio/webm' })
           void runAudio(blob, true)
         }

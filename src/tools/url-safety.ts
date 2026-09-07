@@ -1,27 +1,27 @@
-// URL Check: two layers over one link, kept visibly apart because they make claims of
-// very different strength.
+// URL Check: two layers over one link, kept visibly apart because their claims differ in
+// strength.
 //
 //  1. Structural analysis, local and instant. Punycode homographs, a brand parked in a
 //     subdomain, credentials before the @, free-registration TLDs, and the rest of the
-//     tricks that are visible in the text of the URL itself. Never fetches anything.
-//     This is a HEURISTIC: it reads the URL, not the site. "Nothing structurally
-//     suspicious" means the shape of the link is not deceptive, not that it is safe.
+//     tricks visible in the text of the URL itself. Never fetches anything. It is a
+//     heuristic over the URL, not the site: "nothing structurally suspicious" means the
+//     shape of the link is not deceptive, not that the site is safe.
 //
-//  2. Blocklist feeds, over the network. A hit here is a FACT with a source and a date:
-//     somebody observed this URL phishing and published it. A miss is only ever "not on
-//     the lists I hold, as of <age>", which is why every result states the feed and how
-//     old the copy is. A stale feed answering "clean" is worse than no answer.
+//  2. Blocklist feeds, over the network. A hit carries a source and a date, meaning
+//     somebody observed this URL phishing and published it. A miss only ever means "not
+//     on the lists I hold, as of <age>", which is why every result states the feed and
+//     how old the copy is.
 //
-// Feed selection is constrained by CORS, not by preference: most of the well-known
-// keyless phishing feeds (openphish.com direct, phishunt.io, urlhaus, phishstats,
-// phishing.army) send no access-control headers, so a page cannot read them at all even
-// though curl can. The three below were probed from a real browser and do work.
+// CORS constrains feed selection: most of the well-known keyless phishing feeds
+// (openphish.com direct, phishunt.io, urlhaus, phishstats, phishing.army) send no
+// access-control headers, so a page cannot read them at all even though curl can. The
+// three below were probed from a real browser and do work.
 //
-// URL Inspector used to be a second tool holding the component breakdown. One link asked
-// two questions in two places, so it is merged in here: the verdict stays the headline and
-// the breakdown sits underneath it as reference. parseUrl below is that breakdown, and is
-// also the parse contract the clipboard tool imports (new URL on the trimmed input, null
-// on failure).
+// URL Inspector used to be a second tool holding the component breakdown, so one link
+// asked two questions in two places. It is merged in here, with the verdict as the
+// headline and the breakdown underneath as reference. parseUrl below is that breakdown,
+// and is also the parse contract the clipboard tool imports (new URL on the trimmed
+// input, null on failure).
 
 import { createStore, del, get, set } from 'idb-keyval'
 import { getItem, setItem } from '../core/store'
@@ -76,11 +76,11 @@ function digitOf(c: number): number {
 }
 
 /**
- * RFC 3492 decode of a single label WITHOUT its `xn--` prefix, or null if it is malformed.
- * Inlined (about 40 lines) rather than pulled from a dependency because it is the whole
- * point of the homograph check: the browser's URL parser normalizes a pasted Cyrillic host
- * to punycode, so without decoding, `xn--pypal-4ve.com` and the lookalike the user actually
- * saw are both opaque ASCII and the deception is invisible.
+ * RFC 3492 decode of a single label without its `xn--` prefix, or null if it is malformed.
+ * Inlined (about 40 lines) rather than pulled from a dependency because the homograph
+ * check depends on it: the browser's URL parser normalizes a pasted Cyrillic host to
+ * punycode, so without decoding, `xn--pypal-4ve.com` and the lookalike the user saw are
+ * both opaque ASCII and the deception is invisible.
  */
 export function punycodeDecode(label: string): string | null {
   let n = P_N
@@ -125,7 +125,8 @@ export function punycodeDecode(label: string): string | null {
 // Greek omicron/nu are pixel-identical to their Latin twins in most UI fonts.
 const SCRIPTS: [string, RegExp][] = [
   // Ranges are written as \u escapes on purpose. As literal boundary characters the
-  // source is non-ASCII and unreadable: several of these code points render as nothing.
+  // source is non-ASCII and unreadable, since several of these code points render as
+  // nothing.
   ['Latin', /[A-Za-z\u00C0-\u024F]/],
   ['Cyrillic', /[\u0400-\u052F]/],
   ['Greek', /[\u0370-\u03FF\u1F00-\u1FFF]/],
@@ -237,7 +238,7 @@ const SHORTENERS = new Set([
 ])
 
 // Registries that hand out names for free or near free, which is why bulk phishing lives
-// there. Split from the merely cheap gTLDs so the severity stays honest.
+// there. Split from the merely cheap gTLDs so the two carry different severities.
 const TLD_FREE = new Set(['tk', 'ml', 'ga', 'cf', 'gq'])
 const TLD_LOOKALIKE = new Set(['zip', 'mov']) // collide with file extensions
 const TLD_CHEAP = new Set([
@@ -629,9 +630,9 @@ export function analyzeUrl(input: string): Report | null {
 /**
  * How strong a listing is. `url` means this exact address was published as phishing.
  * `host` means a different address on the same hostname was. `domain` means only the
- * registrable domain matched, so the listed thing may be a sibling subdomain. They are
- * reported separately on purpose: collapsing them into one "known bad" would let the
- * weakest evidence borrow the credibility of the strongest.
+ * registrable domain matched, so the listed thing may be a sibling subdomain. Reported
+ * separately, because collapsing them into one "known bad" would let the weakest evidence
+ * borrow the credibility of the strongest.
  */
 export type MatchKind = 'url' | 'host' | 'domain'
 
@@ -683,10 +684,10 @@ export function feedById(id: string): FeedSpec | undefined {
   return FEEDS.find((f) => f.id === id)
 }
 
-// Feed bodies live in their own IndexedDB store, NOT in the encrypted vault. They are
+// Feed bodies live in their own IndexedDB store rather than the encrypted vault. They are
 // public blocklists with nothing personal in them, and putting eleven megabytes in the
 // vault would mean re-wrapping all of it on every passphrase mode switch and losing
-// access to it whenever the vault is locked. Cost with no benefit.
+// access to it whenever the vault is locked.
 const feedStore = createStore('wt-feeds', 'kv')
 
 interface CachedFeed {
@@ -706,9 +707,9 @@ export interface FeedState {
 }
 
 /**
- * Parsed indexes, keyed by feed id. Module level and shared across every card on
- * purpose: unlike per-card UI state this is immutable public data, and rebuilding a
- * 390000-entry Set per open card would be pure waste.
+ * Parsed indexes, keyed by feed id. Module level and shared across every card, because
+ * unlike per-card UI state this is immutable public data and rebuilding a 390000-entry
+ * Set per open card would be wasted work.
  */
 const indexes = new Map<string, { urls: Set<string>; hosts: Set<string>; domains: Set<string>; state: FeedState }>()
 /** In-flight fetches, so two cards pasted at once share one download. */
@@ -864,10 +865,10 @@ function matchIn(id: string, norm: string, host: string, domain: string): MatchK
 }
 
 /**
- * Check one URL against the feeds. The small feed is fetched on demand and reused for
- * its TTL; bulk feeds are consulted ONLY when already downloaded, so a check never
- * silently pulls megabytes. Never throws: a dead feed becomes an entry in `errors`,
- * because a network failure must not be able to look like a clean result.
+ * Check one URL against the feeds. The small feed is fetched on demand and reused for its
+ * TTL; bulk feeds are consulted only when already downloaded, so a check never silently
+ * pulls megabytes. Never throws, since a dead feed becomes an entry in `errors` and a
+ * network failure must not be able to look like a clean result.
  */
 export async function checkFeeds(input: string): Promise<FeedOutcome> {
   const out: FeedOutcome = { hits: [], consulted: [], absent: [], errors: [] }
@@ -930,7 +931,7 @@ export function hitText(h: FeedHit): string {
   return `Listed by ${h.feed}: ${MATCH_WORD[h.match]}. Feed ${ageText(h.fetchedAt)}, ${h.entries} entries.`
 }
 
-/** One line for the top of a card: the fact layer, never the heuristic one. */
+/** One line for the top of a card, drawn from the feed layer and never the heuristic one. */
 export function feedHeadline(o: FeedOutcome): { cls: string; text: string } {
   if (o.hits.length) {
     const top = o.hits[0]
@@ -943,8 +944,8 @@ export function feedHeadline(o: FeedOutcome): { cls: string; text: string } {
   if (!o.consulted.length) return { cls: 'warn', text: 'No feed answered' }
   const oldest = o.consulted.reduce((a, b) => (a.fetchedAt < b.fetchedAt ? a : b))
   const where = o.consulted.length === 1 ? o.consulted[0].spec.name : `${o.consulted.length} feeds`
-  // A stale copy answering "clean" is worse than no answer, so it never gets the green
-  // badge: the age is in the text either way, but the colour must not vouch for it.
+  // A stale copy answering "clean" never gets the green badge. The age is in the text
+  // either way, but the colour must not vouch for it.
   const fresh = o.consulted.some((c) => !c.stale)
   return { cls: fresh ? 'ok' : 'warn', text: `Not on ${where}, ${ageText(oldest.fetchedAt)}${fresh ? '' : ', not refreshed'}` }
 }
@@ -984,7 +985,7 @@ export async function setPasteCheckEnabled(on: boolean): Promise<void> {
   }
 }
 
-/** The fact layer, as DOM. Kept separate from the findings so the two never blur. */
+/** The feed layer, as DOM. Kept separate from the findings so the two never blur. */
 export function feedBlock(o: FeedOutcome): HTMLElement {
   const head = feedHeadline(o)
   const box = el('div', { class: 'stack url-check-feedresult' }, [
@@ -1002,8 +1003,8 @@ export function feedBlock(o: FeedOutcome): HTMLElement {
 }
 
 /**
- * The breakdown, as DOM. Reference material: it makes no claim about the link, so it goes
- * below the verdict rather than competing with it for the top of the card.
+ * The breakdown, as DOM. Reference material that makes no claim about the link, so it
+ * goes below the verdict rather than competing with it for the top of the card.
  */
 export function partsBlock(parts: UrlPart[]): HTMLElement {
   const box = el('div', { class: 'stack url-check-parts' }, [el('div', { class: 'group-label', text: 'How the link is put together' })])
@@ -1037,7 +1038,7 @@ export function structuralBlock(r: Report): HTMLElement {
  * Proactive check for a link pasted into the console feed (ARCHITECTURE section 4.1).
  * Renders the local verdict at once and fills the feed answer in when it lands, so the
  * paste is never blocked on the network. Mirrors the auto-OCR path for images, including
- * its off switch: with the switch off the caller gets a button instead.
+ * its off switch, so with the switch off the caller gets a button instead.
  */
 export async function renderPasteVerdict(url: string, out: HTMLElement): Promise<void> {
   const report = analyzeUrl(url)
@@ -1090,8 +1091,8 @@ const tool: ToolModule = {
           class: 'muted small',
           text: 'A listing is a reported fact with a date. The structural score is a heuristic reading of the URL text and not of the site behind it, so a clean score is not a promise that the destination is safe.',
         }),
-        // Merged in from URL Inspector, deliberately last: it answers "what is in this
-        // link", which is only worth reading after the verdict has answered "is it safe".
+        // Merged in from URL Inspector, and last on purpose, because it answers "what is
+        // in this link", which is only worth reading after "is it safe".
         ...(parts ? [partsBlock(parts)] : []),
       )
     }
@@ -1108,8 +1109,8 @@ const tool: ToolModule = {
           if (current?.url !== target || !out.isConnected) return
           outcome = o
           paint()
-          // A check populates the small feed's cache, so the feed rows below are now
-          // stale: repaint them or the card claims the feed is still undownloaded.
+          // A check populates the small feed's cache, so the feed rows below need a
+          // repaint or the card claims the feed is still undownloaded.
           void renderFeeds()
         })
         .catch((e: Error) => {

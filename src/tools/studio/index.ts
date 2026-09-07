@@ -2,11 +2,11 @@ import { getStudio, type DeviceOption, type StageLayout } from '../../shell/stud
 import type { ToolContext, ToolModule } from '../../shell/registry'
 import { button, copyText, el, toast } from '../../shell/ui'
 
-// Studio, a VDO.ninja-style control panel for the shared A/V stage: choose which
-// camera, mic or screen to publish, arrange incoming sources as grid, spotlight or solo,
-// record any source, and copy a chromeless #/stage/<code> link to drop into OBS as a
-// browser source. It owns NO streams; the console does, with studio.ts as the seam. This
-// panel only issues commands and reflects state.
+// Studio, a VDO.ninja-style control panel for the shared A/V stage: choose which camera,
+// mic or screen to publish, arrange incoming sources as grid, spotlight or solo, record any
+// source, and copy a chromeless #/stage/<code> link to drop into OBS as a browser source.
+// It owns no streams. The console owns them, with studio.ts as the seam, and this panel
+// only issues commands and reflects state.
 
 const RES = [
   { v: 0, label: 'Default' },
@@ -20,9 +20,9 @@ const LAYOUTS: Array<{ v: StageLayout; label: string }> = [
   { v: 'solo', label: 'Solo' },
 ]
 
-// Per-card onChange subscription, keyed by container: the cached module singleton is
-// shared across open Studio cards, so a shared handle would freeze one card's updates
-// when another is opened/closed.
+// Per-card onChange subscription, keyed by container. The cached module singleton is
+// shared across open Studio cards, so a shared handle would freeze one card's updates when
+// another is opened or closed.
 const subs = new WeakMap<HTMLElement, () => void>()
 
 const tool: ToolModule = {
@@ -154,7 +154,7 @@ const tool: ToolModule = {
       el('div', { class: 'muted small', text: 'Sources on the stage' }),
       list,
       linkRow,
-      el('div', { class: 'muted small', text: 'Your media goes only to paired/code peers, never to nearby devices. Everything is peer-to-peer, so no server sees it.' }),
+      el('div', { class: 'muted small', text: 'Your media goes only to paired and code peers, never to nearby devices.' }),
     )
     render()
     renderLink()
@@ -162,7 +162,7 @@ const tool: ToolModule = {
   },
 
   deactivate(container: HTMLElement) {
-    subs.get(container)?.() // stop reacting to stage changes; the console keeps owning the streams
+    subs.get(container)?.() // stop reacting to stage changes; the console still owns the streams
     subs.delete(container)
   },
 }

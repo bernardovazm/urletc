@@ -1,7 +1,7 @@
-// Studio controller, the seam between the console (which owns all live P2P media and
-// its security-critical routing) and the Studio tool (a lazy control-panel module).
-// Same pattern as getActiveSession(): the console implements this and registers it here;
-// the tool drives the shared video STAGE through it without touching streams directly.
+// Studio controller, the seam between the console (which owns all live P2P media and its
+// routing) and the Studio tool (a lazy control-panel module). Same pattern as
+// getActiveSession(), where the console implements this and registers it here, and the
+// tool drives the shared video stage through it without touching streams directly.
 
 export type SourceKind = 'cam' | 'screen' | 'mic'
 export type StageLayout = 'grid' | 'spotlight' | 'solo'

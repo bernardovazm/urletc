@@ -1,12 +1,11 @@
 // Local subtitle toolkit: parse, convert and retime SRT / WebVTT / plain transcript.
 // Pure computation on a file the user already has, with no network at all.
 //
-// It deliberately does NOT fetch subtitles from YouTube. That needs a server: the
-// timedtext endpoint answers with an empty body unless it is given player parameters
-// that exist only inside the watch page, and the watch page sends no CORS headers, so
-// no client-only app can read either one. Retiming and converting a file you already
-// downloaded is the half that does work in a browser, and it is the half that breaks
-// most often in practice.
+// It does not fetch subtitles from YouTube, which would need a server. The timedtext
+// endpoint answers with an empty body unless it is given player parameters that exist only
+// inside the watch page, and the watch page sends no CORS headers, so a client-only app
+// can read neither. Retiming and converting a file already downloaded is what does work in
+// a browser.
 
 import type { ToolContext, ToolModule } from '../shell/registry'
 import { button, copyButton, el } from '../shell/ui'
@@ -14,8 +13,8 @@ import { button, copyButton, el } from '../shell/ui'
 // ---------------------------------------------------------------- model
 
 export interface Cue {
-  /** WebVTT cue identifier, kept only when it carries meaning. SRT numbering is dropped:
-   *  it is frequently absent, duplicated or non-sequential, and is regenerated on write. */
+  /** WebVTT cue identifier, kept only when it carries meaning. SRT numbering is dropped
+   *  because it is often absent, duplicated or non-sequential, and is regenerated on write. */
   id?: string
   start: number // ms
   end: number // ms
@@ -88,16 +87,16 @@ export function parseSubtitles(input: string): Parsed {
     format = 'vtt'
     while (head < lines.length && lines[head].trim() !== '') head++ // the header block ends at the first blank line
     // NOTE / STYLE / REGION blocks carry no cue. Blanked in place rather than removed, so
-    // the line numbers reported back to the user still point at their own file.
+    // the line numbers reported back still point at the same lines of the input file.
     for (let i = head; i < lines.length; i++) {
       if (!/^(NOTE|STYLE|REGION)\b/.test(lines[i].trim())) continue
       while (i < lines.length && lines[i].trim() !== '') lines[i++] = ''
     }
   }
 
-  // Cues are located by scanning for timing lines, not by splitting the file on blank
-  // lines. A missing blank line between two cues is exactly the breakage this tool exists
-  // to diagnose, and block splitting swallows it into the previous cue's text.
+  // Cues are located by scanning for timing lines rather than by splitting the file on
+  // blank lines. A missing blank line between two cues is one of the breakages this tool
+  // diagnoses, and block splitting swallows it into the previous cue's text.
   const times: number[] = []
   for (let i = head; i < lines.length; i++) if (lines[i].includes(SEP)) times.push(i)
   if (!times.length) {
@@ -158,7 +157,7 @@ export function parseSubtitles(input: string): Parsed {
 
 export function toSrt(cues: Cue[]): string {
   if (!cues.length) return ''
-  // Renumbered from 1 whatever the input said: SRT numbering is not reliably present.
+  // Renumbered from 1 whatever the input said, since SRT numbering is often absent.
   return cues.map((c, i) => `${i + 1}\n${formatTimestamp(c.start, ',')} ${SEP} ${formatTimestamp(c.end, ',')}\n${stripCueTags(c.text, false)}`).join('\n\n') + '\n'
 }
 
@@ -171,7 +170,7 @@ export function toVtt(cues: Cue[]): string {
   return `WEBVTT\n\n${blocks.join('\n\n')}\n`
 }
 
-/** Plain transcript: no timings, no markup, one line per cue. */
+/** Plain transcript. No timings, no markup, one line per cue. */
 export function toTranscript(cues: Cue[]): string {
   if (!cues.length) return ''
   return (
@@ -209,8 +208,8 @@ export function scaleCues(cues: Cue[], factor: number): Cue[] {
   return cues.map((c) => ({ ...c, start: Math.round(c.start * factor), end: Math.round(c.end * factor) }))
 }
 
-const MERGE_GAP_MS = 1500 // silence longer than this is a real pause, not a split
-const MERGE_MAX_MS = 12_000 // never build a cue that hangs on screen forever
+const MERGE_GAP_MS = 1500 // silence longer than this counts as a pause rather than a split
+const MERGE_MAX_MS = 12_000 // ceiling on how long a merged cue may hang on screen
 const MERGE_MAX_CHARS = 200
 // A sentence that is finished, allowing one closing quote or bracket after the stop.
 const SENTENCE_END = /[.!?\u2026][")\]\u201d\u2019]?$/
@@ -260,7 +259,7 @@ const RATES: Array<[string, number, number]> = [
   ['30 fps file, 29.97 fps video', 30, 29.97],
 ]
 
-// Per-card state, keyed by the container: launchTool shares one cached ToolModule across
+// Per-card state, keyed by the container. launchTool shares one cached ToolModule across
 // every open card, so a module-level object URL would be revoked by whichever card closed
 // first and would break the download link in the others.
 const state = new WeakMap<HTMLElement, { url: string | null }>()
@@ -317,8 +316,8 @@ const tool: ToolModule = {
       const parsed = parseSubtitles(input.value)
       let cues = parsed.cues
       const f = Number(factor.value)
-      // Rescale first, then shift: a frame-rate error is multiplicative on the original
-      // timeline, while an offset is a constant on the timeline you end up watching.
+      // Rescale first, then shift. A frame-rate error is multiplicative on the original
+      // timeline, while an offset is a constant on the timeline being watched.
       cues = scaleCues(cues, Number.isFinite(f) && f > 0 ? f : 1)
       const secs = Number(offset.value)
       if (Number.isFinite(secs) && secs !== 0) cues = shiftCues(cues, Math.round(secs * 1000))

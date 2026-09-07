@@ -2,7 +2,7 @@ import type { ToolContext, ToolModule } from '../shell/registry'
 import { toHex } from '../core/crypto'
 import { button, copyButton, el } from '../shell/ui'
 
-// SHA family via native WebCrypto: text or file bytes, all on-device.
+// SHA family via native WebCrypto over text or file bytes, all on-device.
 const ALGOS = ['SHA-256', 'SHA-1', 'SHA-384', 'SHA-512'] as const
 
 async function digestHex(algo: string, data: BufferSource): Promise<string> {
@@ -16,7 +16,7 @@ const tool: ToolModule = {
     const input = el('textarea', { placeholder: 'Text to hash' }) as HTMLTextAreaElement
     const fileInput = el('input', { type: 'file', class: 'hidden' }) as HTMLInputElement
     const out = el('pre', { class: 'muted', text: 'hex digest' })
-    let source: 'text' | 'file' | null = null // file bytes aren't retained; only re-hash text on algo change
+    let source: 'text' | 'file' | null = null // file bytes are not retained, so only text re-hashes on an algo change
 
     const show = (hex: string, from: 'text' | 'file') => {
       source = from

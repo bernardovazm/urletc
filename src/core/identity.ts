@@ -1,11 +1,11 @@
-// Device identity (ARCHITECTURE sections 5.3 and 9): a single Ed25519 (signing) +
-// X25519 (ECDH) non-extractable keypair per device, persisted in IndexedDB.
+// Device identity (ARCHITECTURE sections 5.3 and 9): one Ed25519 (signing) + X25519
+// (ECDH) non-extractable keypair per device, persisted in IndexedDB.
 // deviceId = hex( SHA-256( raw Ed25519 public key ) ).
 //
-// Private keys are non-extractable; public keys are always exportable, so we can
-// derive the fingerprint without weakening the private material. If the browser
-// lacks the native curves we throw CryptoUnsupportedError. The caller falls back
-// to tools-only mode, where the local tools still work.
+// Private keys are non-extractable; public keys stay exportable, so the fingerprint is
+// derivable without weakening the private material. Without the native curves this throws
+// CryptoUnsupportedError and the caller falls back to tools-only mode, where the local
+// tools still work.
 
 import { createStore, get, set } from 'idb-keyval'
 import { probeCrypto, sha256, toHex } from './crypto'

@@ -43,8 +43,8 @@ export function toast(message: string, ms = 2500): void {
 
 /**
  * Write text to the clipboard and toast the outcome. `write` defaults to the raw
- * navigator API; tools pass their permission-gated `ctx.clipboard.write` so the
- * same feedback path serves both host chrome and sandboxed capability facades.
+ * navigator API; tools pass their permission-gated `ctx.clipboard.write` so one
+ * feedback path serves both host chrome and sandboxed capability facades.
  */
 export async function copyText(text: string, write: (t: string) => Promise<void> = (t) => navigator.clipboard.writeText(t)): Promise<boolean> {
   try {
@@ -62,7 +62,7 @@ export function copyButton(get: () => string, write?: (t: string) => Promise<voi
   return button(label, () => void copyText(get(), write), cls, 'Copy to clipboard')
 }
 
-// Classes must match tokens.css (.badge.ok/.warn/.danger); the color is the trust signal.
+// Classes must match tokens.css (.badge.ok/.warn/.danger); the colour carries the trust signal.
 const TIER_LABEL: Record<TrustTier, [string, string]> = {
   builtin: ['ok', 'built-in'],
   trusted: ['ok', 'peer-vouched'],
@@ -88,9 +88,9 @@ export interface ConsentOptions {
 }
 
 /**
- * The never-autorun consent gate (ARCHITECTURE sections 7, 8 and D5). Resolves true
- * only on an explicit Run click. The user always sees declared capabilities and, for
- * code, the full source before choosing. No "remember / auto-approve".
+ * The never-autorun consent gate (ARCHITECTURE sections 7, 8 and D5). Resolves true only
+ * on an explicit Run click. The user always sees declared capabilities and, for code, the
+ * full source before choosing. No "remember" or auto-approve.
  */
 export function consent(o: ConsentOptions): Promise<boolean> {
   return new Promise((resolve) => {
@@ -102,8 +102,8 @@ export function consent(o: ConsentOptions): Promise<boolean> {
       prevFocus?.focus?.()
       resolve(v)
     }
-    // Escape cancels; Tab is trapped inside the dialog so focus can't wander to the
-    // page behind this security gate.
+    // Escape cancels, and Tab is trapped inside the dialog so focus cannot wander to
+    // the page behind this security gate.
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         close(false)
@@ -124,7 +124,7 @@ export function consent(o: ConsentOptions): Promise<boolean> {
     }
     document.addEventListener('keydown', onKey)
 
-    const head = el('div', { class: 'row' }, [el('strong', { text: `⚠ ${o.title}` })])
+    const head = el('div', { class: 'row' }, [el('strong', { text: o.title })])
     if (o.version) head.append(el('span', { class: 'muted', text: `v${o.version}` }))
     if (o.tier) head.append(badge(o.tier))
 

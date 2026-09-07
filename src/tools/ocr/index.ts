@@ -7,10 +7,11 @@ import { prepareForOcr } from './preprocess'
 // strict CSP keeps script-src 'self'. Only the language data is fetched from a CDN
 // (allowed in connect-src) on first use and cached by the library in IndexedDB.
 
-// The Tesseract worker is a shared singleton (loading its WASM core twice is wasteful) and
-// is reached from BOTH this tool's cards and the clipboard tool's inline OCR. `inFlight`
-// guards teardown so closing one consumer can't terminate a recognition another is running;
-// `liveCards` refcounts this tool's cards so the heap is freed only when the last one closes.
+// The Tesseract worker is a shared singleton, since loading its WASM core twice is
+// wasteful, and is reached from this tool's cards and from the clipboard tool's inline OCR.
+// `inFlight` guards teardown so closing one consumer cannot terminate a recognition another
+// is running, and `liveCards` refcounts this tool's cards so the heap is freed only when
+// the last one closes.
 let workerPromise: ReturnType<typeof createWorker> | null = null
 let progressCb: ((p: number) => void) | null = null
 let inFlight = 0
@@ -19,15 +20,15 @@ let liveCards = 0
 /** Traineddata to load, from the browser's own languages.
  *
  *  English alone read a Portuguese page as "instrucGes" for "instrucoes" and dropped every
- *  accent, because the accented forms are not in the English character set at all. Tesseract
- *  accepts several languages at once ("eng+por") and picks per word, so adding the user's own
- *  language costs one more traineddata download on first use and nothing in accuracy for the
- *  English it was already getting right. English stays in the list because interface chrome,
+ *  accent, because the accented forms are not in the English character set. Tesseract
+ *  accepts several languages at once ("eng+por") and picks per word, so adding the browser
+ *  language costs one more traineddata download on first use and nothing in accuracy for
+ *  the English it already got right. English stays in the list because interface chrome,
  *  URLs and error strings are usually English even on a translated page.
  *
  *  Only languages with a fast traineddata on the configured CDN are offered, and the result
- *  is capped: every extra language slows recognition and widens the character set, which
- *  costs accuracy on short strings like a hostname. */
+ *  is capped, because every extra language slows recognition and widens the character set,
+ *  which costs accuracy on short strings like a hostname. */
 const LANG_BY_PREFIX: Record<string, string> = {
   pt: 'por',
   es: 'spa',
@@ -54,12 +55,13 @@ export function ocrLanguages(langs: readonly string[] = navigator.languages ?? [
 
 function getWorker(): ReturnType<typeof createWorker> {
   workerPromise ??= createWorker(ocrLanguages(), OEM.LSTM_ONLY, {
-    // Points at our shim, not the vendored worker: a worker has its own Trusted Types
-    // context, so the policy installed by the page does not cover its importScripts call.
+    // Points at our shim rather than the vendored worker. A worker has its own Trusted
+    // Types context, so the policy installed by the page does not cover its importScripts
+    // call.
     workerPath: '/tesseract/worker-tt.js',
     // Load that shim by URL instead of the library's default of fetching it and wrapping
-    // it in a blob: worker. Inside a blob worker `self.location` is the opaque blob URL,
-    // so the shim cannot resolve the sibling script it needs to import.
+    // it in a blob: worker. Inside a blob worker `self.location` is the opaque blob URL, so
+    // the shim cannot resolve the sibling script it needs to import.
     workerBlobURL: false,
     corePath: '/tesseract',
     langPath: 'https://tessdata.projectnaptha.com/4.0.0_fast',
@@ -67,16 +69,16 @@ function getWorker(): ReturnType<typeof createWorker> {
       if (m.status === 'recognizing text') progressCb?.(m.progress)
     },
   }).then(async (w) => {
-    // Page segmentation mode is worth more than any filter on the inputs this tool
-    // actually gets. The default AUTO (PSM 3) runs full layout analysis and scored worst
-    // of every mode measured on a browser screenshot; SPARSE_TEXT finds text wherever it
-    // sits without trying to order it into a single page flow, which is what a screenshot
-    // of chrome + page + toast + button IS. It is also the only mode that kept the period
-    // in a small dotted hostname: SINGLE_BLOCK scores marginally higher character accuracy
-    // on that image and still drops the period. A dense body-copy fixture, the case
-    // sparse mode is supposed to be bad at, scores 1.000 under it, so nothing is traded.
-    // `user_defined_dpi` and `preserve_interword_spaces` were both measured and changed
-    // no output on any fixture, so neither is set.
+    // Page segmentation mode moves accuracy more than any filter on the inputs this tool
+    // gets. The default AUTO (PSM 3) runs full layout analysis and scored worst of every
+    // mode measured on a browser screenshot. SPARSE_TEXT finds text wherever it sits
+    // without ordering it into a single page flow, which suits a screenshot of chrome,
+    // page, toast and button, and it was the only mode that kept the period in a small
+    // dotted hostname (SINGLE_BLOCK scores marginally higher character accuracy on that
+    // image and still drops the period). A dense body-copy fixture, the case sparse mode is
+    // supposed to handle badly, scores 1.000 under it. `user_defined_dpi` and
+    // `preserve_interword_spaces` were measured and changed no output on any fixture, so
+    // neither is set.
     await w.setParameters({ tessedit_pageseg_mode: PSM.SPARSE_TEXT })
     return w
   })
@@ -92,9 +94,9 @@ export async function recognizeImage(image: Blob | string, onProgress?: (p: numb
   inFlight++
   try {
     const worker = await getWorker()
-    // Upscale + grayscale first. Preprocessing returns null if the bitmap cannot be
-    // decoded, and a string source (a URL) is handed straight through: every caller in
-    // this app passes a Blob, and fetching a URL here would break the no-auto-fetch rule.
+    // Upscale and grayscale first. Preprocessing returns null if the bitmap cannot be
+    // decoded, and a string source (a URL) is handed straight through, because every caller
+    // in this app passes a Blob and fetching a URL here would break the no-auto-fetch rule.
     const prepared = typeof image === 'string' ? null : await prepareForOcr(image)
     const { data } = await worker.recognize(prepared ?? image)
     return { text: data.text }
@@ -103,8 +105,8 @@ export async function recognizeImage(image: Blob | string, onProgress?: (p: numb
   }
 }
 
-/** Free the OCR worker + WASM heap (the heap cannot shrink while alive). No-op while a
- *  recognition is in flight: another card or the clipboard tool may still need the worker. */
+/** Free the OCR worker and WASM heap, which cannot shrink while alive. No-op while a
+ *  recognition is in flight, since another card or the clipboard tool may still need it. */
 export async function disposeOcr(): Promise<void> {
   if (inFlight > 0 || !workerPromise) return
   const w = await workerPromise
@@ -172,7 +174,7 @@ const tool: ToolModule = {
     )
   },
   deactivate() {
-    if (--liveCards > 0) return // another card still open; keep the shared worker warm
+    if (--liveCards > 0) return // another card is still open, so keep the worker warm
     liveCards = 0
     void disposeOcr()
   },

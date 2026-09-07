@@ -1,11 +1,11 @@
 import type { ToolContext, ToolModule } from '../shell/registry'
 import { copyText, el } from '../shell/ui'
 
-// How long this tab has been open. The elapsed number comes from performance.now(),
-// which counts from performance.timeOrigin on a monotonic clock: an NTP step, a manual
-// clock change or a timezone switch cannot corrupt it the way `Date.now() - startedAt`
-// can. timeOrigin is also the wall-clock anchor, read once for the "Opened at" row.
-// A reload is a new document, so it starts a new count.
+// How long this tab has been open. The elapsed number comes from performance.now(), which
+// counts from performance.timeOrigin on a monotonic clock, so an NTP step, a manual clock
+// change or a timezone switch cannot corrupt it the way `Date.now() - startedAt` can.
+// timeOrigin is also the wall-clock anchor, read once for the "Opened at" row. A reload is
+// a new document, so it starts a new count.
 
 /** "00:00:04", "02:14:03", "3d 02:14:03". Always hours:minutes:seconds, so the width
  *  stays put as it ticks and no field can be mistaken for a bigger unit. */
@@ -17,7 +17,7 @@ export function formatUptime(ms: number): string {
   return days ? `${days}d ${clock}` : clock
 }
 
-// Per-card teardown, keyed by container: launchTool shares one cached module across all
+// Per-card teardown, keyed by container. launchTool shares one cached module across all
 // open cards, so the interval handle must be per-activation. A module-level handle would
 // let a second card clobber the first's and leak its timer.
 const detachers = new WeakMap<HTMLElement, () => void>()
@@ -44,17 +44,13 @@ const tool: ToolModule = {
     tick()
     const timer = window.setInterval(tick, 1000)
     // Background tabs throttle timers to about once a minute, so refresh on the way back
-    // in: the number is then correct the moment it is looked at.
+    // in and the number is correct as soon as it is on screen.
     const onVisible = () => {
       if (!document.hidden) tick()
     }
     document.addEventListener('visibilitychange', onVisible)
 
-    container.append(
-      openFor.row,
-      opened.row,
-      el('div', { class: 'muted small', text: 'Measured on a monotonic clock, so a system time change cannot skew it. Reloading the tab starts a new count.' }),
-    )
+    container.append(openFor.row, opened.row, el('div', { class: 'muted small', text: 'Reloading the tab starts a new count.' }))
 
     detachers.set(container, () => {
       window.clearInterval(timer)

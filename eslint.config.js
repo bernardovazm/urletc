@@ -1,7 +1,7 @@
-// Flat ESLint config. Goal is NOT maximal style policing. It is to mechanically
-// enforce the security invariants from ARCHITECTURE.md 9.1 that were previously guarded only by
-// human review, plus catch dead code. Prettier owns formatting (see .prettierrc.json);
-// eslint-config-prettier turns off any rule that would fight it.
+// Flat ESLint config. Scope is the security invariants in ARCHITECTURE.md 9.1, expressed
+// as AST rules so they are enforced mechanically rather than by review, plus dead-code
+// detection. Prettier owns formatting (.prettierrc.json), and eslint-config-prettier
+// disables the rules that would fight it.
 import js from '@eslint/js'
 import tseslint from 'typescript-eslint'
 import nounsanitized from 'eslint-plugin-no-unsanitized'
@@ -37,9 +37,9 @@ export default tseslint.config(
     },
     rules: {
       'no-restricted-syntax': noRestricted,
-      // Deliberate escape hatch for intentional throwaways; the codebase uses `_`-prefixed catch vars.
+      // Escape hatch for intentional throwaways; catch vars here are `_`-prefixed.
       '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_', varsIgnorePattern: '^_', caughtErrors: 'none' }],
-      // WebCrypto/WebRTC/worker surfaces are loosely typed; the code is careful and typechecked by tsc.
+      // WebCrypto, WebRTC and worker surfaces are loosely typed; tsc covers these call sites.
       '@typescript-eslint/no-explicit-any': 'off',
     },
   },

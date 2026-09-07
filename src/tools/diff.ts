@@ -1,7 +1,7 @@
 import type { ToolContext, ToolModule } from '../shell/registry'
 import { button, copyButton, el } from '../shell/ui'
 
-// Line-level diff via a classic LCS DP: pure, dependency-free, all local.
+// Line-level diff via a classic LCS DP. Pure, dependency-free, all local.
 export type DiffTag = ' ' | '-' | '+'
 export interface DiffLine {
   tag: DiffTag

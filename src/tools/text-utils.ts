@@ -33,7 +33,7 @@ const tool: ToolModule = {
     }
     input.addEventListener('input', showStats)
 
-    // A transform copies its own result, so a case change is one click, not two.
+    // A transform copies its own result, so a case change takes one click.
     const transform = (fn: (s: string) => string) => {
       const result = fn(input.value)
       out.textContent = result

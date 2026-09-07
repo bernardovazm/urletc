@@ -1,13 +1,13 @@
 // Nearby discovery + join codes (ARCHITECTURE section 5.4). Web pages cannot mDNS-scan,
 // so "nearby" is approximated by shared public IP: a STUN binding request reveals our own
 // server-reflexive address, and every device behind the same NAT derives the same room
-// name from it, giving zero-touch discovery on the same Wi-Fi. Join codes are the serverless
-// replacement for "incremental IDs": both sides derive the room from a short speakable
-// code, so no ID allocator is needed and the code space stays sparse.
+// name from it, which gives zero-touch discovery on one Wi-Fi. Join codes replace an ID
+// allocator: both sides derive the room from a short speakable code, and the code space
+// stays sparse.
 //
-// Privacy trade-off: the nearby room name is H(public IP), so a
-// relay observer who knows your IP can link your presence. Content is still E2EE and
-// nearby peers are untrusted until verified, so nothing is auto-shared to them.
+// Privacy trade-off: the nearby room name is H(public IP), so a relay observer who knows
+// your IP can link your presence. Content is still E2EE and nearby peers are untrusted
+// until verified, so nothing is auto-shared to them.
 
 import { bytesToB64, randomBytes, sha256, toHex } from '../core/crypto'
 
@@ -71,20 +71,19 @@ export function nearbyRoom(ip: string): Promise<{ roomId: string; password: stri
  * The presence room: one fixed room every opted-in device joins, so "who else is online"
  * has an answer without a shared secret, a shared IP or a code.
  *
- * Deliberately NOT sharded or time-rotated. Sharding needs a rendezvous bucket everyone
- * probes first, and rotating the room name on a wall-clock epoch makes the whole
- * population re-join that one bucket simultaneously, which is worse than the problem it
- * solves. A single room is correct while the population is a small team; it is a full
- * mesh, so it does not stay correct at large scale. The tier carries presence ONLY
- * (`presenceOnly` in session.ts), which is what keeps the per-peer cost to a handshake.
+ * Not sharded and not time-rotated. Sharding needs a rendezvous bucket everyone probes
+ * first, and rotating the room name on a wall-clock epoch makes the whole population
+ * re-join that one bucket simultaneously. A single room is a full mesh, so it holds while
+ * the population is a small team and does not scale past that. The tier carries presence
+ * only (`presenceOnly` in session.ts), which keeps the per-peer cost to a handshake.
  */
 export function presenceRoom(): Promise<{ roomId: string; password: string }> {
   return derivedRoom('global', 'v1')
 }
 
-// No 0/1/o/i/l, so a code is unambiguous to read aloud or type. 6 chars give about
-// 2^29 combinations: sparse enough for an ephemeral rendezvous with a tiny user base, and
-// the content layer is protected by the authenticated E2EE handshake regardless.
+// No 0/1/o/i/l, so a code is unambiguous read aloud or typed. 6 chars give about 2^29
+// combinations, sparse enough for an ephemeral rendezvous at this user count, and the
+// content layer is protected by the authenticated E2EE handshake regardless.
 const CODE_ALPHABET = '23456789abcdefghjkmnpqrstuvwxyz'
 
 export function generateJoinCode(): string {

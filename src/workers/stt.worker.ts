@@ -1,9 +1,9 @@
 /// <reference lib="webworker" />
 // Whisper speech-to-text via transformers.js, off the main thread (ARCHITECTURE section 4.3).
-// Excluded from the app tsconfig (runs in a worker global scope); built by Vite.
-// Receives 16 kHz mono Float32 audio + model + language, posts back status/progress/result.
-// Deferred hardening (ARCHITECTURE section 9, P1 gate): pinned model-weight SHA-256
-// verification is not yet wired; transformers.js fetches + caches the model itself.
+// Excluded from the app tsconfig because it runs in a worker global scope, and built by Vite.
+// Receives 16 kHz mono Float32 audio plus model and language, posts back status, progress
+// and result. Deferred hardening (ARCHITECTURE section 9, P1 gate): pinned model-weight
+// SHA-256 verification is not wired yet, and transformers.js fetches and caches the model.
 
 import { pipeline, env } from '@huggingface/transformers'
 

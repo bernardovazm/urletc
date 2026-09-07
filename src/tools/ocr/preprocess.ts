@@ -2,18 +2,18 @@
 //
 // Tesseract's LSTM was trained on roughly 300 DPI scans. A screenshot is 96 DPI, so a
 // period between two hostname labels is one or two pixels wide and is the first feature
-// the recogniser drops: a dotted hostname came back with its dots missing from
-// the unprocessed bitmap. Upscaling before recognition is what puts that period back.
+// the recogniser drops: a dotted hostname came back with its dots missing from the
+// unprocessed bitmap. Upscaling before recognition puts that period back.
 //
-// Every constant here was measured on a fixture set (a real browser screenshot, a 1080p
+// Every constant here was measured on a fixture set: a real browser screenshot, a 1080p
 // and a 4K composite of it, a light-on-dark terminal, a light document, a dense body-copy
-// block and the canvas-rendered image the e2e suite generates), not assumed:
+// block and the canvas-rendered image the e2e suite generates.
 //
 //  - integer upscale to a pixel budget beats native everywhere and never regresses a
 //    fixture. It is what recovers dotted hostnames.
 //  - luma grayscale is a clear win on the screenshot and neutral elsewhere.
 //  - contrast stretch is neutral to negative. Not applied.
-//  - binarisation, global OR local adaptive, LOSES accuracy. These images are mixed
+//  - binarisation, global or local adaptive, loses accuracy. These images are mixed
 //    polarity (light text on dark browser chrome above, dark text on a light page below),
 //    and one threshold destroys whichever region it was not fitted to. Leptonica already
 //    thresholds per region inside Tesseract, so doing it here only throws information
@@ -28,9 +28,9 @@ const TARGET_OUT_PX = 12e6
 /** Output size we will never exceed, and the size an oversized source is reduced to. */
 const HARD_CAP_PX = 36e6
 
-/** Below 2x, small glyph features do not survive: a 3840x2160 screenshot left at native
- *  size lost BOTH dotted hostnames in the fixture set, and recovered both at 2x. So the
- *  target budget is an aim, not a floor, and 2x wins over it whenever the hard cap allows. */
+/** Below 2x, small glyph features do not survive. A 3840x2160 screenshot left at native
+ *  size lost both dotted hostnames in the fixture set and recovered both at 2x, so the
+ *  target budget is an aim and 2x wins over it whenever the hard cap allows. */
 const MIN_UPSCALE = 2
 
 /** Integer upscale factor for `w` x `h`, or a fraction below 1 when the source is itself
@@ -39,8 +39,8 @@ export function chooseScale(w: number, h: number): number {
   const px = w * h
   if (px <= 0) return 1
   if (px * MIN_UPSCALE * MIN_UPSCALE > HARD_CAP_PX) {
-    // Too big to upscale usefully. Only shrink if it is over the cap outright; a large
-    // photo already has large glyphs, and downscaling one that fits would destroy them.
+    // Too big to upscale usefully. Only shrink if it is over the cap outright, because a
+    // large photo already has large glyphs and downscaling one that fits destroys them.
     return px > HARD_CAP_PX ? Math.sqrt(HARD_CAP_PX / px) : 1
   }
   const byBudget = Math.floor(Math.sqrt(TARGET_OUT_PX / px))

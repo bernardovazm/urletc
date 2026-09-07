@@ -88,7 +88,7 @@ Known limits, expanded in section 13: clipboard auto-read on load works on Chrom
 have no persistent grant and fall back to paste plus a scan button; live-mic real-time
 Whisper is best effort and not guaranteed; "catalog with literally no server" means no server
 *you* operate, and even that leans on third-party relays and TURN; sandboxed script
-execution is isolated and consent-gated, never safe in the absolute; automatic discovery is
+execution is isolated and consent-gated, with no absolute safety claim; automatic discovery is
 bounded by the tiers in section 5.4.
 
 ---
@@ -951,7 +951,7 @@ badges; declarative automations first (safe-by-construction interpreter plus ReD
 then the QuickJS iframe runner for `type:"script"`; two-gesture consent.
 - Security gate: `allow-same-origin` provably absent; in-doc `connect-src 'none'`; postMessage
   capability API audited as if the iframe is fully escaped (every method permission-gated,
-  validated, rate-limited, under red-team review); interpreter op-whitelist has no eval or
+  validated, rate-limited); interpreter op-whitelist has no eval or
   host-access path; ReDoS worker terminates on a known catastrophic pattern; verify before
   display plus per-run re-verify; 30 s kill-timeout; no auto-approve path exists.
 
@@ -966,10 +966,10 @@ self-hosted coturn; Double-Ratchet upgrade if the threat model escalates.
 | # | Decision | Options | Choice | Trade-off |
 |---|---|---|---|---|
 | 1 | Signaling and discovery backend | (a) Trystero on free public Nostr/BitTorrent infra; (b) self-host `@trystero-p2p/ws-relay` on an Oracle/Fly free tier; (c) keep PeerJS cloud | (a) for v1, with a curated relay allow-list rather than arbitrary user relays (section 10) | (a) zero ops, no SLA and write-gating risk; (b) reliable but a box you run; (c) ~50-conn cap, "not production." |
-| 2 | TURN strategy | (a) a public static credential; (b) Vercel cred-vending Edge Function plus a provider key; (c) self-host coturn (Oracle Always Free) | none shipped: (a) was tried and the public credentials were retired, leaving dead ICE candidates, so it was removed; (c) if reliability matters, (b) to stay all-Vercel | (a) shared-pool exhaustion you cannot meter; (b) one tiny backend touchpoint; (c) zero cost plus your own box, best reliability. |
+| 2 | TURN strategy | (a) a public static credential; (b) Vercel cred-vending Edge Function plus a provider key; (c) self-host coturn (Oracle Always Free) | none shipped: (a) was tried and the public credentials were retired, leaving dead ICE candidates, so it was removed; none shipped; (c) is the fallback if relay reliability starts to matter | (a) shared-pool exhaustion you cannot meter; (b) one tiny backend touchpoint; (c) zero cost plus your own box, best reliability. |
 | 3 | Identity model | (a) single keypair plus room-scoping plus challenge-response; (b) dual public/private peer | (a) | (b) adds state and linkability risk for no gain once signature admission exists. |
 | 4 | Executable-script sharing | (a) declarative automations only; (b) declarative plus QuickJS-sandboxed JS; (c) full JS | (b): declarative primary, sandboxed JS as an opt-in tier behind 8.2 | (a) safest, limited; (b) covers most needs with bounded risk and an honest "isolated, not safe" framing; (c) unacceptable. |
-| 5 | Forward secrecy depth | (a) per-session HKDF ratchet, in scope for v1 (section 6); (b) full Double-Ratchet now | (a) now, (b) at Phase 4 | v1 already gives session FS; (b) adds post-compromise security at X3DH, prekey and state cost. Defer unless contacting high-risk strangers is a core use case. |
+| 5 | Forward secrecy depth | (a) per-session HKDF ratchet, in scope for v1 (section 6); (b) full Double-Ratchet now | (a) now, (b) at Phase 4 | v1 already gives session FS; (b) adds post-compromise security at X3DH, prekey and state cost. Deferred; it matters only for contact with high-risk strangers. |
 | 6 | COEP mode | (a) `credentialless`; (b) `require-corp`; (c) no COEP | (a) | (a) keeps `crossOriginIsolated` and loads no-CORP embeds credential-free; (b) breaks third-party embeds; (c) loses SharedArrayBuffer fast paths, though the singlethread cores still work (section 4). |
 
 ---
@@ -994,15 +994,16 @@ self-hosted coturn; Double-Ratchet upgrade if the threat model escalates.
   persistence degrading to online-peer overlap, and no durable hosting without accepting a
   relay or KV dependency, because browsers have no DHT. Installed tools survive locally and
   via signed file export; swarm re-seeding is best effort.
-- **Safe script execution is isolated and consent-gated, never safe.** Sandbox escapes are
+- **Script execution is isolated and consent-gated.** Sandbox escapes are
   exploited in the wild on unpatched and embedded Chromium (CVE-2025-2783, CVE-2025-4609
   `[v]`); the enumerated postMessage capability API (8.2) is the real boundary, with the
   iframe behind it; and consent fatigue and social engineering are irreducible by technical
   means. Declarative tools are safer only because the interpreter is provably
-  non-Turing-complete and side-effect-bounded (7.1). Market accordingly.
-- **`connect-src 'none'` does not block WebRTC inside the guest.** An adversarial red-team
-  confirmed a guest script could exfiltrate via `RTCPeerConnection` ICE/STUN/TURN, or via DNS,
-  despite the inner CSP, because CSP `connect-src` never governs ICE. Same root fact as
+  non-Turing-complete and side-effect-bounded (7.1), and the product copy says so rather
+  than claiming safety.
+- **`connect-src 'none'` does not block WebRTC inside the guest.** A guest script can
+  exfiltrate over `RTCPeerConnection` ICE/STUN/TURN, or over DNS, despite the inner CSP,
+  because CSP `connect-src` never governs ICE. Same root fact as
   sections 2 and 10, applied to the *guest*. Fixed: the guest bootstrap poisons
   `RTCPeerConnection`, `webkitRTCPeerConnection`, `mozRTCPeerConnection` and `RTCDataChannel`,
   which is browser-enforced and CSP-independent, before any untrusted source runs
@@ -1016,7 +1017,7 @@ self-hosted coturn; Double-Ratchet upgrade if the threat model escalates.
 - **Native WebCrypto Ed25519/X25519 is recent:** Firefox 129, Safari 17, Chrome 137 `[v]`,
   saturating around 2027 `[v]`. Crypto-dependent features hard-fail on older browsers instead
   of shipping a weaker JS-crypto polyfill. Single-user tools still work.
-- **Encrypted-at-rest IDB is not an XSS control.** A same-origin attacker can use the
+- **Encrypted-at-rest IDB does nothing against XSS (see section 9).** A same-origin attacker can use the
   non-extractable key in place. CSP plus Trusted Types plus DOMPurify are the primary XSS
   controls, and passphrase-lock mode (Phase 4) is the only mode that protects against a later
   compromise.

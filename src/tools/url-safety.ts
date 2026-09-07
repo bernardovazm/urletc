@@ -960,7 +960,7 @@ export function reportToText(r: Report, o?: FeedOutcome): string {
   }
   lines.push('', `Structural risk ${r.score}/100, ${r.verdict}`)
   for (const x of r.findings) lines.push('', `[${x.severity}] ${x.title}`, x.reason)
-  lines.push('', 'A listing is a reported fact. The structural score is a heuristic reading of the URL text, not of the site.')
+  lines.push('', 'A listing is a dated report from a feed. The score reads the URL text only.')
   return lines.join('\n')
 }
 

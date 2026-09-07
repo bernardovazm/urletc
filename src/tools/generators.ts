@@ -1,14 +1,12 @@
-// Dev generators: every value is generated the moment it is shown, one click on a value
-// copies it, 🔄 regenerates only that row. All local, nothing fetched. Region-aware,
-// defaulting to the browser locale, with every ISO 3166-1 country selectable: a handful
-// carry curated name, ID and phone pools, the rest reuse the international name pool with
-// their own dialling code. The region is picked from a <select> in BOTH surfaces, the tool
-// card and the Tools-launcher quick-copy flyout, and persisted under a SHARED store key
-// (`gen-region`) so the two always agree.
-// National IDs like CPF, CNPJ and SSN carry valid check digits and cards pass Luhn; every
-// value is random test data, not tied to a real person or registration. No national ID is
-// gated behind its country: the selected region's IDs are the prominent ones, every other
-// country's are appended under its flag.
+// Dev generators. Values are generated on render, a click copies one, 🔄 regenerates a
+// single row. National IDs carry valid check digits and card numbers pass Luhn.
+//
+// Only regions with curated name, phone and ID pools are selectable. Every ISO 3166-1
+// country used to be listed, so picking China returned an international-pool name. Adding
+// a region means adding its pools below rather than adding a code here.
+//
+// Both surfaces (the tool card and the Tools-launcher flyout) read and write one store key,
+// `gen-region`, so they cannot disagree.
 
 import { getItem, setItem } from '../core/store'
 import type { ToolContext, ToolModule } from '../shell/registry'
@@ -16,8 +14,10 @@ import { button, copyText, el } from '../shell/ui'
 
 /** An ISO 3166-1 alpha-2 code lowercased, `uk` for the United Kingdom, or `intl`. */
 export type Region = string
-/** Regions with curated pools. Every other country falls back to the international mix. */
+/** The regions with curated pools, which is exactly the set the picker offers. */
 type CuratedRegion = 'intl' | 'br' | 'us' | 'uk' | 'de' | 'fr' | 'jp' | 'mx'
+const CURATED: readonly CuratedRegion[] = ['intl', 'br', 'us', 'uk', 'de', 'fr', 'jp', 'mx']
+const isCurated = (r: string): r is CuratedRegion => (CURATED as readonly string[]).includes(r)
 
 const rnd = (n: number) => Math.floor(Math.random() * n)
 const digits = (n: number) => Array.from({ length: n }, () => rnd(10))
@@ -214,29 +214,12 @@ const ssn = () => `${100 + rnd(800)}-${p2()}-${(1 + rnd(9999)).toString().padSta
 const ein = () => `${10 + rnd(89)}-${1000000 + rnd(8999999)}`
 
 // --- countries ---
-// Every ISO 3166-1 alpha-2 code with its E.164 dialling code, packed as code + digits.
-// This doubles as the country list: display names come from Intl.DisplayNames at runtime
-// and flags are derived arithmetically, so no name or flag table is shipped.
-const DIAL_DATA =
-  'ad376 ae971 af93 ag1 ai1 al355 am374 ao244 aq672 ar54 as1 at43 au61 aw297 ax358 az994 ' +
-  'ba387 bb1 bd880 be32 bf226 bg359 bh973 bi257 bj229 bl590 bm1 bn673 bo591 bq599 br55 bs1 ' +
-  'bt975 bv47 bw267 by375 bz501 ca1 cc61 cd243 cf236 cg242 ch41 ci225 ck682 cl56 cm237 cn86 ' +
-  'co57 cr506 cu53 cv238 cw599 cx61 cy357 cz420 de49 dj253 dk45 dm1 do1 dz213 ec593 ee372 ' +
-  'eg20 eh212 er291 es34 et251 fi358 fj679 fk500 fm691 fo298 fr33 ga241 gb44 gd1 ge995 gf594 ' +
-  'gg44 gh233 gi350 gl299 gm220 gn224 gp590 gq240 gr30 gs500 gt502 gu1 gw245 gy592 hk852 ' +
-  'hm672 hn504 hr385 ht509 hu36 id62 ie353 il972 im44 in91 io246 iq964 ir98 is354 it39 je44 ' +
-  'jm1 jo962 jp81 ke254 kg996 kh855 ki686 km269 kn1 kp850 kr82 kw965 ky1 kz7 la856 lb961 lc1 ' +
-  'li423 lk94 lr231 ls266 lt370 lu352 lv371 ly218 ma212 mc377 md373 me382 mf590 mg261 mh692 ' +
-  'mk389 ml223 mm95 mn976 mo853 mp1 mq596 mr222 ms1 mt356 mu230 mv960 mw265 mx52 my60 mz258 ' +
-  'na264 nc687 ne227 nf672 ng234 ni505 nl31 no47 np977 nr674 nu683 nz64 om968 pa507 pe51 ' +
-  'pf689 pg675 ph63 pk92 pl48 pm508 pn64 pr1 ps970 pt351 pw680 py595 qa974 re262 ro40 rs381 ' +
-  'ru7 rw250 sa966 sb677 sc248 sd249 se46 sg65 sh290 si386 sj47 sk421 sl232 sm378 sn221 ' +
-  'so252 sr597 ss211 st239 sv503 sx1 sy963 sz268 tc1 td235 tf262 tg228 th66 tj992 tk690 ' +
-  'tl670 tm993 tn216 to676 tr90 tt1 tv688 tw886 tz255 ua380 ug256 um1 us1 uy598 uz998 va39 ' +
-  'vc1 ve58 vg1 vi1 vn84 vu678 wf681 ws685 ye967 yt262 za27 zm260 zw263'
-const DIAL: Record<string, string> = {}
-for (const entry of DIAL_DATA.split(' ')) DIAL[entry.slice(0, 2)] = entry.slice(2)
-// The curated UK pool is keyed 'uk' and that value is already persisted for users who
+// E.164 dialling codes for the curated regions only. This used to carry every ISO 3166-1
+// code and double as the country list, which is what let the picker offer 250 countries
+// that had no name or ID pools behind them. Display names come from Intl.DisplayNames and
+// flags are derived arithmetically, so no name or flag table is shipped.
+const DIAL: Record<string, string> = { br: '55', gb: '44', de: '49', fr: '33', jp: '81', mx: '52', us: '1' }
+// The curated UK pool is keyed 'uk' and that value is already persisted for anyone who
 // picked it, so 'gb' is folded into it rather than shipped as a second United Kingdom.
 DIAL.uk = DIAL.gb
 delete DIAL.gb
@@ -347,17 +330,20 @@ const NATIONAL_IDS: ReadonlyArray<readonly [Region, readonly Generator[]]> = [
   ],
 ]
 
-/** Region-aware generator list: people/contact formats and national IDs for the region,
- *  shared universals, then the other countries' IDs so none is gated behind its region. */
+/** The region's own national IDs first, then people and contact formats, then the shared
+ *  universals, then other regions' IDs under their flag. The national ID leads because it
+ *  is the value this tool gets opened for; burying CPF under five contact rows put the
+ *  most-wanted field furthest from the top. */
 export function generatorsFor(region: Region): Generator[] {
-  const list: Generator[] = [
+  const list: Generator[] = []
+  for (const [r, ids] of NATIONAL_IDS) if (r === region) list.push(...ids)
+  list.push(
     { label: 'Name', gen: () => fullName(region) },
     { label: 'Email', gen: () => email(region) },
     { label: 'Username', gen: () => username(region) },
     { label: 'Phone', gen: () => phone(region) },
     { label: postalLabel(region), gen: () => postal(region) },
-  ]
-  for (const [r, ids] of NATIONAL_IDS) if (r === region) list.push(...ids)
+  )
   list.push(
     { label: 'Password', gen: () => password(16) },
     { label: 'PIN', gen: pin },
@@ -399,7 +385,7 @@ function nameOf(region: Region): string {
 
 function buildRegions(): Array<[Region, string]> {
   const collator = new Intl.Collator(navigator.language)
-  const countries = Object.keys(DIAL)
+  const countries = CURATED.filter((c) => c !== 'intl')
     .map((code) => [code, nameOf(code)] as const)
     .sort((a, b) => collator.compare(a[1], b[1]))
     .map(([code, name]): [Region, string] => [code, `${flagOf(code)} ${name}`])
@@ -407,8 +393,7 @@ function buildRegions(): Array<[Region, string]> {
   return [['intl', '🌍 International'], ...countries.filter(([v]) => v === home), ...countries.filter(([v]) => v !== home)]
 }
 
-/** `[value, label]` for every selectable region, localised. International and the
- *  detected country are pinned first so neither is buried under ~250 alphabetical rows. */
+/** `[value, label]` for every selectable region, localised, detected region pinned first. */
 export const REGIONS: Array<[Region, string]> = buildRegions()
 
 const REGION_KEY = 'gen-region'
@@ -424,10 +409,10 @@ function regionFromLocale(): Region {
     for (const sub of subtags) {
       // A script subtag can sit before the country one (zh-Hans-CN), so scan. A
       // single-letter subtag opens a BCP-47 extension, where two letters mean an
-      // option key, not a country.
+      // option key rather than a country.
       if (sub.length === 1) break
       const country = sub === 'gb' ? 'uk' : sub
-      if (country.length === 2 && country in DIAL) return country
+      if (country.length === 2 && isCurated(country)) return country
     }
     if (lang && byLang[lang]) return byLang[lang]
   }
@@ -438,7 +423,7 @@ function regionFromLocale(): Region {
  *  Falls back to the browser locale when the user never chose one. */
 export async function loadRegion(): Promise<Region> {
   const r = await getItem<Region>(REGION_KEY)
-  return r && (r === 'intl' || r in DIAL) ? r : regionFromLocale()
+  return r && isCurated(r) ? r : regionFromLocale()
 }
 export function saveRegion(region: Region): void {
   void setItem(REGION_KEY, region)
@@ -467,34 +452,17 @@ export function generatorRow(g: Generator, write?: (t: string) => Promise<void>)
   }
 }
 
-interface RegionPicker {
-  el: HTMLSelectElement
-  /** Rebuild the options from a search string, keeping the picked region selected. */
-  filter: (query: string) => void
-}
-
-/** The region control both surfaces use: a `<select>` over every country that persists the
- *  pick to the shared store before calling `onPick`. The picked region stays listed even
- *  when a search hides it, so the control can never report a region the caller is not
- *  showing. Styling is by class, `full` where the control owns its whole line. */
-function regionPicker(region: Region, onPick: (r: Region) => void, cls?: string): RegionPicker {
-  let picked = region
+/** The region control both surfaces use. Persists the pick to the shared store before
+ *  calling `onPick`. Styling is by class, `full` where the control owns its whole line. */
+function regionPicker(region: Region, onPick: (r: Region) => void, cls?: string): HTMLSelectElement {
   const sel = el('select', { class: cls, 'aria-label': 'Region' }) as HTMLSelectElement
-  const labelOf = (r: Region) => REGIONS.find(([v]) => v === r)?.[1] ?? r
-  const filter = (query: string) => {
-    const q = query.trim().toLowerCase()
-    const hits = q ? REGIONS.filter(([v, label]) => v.includes(q) || label.toLowerCase().includes(q)) : REGIONS
-    const shown: Array<[Region, string]> = hits.some(([v]) => v === picked) ? hits : [[picked, labelOf(picked)], ...hits]
-    sel.replaceChildren(...shown.map(([v, label]) => el('option', { value: v, text: label })))
-    sel.value = picked
-  }
+  sel.replaceChildren(...REGIONS.map(([v, label]) => el('option', { value: v, text: label })))
+  sel.value = region
   sel.addEventListener('change', () => {
-    picked = sel.value
-    saveRegion(picked)
-    onPick(picked)
+    saveRegion(sel.value)
+    onPick(sel.value)
   })
-  filter('')
-  return { el: sel, filter }
+  return sel
 }
 
 /** Fill the Tools-launcher quick-copy flyout: a full-width region `<select>` above the
@@ -509,18 +477,17 @@ export async function mountQuickCopy(list: HTMLElement, onChange?: () => void): 
     region,
     (r) => {
       region = r
-      list.replaceChildren(picker.el, ...rows())
+      list.replaceChildren(picker, ...rows())
       onChange?.()
     },
     'full',
   )
-  list.replaceChildren(picker.el, ...rows())
+  list.replaceChildren(picker, ...rows())
 }
 
 const tool: ToolModule = {
   async activate(container: HTMLElement, ctx: ToolContext) {
     let region = await loadRegion()
-    const search = el('input', { type: 'search', 'aria-label': 'Search region', autocomplete: 'off' }) as HTMLInputElement
     const list = el('div', { class: 'stack' })
     const build = () => {
       const defs = generatorsFor(region)
@@ -538,26 +505,12 @@ const tool: ToolModule = {
         ...rows.map((r) => r.el),
       )
     }
-    // The card holds exactly one <select>, the region one; the search box beside it filters
-    // that select's options rather than adding a second control.
     const picker = regionPicker(region, (r) => {
       region = r
-      picker.filter(search.value)
       build()
     })
-    search.addEventListener('input', () => picker.filter(search.value))
 
-    container.append(
-      el('div', { class: 'row gap' }, [
-        el('label', { class: 'row' }, [el('span', { text: 'Region' }), picker.el]),
-        el('label', { class: 'row' }, [el('span', { class: 'muted', text: 'Search' }), search]),
-      ]),
-      list,
-      el('div', {
-        class: 'muted small',
-        text: 'Hover "Generators" in the Tools menu to copy these values and switch region without opening a card. Everything is generated locally; IDs are valid-format test data, not real registrations.',
-      }),
-    )
+    container.append(el('div', { class: 'row gap' }, [el('label', { class: 'row' }, [el('span', { text: 'Region' }), picker])]), list)
     build()
   },
 }

@@ -1,5 +1,5 @@
-// Built-in tool registration. Manifests are cheap and static; the heavy module
-// (and any WASM) is fetched only when `load()` runs (on activation), so boot stays light.
+// Built-in tool registration. Manifests are cheap and static, and the heavy module plus
+// any WASM is fetched only when `load()` runs on activation, so boot stays light.
 
 import { registry } from '../shell/registry'
 
@@ -21,7 +21,7 @@ export function registerBuiltins(): void {
   registry.register({
     id: 'generators',
     name: 'Generators',
-    description: 'Test data for any country: names, national IDs, cards, UUID',
+    description: 'Test data by region: names, national IDs, cards, UUID',
     category: 'util',
     version: '0.4.0',
     icon: '🎲',
@@ -218,7 +218,7 @@ export function registerBuiltins(): void {
     version: '0.1.0',
     icon: '\u{1F4E7}',
     source: 'builtin',
-    // 'storage' holds the address, password and token so a reload keeps the SAME inbox.
+    // 'storage' holds the address, password and token so a reload keeps the same inbox.
     // Without it createContext hands out deniedStorage and every get and set throws.
     permissions: ['storage', 'clipboard-write', { net: ['https://api.mail.gw'] }],
     load: () => import('./tempmail'),

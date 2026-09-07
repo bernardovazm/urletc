@@ -8,29 +8,36 @@ Live: [urletc.vercel.app](https://urletc.vercel.app)
 
 ## Features
 
-- **Utilities.** Clipboard router, image to text, speech to text, text to speech, HTML to
-  text, URL inspector, URL safety scoring, subtitle conversion and retiming, disposable
-  inbox, link shortener, text tools, JSON, Base64, hashing, diff, timestamps, test data
-  generators for any country, session uptime, microphone and camera check. Each module is
-  lazily loaded and has its own deep link. Everything runs on the device except the
-  disposable inbox and the link shortener, which are named as such in the tool list.
-- **Discovery.** Same-network peers, a six character code for anyone anywhere, or a
-  permanent pairing between your own devices. Opt-in presence list.
-- **Transport.** Text and files are end to end encrypted with a per-session HKDF ratchet
-  for forward secrecy. Audio, video and screen use the browser's own DTLS-SRTP transport.
-- **Stage.** Multi source grid, spotlight and solo layouts, per source fullscreen and
+- Each tool is lazily loaded and has its own deep link: clipboard router, image to text,
+  speech to text, text to speech, HTML to text, URL check (blocklist feeds plus a
+  structural read), subtitle conversion and retiming, disposable inbox, link shortener,
+  text tools, JSON, Base64, hashing, diff, timestamps, regional test data generators,
+  session uptime, microphone and camera check, and a two-player game over the peer
+  channel. Everything runs on the device except the disposable inbox and the link
+  shortener, which are labelled as such in the tool list; model weights and blocklist
+  feeds download from their sources and never carry anything you typed.
+- Discovery works over same-network peers, a six character code for anyone anywhere, or a
+  permanent pairing between your own devices. The presence list is opt-in.
+- Text and files are end to end encrypted with a per-session HKDF ratchet for forward
+  secrecy. Audio, video and screen use the browser's own DTLS-SRTP transport.
+- The stage has multi source grid, spotlight and solo layouts, per source fullscreen and
   recording, plus a link usable as an OBS browser source.
-- **History.** A peer joining later can be sent what was already in the feed, so a room is
-  not empty for whoever arrives second. Paired devices sync by default; a code room shares
-  only when you turn it on, because a code travels to whoever it is forwarded to.
-- **Workshop.** Ed25519-signed tools shared between peers, verified before display and run
-  in a null-origin sandbox behind two separate approvals.
+- A peer joining later can be sent what was already in the feed. Paired devices sync by
+  default; a code room shares only when you turn it on, because a code travels to whoever
+  it is forwarded to.
+- Workshop tools are Ed25519-signed, shared between peers, verified before display, and
+  run in a null-origin sandbox behind two separate approvals.
+- Installable, with the service worker in `src/sw.ts` precaching the app shell and
+  re-applying the isolation headers on cached navigations, so the local tools keep working
+  with no network.
+- Local data is encrypted in IndexedDB under a non-extractable device key, or under a
+  passphrase you set in Settings, which also holds the proactivity switches.
 
 ## Develop
 
 ```bash
 npm ci             # reproducible install from the lockfile
-npm run dev        # dev server, isolation headers and a dev CSP
+npm run dev        # dev server, isolation headers only (HMR needs inline scripts)
 npm run build      # production build into dist/
 npm run preview    # serve dist/ under the full production CSP
 ```
@@ -63,3 +70,7 @@ policy locally.
 ## License
 
 [MIT](./LICENSE)
+
+Third-party code is vendored under `public/tesseract/` so the OCR worker and its WASM core
+load from this origin rather than a CDN. Both are Apache-2.0 and ship with their license
+text; see [`public/tesseract/README.md`](./public/tesseract/README.md) for versions.

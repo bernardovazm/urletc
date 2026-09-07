@@ -16,7 +16,12 @@ npm run typecheck && npm run lint && npm run format:check && npm run build && np
 `npm run e2e` creates a Python virtualenv at `.venv-e2e/` on first run and installs
 Playwright with Chromium. It builds, boots `vite preview` on port 5199 under the production
 CSP, runs the console suite against it, then tears down. `E2E_NO_SERVER=1` with `E2E_BASE`
-targets an already-running instance.
+targets an already-running instance, and `E2E_SKIP_BUILD=1` reuses the existing `dist/`.
+
+Two `vite preview` behaviours to account for. It reads `vite.config.ts` once at startup, so
+a change to the CSP there needs a restart; a rebuild alone will not pick it up. A preview
+left running from an earlier session keeps serving a stale `dist/` on the same port. Either
+one produces a run against code that is no longer in the tree.
 
 Headless Chromium cannot cover heavy WebAssembly or WebRTC, so these stay manual: model
 loading, clipboard auto read, live caption accuracy, real cameras and microphones, and two

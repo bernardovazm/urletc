@@ -4,6 +4,8 @@
 
 Node 20.19 or newer, plus Python 3.10 or newer for the end to end tests only. Install from
 the committed lockfile with `npm ci`; use `npm install` only when changing dependencies.
+CI installs with `--ignore-scripts`, since the only install scripts in the tree fetch or
+build native binaries that a browser bundle never loads.
 
 ## Before opening a pull request
 

@@ -1,3 +1,4 @@
+import { OCR_MODE_EVENT, getOcrMode, setOcrMode, type OcrMode } from '../core/prefs'
 import { disablePassphrase, enablePassphrase, getItem, getStoreMode, lock, setItem } from '../core/store'
 import type { ToolModule } from '../shell/registry'
 import { currentTheme, toggleTheme } from '../shell/theme'
@@ -5,20 +6,25 @@ import { button, el, toast } from '../shell/ui'
 import { getCloseGuard, setCloseGuard } from './close-guard'
 
 // Manages the at-rest encryption mode (ARCHITECTURE section 9) plus the console's
-// proactivity switches (auto-OCR on images, live mic captions). Built-in/trusted,
-// so it talks to the store directly rather than through the capability facade.
+// proactivity switches (auto-OCR on images, live mic captions). Built-in and trusted, so
+// it talks to the store directly rather than through the capability facade.
 //
-// It is also the only entry point to the theme: the topbar button was removed because the
-// topbar is the surface that runs out of room on a phone, and appearance is the least
-// frequently touched control on it. The select below drives the same toggleTheme() the
-// button did, so nothing can hold a second opinion about which theme is current.
+// It is also the only entry point to the theme. The topbar button was removed because the
+// topbar runs out of room on a phone and appearance is its least frequently touched
+// control. The select below drives the same toggleTheme() the button did, so there is one
+// owner of the current theme.
+
+// Per-card cleanup keyed by container. launchTool shares one cached module across every
+// open copy of the card, so a module-level handle would let one card's deactivate remove
+// another card's window listener.
+const cleanups = new WeakMap<HTMLElement, () => void>()
 
 const tool: ToolModule = {
   async activate(container: HTMLElement) {
     const render = async () => {
       container.replaceChildren()
 
-      // First, because it is the one control here people arrive looking for.
+      // First, as the most reached-for control on this card.
       const themeSel = el('select', { class: 'theme-select', title: 'Light or dark appearance for the whole app' }) as HTMLSelectElement
       themeSel.append(el('option', { value: 'dark', text: 'dark' }), el('option', { value: 'light', text: 'light' }))
       themeSel.value = currentTheme()
@@ -89,12 +95,10 @@ const tool: ToolModule = {
         )
       }
 
-      // Console proactivity: how hard the surface works unprompted. Auto-OCR
-      // default is "copy": an image that lands is usually wanted as text.
-      // 'show' IS the off switch for the automatic copy, so there is no second control
-      // for it. It was worded as "leave the clipboard alone" under a label that said
-      // neither "OCR" nor "copy", which is why people looked for a switch that was
-      // already here; the wording now names the thing being turned off.
+      // Console proactivity: how much the surface does unprompted. Auto-OCR defaults to
+      // "copy", since an image that lands is usually wanted as text. 'show' is the off
+      // switch for the automatic copy, so there is no second control for it, and each
+      // option names the thing it turns off.
       const ocrSel = el('select', {
         class: 'ocr-select',
         title: 'Whether text in an image you paste or attach is read by OCR, and whether that text is copied to your clipboard automatically',
@@ -104,31 +108,31 @@ const tool: ToolModule = {
         el('option', { value: 'show', text: 'read it, but never copy to my clipboard' }),
         el('option', { value: 'off', text: 'do not read it; give me a Run OCR button' }),
       )
-      const ocrCur = await getItem<string>('image-ocr')
-      ocrSel.value = ocrCur === 'off' || ocrCur === 'show' ? ocrCur : 'copy'
-      ocrSel.addEventListener('change', () => void setItem('image-ocr', ocrSel.value))
+      ocrSel.value = await getOcrMode()
+      ocrSel.addEventListener('change', () => void setOcrMode(ocrSel.value as OcrMode))
       const ccChk = el('input', { type: 'checkbox' }) as HTMLInputElement
       ccChk.checked = (await getItem<boolean>('live-captions')) ?? false
       ccChk.addEventListener('change', () => void setItem('live-captions', ccChk.checked))
-      // Nearby is the one tier that announces you to strangers (same public IP),
-      // so it gets an off switch. Applies live; the console listens for the event.
+      // Nearby is the one tier that announces you to strangers on the same public IP, so
+      // it gets an off switch. Applies live, since the console listens for the event.
       const nbChk = el('input', { type: 'checkbox' }) as HTMLInputElement
       nbChk.checked = (await getItem<boolean>('nearby-on')) ?? true
       nbChk.addEventListener('change', () => {
         void setItem('nearby-on', nbChk.checked)
         window.dispatchEvent(new CustomEvent('wt:nearby', { detail: nbChk.checked }))
       })
-      // Presence: OFF by default. Unlike nearby (same network) this announces you to
-      // everyone running the app, so it is opt-in. It carries no messages/files/media.
+      // Presence is off by default. Unlike nearby, which is one network, this announces
+      // you to everyone running the app, so it is opt-in. It carries no messages, files
+      // or media.
       const prChk = el('input', { type: 'checkbox' }) as HTMLInputElement
       prChk.checked = (await getItem<boolean>('presence-on')) ?? false
       prChk.addEventListener('change', () => {
         void setItem('presence-on', prChk.checked)
         window.dispatchEvent(new CustomEvent('wt:presence', { detail: prChk.checked }))
       })
-      // Ask when closing tab. A preference, not a utility: it belongs to the window and
-      // has to survive a reload, so it lives here and is re-armed at boot rather than in
-      // a tool card that would take the guard down with it when closed.
+      // Ask when closing tab. The guard belongs to the window and has to survive a
+      // reload, so it lives here and is re-armed at boot rather than in a tool card that
+      // would take it down when closed.
       const acChk = el('input', { type: 'checkbox' }) as HTMLInputElement
       acChk.checked = await getCloseGuard()
       acChk.addEventListener('change', () => void setCloseGuard(acChk.checked))
@@ -157,6 +161,20 @@ const tool: ToolModule = {
       )
     }
     await render()
+    // The Clipboard card carries the auto-OCR preference as a checkbox, so this select
+    // goes stale whenever that one is used while both are open. The select is looked up
+    // rather than captured because render() replaces it.
+    const onOcrMode = (e: Event) => {
+      const sel = container.querySelector<HTMLSelectElement>('select.ocr-select')
+      if (sel) sel.value = (e as CustomEvent<OcrMode>).detail
+    }
+    window.addEventListener(OCR_MODE_EVENT, onOcrMode)
+    cleanups.set(container, () => window.removeEventListener(OCR_MODE_EVENT, onOcrMode))
+  },
+
+  deactivate(container: HTMLElement) {
+    cleanups.get(container)?.()
+    cleanups.delete(container)
   },
 }
 

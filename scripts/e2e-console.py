@@ -1,7 +1,7 @@
 """E2E: urletc console. Mount, launcher (hover/grid/reorder), generators,
-TTS, collapsible cards + sidebar groups, feed deletion (mouse AND real taps in a touch
+TTS, collapsible cards + sidebar groups, feed deletion (mouse plus real taps in a touch
 context), the visual-viewport keyboard inset, code chip, theme, connect modal,
-every text tool DRIVEN with real input, and the service worker precache install."""
+every text tool driven with real input, and the service worker precache install."""
 import base64
 import io
 import os
@@ -21,19 +21,17 @@ def check(name, cond, extra=''):
     print(('PASS' if cond else 'FAIL'), name, extra if not cond else '')
 
 
-# The code room must be unique per run. With working relays a fixed literal means a
-# concurrent instance of this same suite (or the developer's own browser) joins the same
-# room, and the "0 peers" assertions then see real peers and fail intermittently. This is
-# the non-hermetic condition section 2b warns about, closed at the source.
+# Unique code room per run. A fixed literal lets a concurrent run of this suite, or a
+# stray tab on the same network, join the same room; the "0 peers" assertions then see
+# real peers and fail intermittently. Section 2b closes the other half of that hole.
 OWN_CODE = 'e2e' + os.urandom(3).hex()
 
 
 def tool_ids():
-    """Every registered tool id, read from source.
+    """Every registered tool id, parsed from src/tools/index.ts.
 
-    Deliberately parsed from src/tools/index.ts rather than hardcoded, so adding a tool
-    automatically puts it under test. A hardcoded list is how a tool silently stops being
-    covered.
+    Parsed rather than hardcoded so a newly registered tool is covered automatically. A
+    hardcoded list drifts and quietly drops tools out of the suite.
     """
     src = io.open(os.path.join(os.path.dirname(__file__), '..', 'src', 'tools', 'index.ts'), encoding='utf-8').read()
     ids = re.findall(r"^\s*id: '([a-z0-9-]+)',", src, re.M)
@@ -44,8 +42,8 @@ def tool_ids():
 def tool_id_for(module):
     """The registered id of the tool whose `load:` imports `module`.
 
-    Resolved from source rather than hardcoded because ids get renamed. A stale literal
-    would leave the tool untested while the suite still reported green.
+    Resolved from source because ids get renamed: a stale literal would leave the tool
+    untested while the run still passed.
     """
     src = io.open(os.path.join(os.path.dirname(__file__), '..', 'src', 'tools', 'index.ts'), encoding='utf-8').read()
     for block in re.findall(r'registry\.register\(\{(.*?)\n  \}\)', src, re.S):
@@ -57,16 +55,16 @@ def tool_id_for(module):
 
 
 # Third-party relays flap, so a handful of lines is tolerated. Above this the relay list
-# itself is at fault (the old damus/nos.lol/nostr.band set produced about 80 in 60s, one
-# per refused announce, while discovery did not work at all).
+# itself is at fault: a set that refuses announces logged around 80 lines in 60s, one per
+# refused announce, with discovery dead the whole time.
 RELAY_NOISE_BUDGET = 12
 
 
 def relay_hosts():
-    """Relay hosts the app dials, read from src/p2p/session.ts.
+    """Relay hosts the app dials, parsed from src/p2p/session.ts.
 
-    Parsed from source for the same reason tool_ids() is: a hardcoded copy is how the
-    check stops covering the list it is supposed to guard.
+    Parsed from source for the same reason as tool_ids(): a hardcoded copy drifts away
+    from the list it is meant to guard.
     """
     src = io.open(os.path.join(os.path.dirname(__file__), '..', 'src', 'p2p', 'session.ts'), encoding='utf-8').read()
     decl = re.search(r'const NOSTR_RELAYS = \[(.*?)\]', src, re.S)
@@ -76,10 +74,10 @@ def relay_hosts():
     return hosts
 
 
-# A real rendered-text PNG pasted as a file, not a bare signature: a fake image fails
-# libpng before OCR ever runs, which is how the OCR outage stayed invisible here. Shared
-# by the proactive-OCR block and the "never copy to my clipboard" block so both drive the
-# identical, known-readable image.
+# A real rendered-text PNG pasted as a file. A stub with only a valid PNG signature
+# fails in libpng before OCR runs, so it cannot tell a working pipeline from a dead one.
+# Shared by the proactive-OCR block and the clipboard block so both drive the same
+# known-readable image.
 PASTE_IMAGE_JS = '''async () => {
   const c = document.createElement('canvas'); c.width = 520; c.height = 140
   const g = c.getContext('2d')
@@ -96,9 +94,9 @@ PASTE_IMAGE_JS = '''async () => {
 def ocr_settle(page, pre, tries=45):
     """The recognised text once it stops being a progress line.
 
-    The same <pre> shows progress ("Reading...", "Recognizing... 62%") before the result,
-    so waiting for "non-empty" would capture a progress string. Fetching language data
-    makes this slower against a live deployment than a local preview, hence the budget.
+    The same <pre> carries progress ("Reading...", "Recognizing... 62%") before the
+    result, so waiting for non-empty text captures a progress string. Fetching language
+    data is slower against a live deployment than a local preview, hence the budget.
     """
     t = ''
     for _ in range(tries):
@@ -136,7 +134,7 @@ with sync_playwright() as p:
     page.wait_for_timeout(1500)
 
     # --- 1. mount / shell ---
-    # inner_text() returns RENDERED text, so it reflects text-transform; assert the DOM
+    # inner_text() returns rendered text, so it reflects text-transform. Assert the DOM
     # text and the presentation separately rather than coupling them.
     check('brand mounted', page.locator('.topbar .brand').text_content() == 'urletc')
     check('brand uses the tracked uppercase treatment',
@@ -144,9 +142,9 @@ with sync_playwright() as p:
                                 "e => getComputedStyle(e).textTransform") == 'uppercase')
     check('composer visible', page.locator('.composer textarea').is_visible())
     # The CSP sets require-trusted-types-for 'script', which makes the Worker constructor
-    # a TrustedScriptURL sink. With no default policy installed EVERY worker throws, so
-    # OCR, speech to text, live captions and the regex engine are all dead in production
-    # while the rest of the UI looks perfectly healthy. Assert the mechanism directly.
+    # a TrustedScriptURL sink. With no default policy installed every worker throws, and
+    # OCR, speech to text, live captions and the regex engine all die while the rest of
+    # the UI keeps rendering. Assert the mechanism, not the rendering.
     check('Trusted Types default policy installed',
           page.evaluate('!!(window.trustedTypes && window.trustedTypes.defaultPolicy)'))
     check('same-origin module Worker can be constructed',
@@ -162,9 +160,9 @@ with sync_playwright() as p:
     titles = page.eval_on_selector_all('.composer .bar button', 'els => els.map(e => e.title)')
     check('composer buttons have tooltips', all(t for t in titles), str(titles))
 
-    # --- 2b. hermetic runs: any OTHER urletc behind this public IP (a stray
-    # tab, another checkout) connects via Nearby and turns the "0 peers" queue
-    # tests into real sends. Switch Nearby off exactly as a user would. ---
+    # --- 2b. hermetic runs: another urletc behind this public IP (a stray tab, another
+    # checkout) connects over Nearby and turns the "0 peers" queue tests into real sends.
+    # Switch Nearby off through its own control. ---
     page.evaluate("location.hash = '#/t/settings'")
     page.wait_for_timeout(800)
     stn = page.locator('details.card').last
@@ -192,11 +190,9 @@ with sync_playwright() as p:
         check('code chip shows auto-generated code', False, str(e)[:200])
 
     # --- 4. theme, driven from Settings ---
-    # The topbar button is gone: the topbar is the surface that runs out of room first on a
-    # phone and appearance was the least-used control on it. Settings is now the only entry
-    # point, so the assertion drives that control and proves the theme really flips (the
-    # painted background changes, not just an attribute) and really persists across a
-    # reload. A rendered <select> would prove none of that.
+    # Settings is the only theme entry point now, so drive that control. Assert on the
+    # painted background rather than the data-theme attribute, and assert the choice
+    # survives a reload; a rendered <select> proves neither.
     check('topbar no longer carries a theme button',
           page.locator('.topbar button[title*="black and white"]').count() == 0)
     body_dark = page.eval_on_selector('body', 'e => getComputedStyle(e).backgroundColor')
@@ -321,37 +317,36 @@ with sync_playwright() as p:
     check('card collapses on summary click', not card.evaluate('e => e.open'))
     card.locator('summary').click()
     check('card re-expands', card.evaluate('e => e.open'))
-    # The per-tool copy-link button is gone: on a phone it sat on top of the card's own
-    # delete control, and shared history already carries a tool to the other device.
-    # Deep links themselves are unaffected and are asserted further down.
+    # The per-tool copy-link button was removed: on a phone it sat on top of the card's
+    # own delete control, and shared history already carries a tool to the other device.
+    # Deep links are unaffected and are asserted further down.
     link_btns = page.locator('button[aria-label="Copy a direct link to this tool"]').count()
     check('no per-tool copy-link button on a tool card', link_btns == 0, f'{link_btns} still rendered')
 
     # --- 9. feed item deletion: arms on the first click, deletes on the second ---
-    # This control sits under a thumb on a phone and one stray tap used to take the card
-    # with it. So the assertion that matters is the NEGATIVE one: a single click must
-    # leave the item alone. Asserting only that two clicks delete would still pass if the
-    # first click deleted and the second hit nothing.
+    # The negative assertion is the load-bearing one: a single click must leave the item
+    # alone. Asserting only that two clicks delete would also pass if the first click
+    # deleted and the second hit nothing.
     items_before = page.locator('.feed-item').count()
     wrap = page.locator('.feed-item').last
     wrap.hover()
     dele = wrap.locator('button.del')
     dele.click()
-    check('one click on delete does NOT remove the item',
+    check('delete: one click does not remove the item',
           page.locator('.feed-item').count() == items_before,
           f'{page.locator(".feed-item").count()} items, was {items_before}')
-    check('the first click arms the delete control',
+    check('delete: the first click arms the control',
           'armed' in (dele.get_attribute('class') or ''), dele.get_attribute('class') or '')
-    check('the armed state is announced, not carried by colour alone',
+    check('delete: the armed state carries aria-label and aria-pressed, not colour alone',
           'confirm' in (dele.get_attribute('aria-label') or '').lower()
           and dele.get_attribute('aria-pressed') == 'true',
           f'{dele.get_attribute("aria-label")!r} pressed={dele.get_attribute("aria-pressed")!r}')
     dele.click()
-    check('the second click removes the item', page.locator('.feed-item').count() == items_before - 1,
+    check('delete: the second click removes the item', page.locator('.feed-item').count() == items_before - 1,
           f'{page.locator(".feed-item").count()} items, was {items_before}')
 
-    # An armed card must not stay armed. Leaving the button disarms it, so a tap that
-    # lands on it minutes later arms again instead of deleting.
+    # An armed control must not stay armed. Leaving the button disarms it, so a stray
+    # click on it minutes later re-arms instead of deleting.
     items_before = page.locator('.feed-item').count()
     wrap = page.locator('.feed-item').last
     wrap.hover()
@@ -359,13 +354,13 @@ with sync_playwright() as p:
     dele.click()
     page.mouse.move(4, 4)  # pointerleave
     page.wait_for_timeout(200)
-    check('moving the pointer away disarms the delete control',
+    check('delete: moving the pointer away disarms the control',
           'armed' not in (dele.get_attribute('class') or '')
           and dele.get_attribute('aria-pressed') == 'false',
           f'{dele.get_attribute("class")!r} pressed={dele.get_attribute("aria-pressed")!r}')
     wrap.hover()
     dele.click()
-    check('a click after disarming only re-arms, it does not delete',
+    check('delete: a click after disarming re-arms without deleting',
           page.locator('.feed-item').count() == items_before,
           f'{page.locator(".feed-item").count()} items, was {items_before}')
     page.mouse.move(4, 4)
@@ -442,16 +437,15 @@ with sync_playwright() as p:
     check('pong shows the opponent lobby', lob.count() == 1 and 'opponent' in lob.inner_text().lower(), (lob.inner_text()[:60] if lob.count() else 'no lobby'))
 
     # --- 11f. html-strip: real HTML in, plain text out ---
-    # Mounting a tool is not exercising it. html-strip mounted cleanly and passed every
-    # run while being completely broken in production: DOMParser.parseFromString is a
-    # TrustedHTML sink, so stripHtml() threw under require-trusted-types-for and the
-    # button did nothing. Nothing here had ever clicked it. This is that click.
+    # DOMParser.parseFromString is a TrustedHTML sink, so stripHtml() throws under
+    # require-trusted-types-for while the card still mounts and looks fine. Mounting is
+    # not exercising: this block clicks the button and reads the output.
     tools_btn.hover()
     page.wait_for_selector('.menu.tool-grid', timeout=3000)
     page.locator('.menu.tool-grid button', has_text=re.compile('HTML')).first.click()
     hs = page.locator('details.card').last
     hs_before = len(logs)
-    # The script and style payloads are here on purpose: textContent includes the SOURCE of
+    # The script and style payloads are deliberate: textContent includes the source of
     # those elements, so a naive implementation strips this to "...hereSNEAKYCSSLEAK".
     hs.locator('textarea').fill(
         '<div><h1>Title</h1><p>Body <b>text</b> here.</p>'
@@ -466,9 +460,9 @@ with sync_playwright() as p:
           'SNEAKY' not in hs_out and 'CSSLEAK' not in hs_out, hs_out[:120])
     check('html-strip: output is not the untouched placeholder',
           hs_out not in ('plain text output', '(empty)'), hs_out[:60])
-    # The sink error reads "This document requires 'TrustedHTML' assignment", which matches
-    # neither 'trustedscript' nor 'trusted type', so the run-wide filters below were blind
-    # to it. Assert the exact string class at the call site as well.
+    # The sink error reads "This document requires 'TrustedHTML' assignment", which
+    # matches neither 'trustedscript' nor 'trusted type', so the run-wide filters below
+    # miss it. Match that string class at the call site too.
     hs_tt = [l for l in logs[hs_before:] if 'trustedhtml' in l.lower()]
     check('html-strip: no TrustedHTML sink violation on strip', not hs_tt, ' | '.join(hs_tt[:2])[:200])
 
@@ -510,9 +504,9 @@ with sync_playwright() as p:
     check('modal: Random code regenerates', bool(big_after) and big_after != big_before, f'{big_before!r}->{big_after!r}')
     check('code chip follows new code', page.locator('button.code-chip').inner_text().strip().lower() == big_after.lower())
 
-    # user-defined code: mixed case + punctuation normalizes to [a-z0-9].
-    # Derived from OWN_CODE so the room stays unique per run while still exercising
-    # normalization (upper case, a dash and a trailing bang all have to be stripped).
+    # user-defined code: mixed case + punctuation normalizes to [a-z0-9]. Derived from
+    # OWN_CODE so the room stays unique per run while still exercising normalization
+    # (upper case, a dash and a trailing bang all have to be stripped).
     page.locator('.modal input.mono-input').fill(f'{OWN_CODE[:3].upper()}-{OWN_CODE[3:].upper()}!')
     page.locator('.modal button', has_text=re.compile(r'^Join$')).click()
     page.wait_for_timeout(1200)
@@ -525,8 +519,8 @@ with sync_playwright() as p:
 
     # --- 13b. the chosen code survives a full reload ---
     # Boot opens the Clipboard tool card when the permission is granted and the clipboard
-    # holds something, and this context has copied to it several times by now. Blank it so a
-    # reload here is testing what this block is about.
+    # holds something, and this context has copied to it several times by now. Blank it so
+    # the reload below only exercises code persistence.
     page.evaluate("() => navigator.clipboard.writeText(' ')")
     page.reload()
     page.wait_for_selector('.composer', timeout=20000)
@@ -577,12 +571,10 @@ with sync_playwright() as p:
     page.locator('.composer textarea').press('Enter')
     page.wait_for_timeout(300)
     check('own bubble rendered whether or not anyone is connected', page.locator('.msg.me').count() == me_before + 1)
-    # The nearby tier is "same public IP", so a second run of this suite on this machine
-    # (or the developer's own tab) is a REAL reachable device and the composer is then
-    # right to send instead of queueing. Asserting "queued" unconditionally made a
-    # correct send look like a regression, so read the app's own count and assert the
-    # behaviour that belongs to the state it is actually in. Neither branch is a skip:
-    # connected must send, unconnected must queue, and both are checked here.
+    # The nearby tier is "same public IP", so a second run on this machine is a reachable
+    # device and sending, not queueing, is then correct. Read the app's own connection
+    # state and assert the behaviour that belongs to it. Neither branch is a skip:
+    # connected must send, unconnected must queue.
     connected_now = 'connected' in (page.locator('.topbar .badge').first.inner_text() or '')
     if connected_now:
         check('with a device connected the message is sent rather than queued',
@@ -606,21 +598,26 @@ with sync_playwright() as p:
     check('sidebar collapses again', not page.locator('.sidebar').is_visible())
 
     # --- 13g. image paste makes a preview card with an always-available send button ---
-    page.locator('.composer textarea').click()  # composer focus must NOT block image paste
+    page.locator('.composer textarea').click()  # composer focus must not block image paste
     cards_before = page.locator('.feed-item').count()
     page.evaluate(PASTE_IMAGE_JS)
     page.wait_for_timeout(500)
     check('image paste creates a card', page.locator('.feed-item').count() == cards_before + 1)
-    last_card = page.locator('.feed-item').last
+    # Located by content rather than by feed position. Playwright locators re-resolve on
+    # every use and this feed is live, so a peer connecting mid-block appends a sys line
+    # and a bare `.last` then points at that line instead, leaving the OCR assertion below
+    # waiting 30s for a <pre> inside a system message. Filtering to cards that hold an
+    # image preview keeps the block on its own card however many peers arrive.
+    last_card = page.locator('.feed-item').filter(has=page.locator('img.preview')).last
     check('image card has preview', last_card.locator('img.preview').count() == 1)
     sendbtn = last_card.locator('button', has_text='Send to devices')
     check('send button is offered whether or not anyone is connected', sendbtn.count() == 1)
     sendbtn.click()
     page.wait_for_timeout(600)
-    # Same non-hermetic nearby tier as above: what must never happen is silence. The
-    # button either reports where the file went or reports that there was nowhere to send
-    # it, and an unhandled rejection (which is what a peer dropping mid-file used to
-    # produce) shows up here as neither.
+    # Same non-hermetic nearby tier as above, so the assertion is that the button never
+    # goes silent: it either reports where the file went or reports that there was nowhere
+    # to send it. An unhandled rejection, which a peer dropping mid-file produces, shows
+    # up here as neither.
     toasts = page.locator('.toast').all_inner_texts()
     check('sending a file always answers, with a destination or with "no one connected"',
           any('No one connected' in t or 'Sending to' in t or 'Could not send' in t for t in toasts),
@@ -629,16 +626,16 @@ with sync_playwright() as p:
     pre = last_card.locator('pre')
     check('proactive OCR replaces manual button', last_card.locator('button', has_text='Run OCR').count() == 0)
     check('proactive OCR output area revealed', pre.count() == 1 and 'hidden' not in (pre.get_attribute('class') or ''))
-    # The pasted image contains real rendered text, so this asserts the WHOLE OCR pipeline:
-    # worker construction under Trusted Types, WASM core load, and recognition output.
-    # Anything less than reading the text back is how a dead OCR passed as green before.
+    # The pasted image carries real rendered text, so reading it back exercises the whole
+    # pipeline: worker construction under Trusted Types, WASM core load, and recognition.
+    # A card that merely rendered would pass with OCR completely dead.
     ocr_text = ocr_settle(page, pre)
     check('OCR worker starts under Trusted Types',
           'TrustedScriptURL' not in ocr_text and 'Failed to construct' not in ocr_text, ocr_text[:160])
     check('OCR actually reads the pasted image', 'urletc' in ocr_text.lower(), ocr_text[:160])
-    # The mode is still the default 'copy' here, and "copy" has to mean the system
-    # clipboard, not a button on the card. The clipboard held 'HELLO WORLD' from the
-    # transform tool until this point, so finding the OCR text is a real transition.
+    # The mode is still the default 'copy', which has to mean the system clipboard rather
+    # than a button on the card. The clipboard held 'HELLO WORLD' from the transform tool
+    # until now, so finding the OCR text here is a real transition.
     check('OCR auto-copy actually writes the recognised text to the clipboard',
           'urletc' in page.evaluate('navigator.clipboard.readText()').lower(),
           repr(page.evaluate('navigator.clipboard.readText()')[:80]))
@@ -676,9 +673,9 @@ with sync_playwright() as p:
     pg3.close()
 
     # --- 13j. composer: typing a join code connects ---
-    # The placeholder deliberately does NOT explain join codes. A placeholder names the
-    # field; the 🔗 share button in the topbar is the discovery path. Assert the behaviour
-    # and that the placeholder stayed short, rather than pinning the old teaching copy.
+    # The placeholder names the field and does not explain join codes; the 🔗 share
+    # button in the topbar is the discovery path. Assert the behaviour and that the
+    # placeholder stayed short, rather than pinning any particular wording.
     ph = page.locator('.composer textarea').get_attribute('placeholder') or ''
     check('placeholder names the field without a lecture', 0 < len(ph) <= 48 and 'join code' not in ph, ph)
     page.locator('.composer textarea').fill('q7x2k9')
@@ -701,8 +698,8 @@ with sync_playwright() as p:
         check('mic share offers live captions', False, 'no offer card appeared')
     check('captions stay off until opted in', not page.locator('.captions').is_visible())
     # The captions strip is collapsible (minimize keeps transcribing) as well as
-    # dismissable. The control is wired even while the strip is hidden (opt-in gates the
-    # Whisper worker, which headless can't run).
+    # dismissable. Both controls are wired while the strip is hidden, since opt-in gates
+    # the Whisper worker, which headless cannot run.
     check('captions have a minimize (collapse) control', page.locator('.captions button[title*="Minimize"]').count() == 1)
     check('captions have a separate off control', page.locator('.captions button[title*="Turn captions off"]').count() == 1)
     page.locator('.composer .bar button[title*="Stop sharing"]').click()
@@ -792,8 +789,8 @@ with sync_playwright() as p:
     check('settings: OCR default is auto-copy',
           st.locator('select.ocr-select').input_value() == 'copy', st.locator('select.ocr-select').input_value())
     check('settings: captions toggle present', st.locator('input[type=checkbox]').count() >= 1)
-    # The presence ("online list") tier announces you to every other user, so unlike
-    # nearby it must be opt-in and start OFF, and it must never carry traffic.
+    # The presence ("online list") tier announces you to everyone else, so unlike nearby
+    # it must be opt-in, start off, and NEVER carry traffic.
     pr = st.locator('label', has_text='Online list').locator('input[type=checkbox]')
     check('settings: online-list toggle present', pr.count() == 1)
     check('settings: online list is opt-in (off by default)', not pr.is_checked())
@@ -857,13 +854,12 @@ with sync_playwright() as p:
         check('stage route hides the composer', not stage_pg.locator('.composer-wrap').is_visible())
         stage_pg.close()
 
-    # --- 13p. disposable inbox: an address is really ISSUED, not just mounted ---
-    # Mounting this tool proves only that its module imported. The product IS a live third
-    # party handing back a working address, so drive it: wait for a real address on a real
-    # domain, copy it, and prove it survives into a fresh page, where the only place it can
-    # come from is ctx.storage (per-card state is a WeakMap, so a new page has none).
-    # A machine without egress cannot reach the provider at all, so that branch asserts the
-    # tool says so in its status line rather than hanging, throwing, or sitting blank.
+    # --- 13p. disposable inbox: an address is really issued, not just mounted ---
+    # The tool depends on a live third party handing back a working address, so drive it:
+    # wait for a real address on a real domain, copy it, and check it survives into a fresh
+    # page, where the only place it can come from is ctx.storage (per-card state is a
+    # WeakMap, so a new page has none). A machine without egress cannot reach the provider,
+    # so that branch asserts the status line says so instead of hanging or sitting blank.
     tm_before = len(logs)
     page.evaluate("location.hash = '#/t/tempmail'")
     page.wait_for_timeout(600)
@@ -873,8 +869,8 @@ with sync_playwright() as p:
     check('tempmail states the inbox is public and third-party run',
           'never for anything private' in tm.inner_text().lower(), tm.inner_text()[:140])
     # The address lands before the first inbox fetch returns, so waiting on the address
-    # alone samples a half-finished claim. Wait for a TERMINAL status instead: polling
-    # started, or the provider was named as unreachable.
+    # alone samples a half-finished claim. Wait for a terminal status instead: polling
+    # started, or the provider named as unreachable.
     tm_addr, tm_status = '', ''
     for _ in range(40):
         tm_addr = tm.locator('input.tm-addr').first.input_value().strip()
@@ -893,9 +889,9 @@ with sync_playwright() as p:
         page.wait_for_timeout(300)
         clip_tm = page.evaluate('navigator.clipboard.readText()').strip()
         check('tempmail copies the issued address', clip_tm == tm_addr, f'{clip_tm!r} vs {tm_addr!r}')
-        # Reload equivalence. A second page in the same browser context shares IndexedDB but
-        # gets a fresh module instance, so an address that comes back there came out of
-        # ctx.storage and not out of a module-level variable.
+        # Reload equivalence. A second page in the same browser context shares IndexedDB
+        # but gets a fresh module instance, so an address that comes back there came out
+        # of ctx.storage rather than a module-level variable.
         pg4 = ctx.new_page()
         pg4.goto(f'{BASE}/#/t/tempmail')
         pg4.wait_for_selector('input.tm-addr', timeout=20000)
@@ -921,11 +917,10 @@ with sync_playwright() as p:
     else:
         check('tempmail names the failure instead of stalling on a half-claim',
               graceful and 'claiming' not in tm_status, tm_status[:110])
-    # A live inbox is empty, so the branch that matters most (rendering a stranger's
-    # message) never runs against the real provider. Drive it with API-shaped payloads on
-    # a page whose fetch is stubbed for api.mail.gw only: the transport is canned, the
-    # message is not, and the body carries markup plus a script tag so the strip is proved
-    # rather than assumed. This also runs on a machine with no egress at all.
+    # A live inbox is empty, so the render path for an incoming message never runs against
+    # the real provider. Drive it with API-shaped payloads on a page whose fetch is stubbed
+    # for api.mail.gw only: the transport is canned, the message is not. The body carries
+    # markup plus a script tag so the strip is exercised. Works with no egress at all.
     STUB = """
       const REAL = window.fetch.bind(window)
       const AT = String.fromCharCode(64)
@@ -967,11 +962,11 @@ with sync_playwright() as p:
     check('tempmail raises no page error while rendering a hostile body', not pg5_errs, ' | '.join(pg5_errs)[:160])
     pg5.close()
 
-    # Rendering a message that was already there proves only the render. The PRODUCT is mail
-    # that shows up on its own, so hold the inbox empty for the first check and open it on
+    # Rendering a message that was already there covers only the render. Mail has to show
+    # up on its own, so the stub holds the inbox empty for the first check and opens it on
     # the next: the row can then only come from a second, unprompted fetch. Nothing is
-    # clicked. A tool that renders on demand but never polls looks exactly like a tool that
-    # is not receiving mail, which is the complaint that sent us here.
+    # clicked. A tool that renders on demand but never polls is indistinguishable from one
+    # that is not receiving mail.
     def mailgw_stub(body):
         return """
           const REAL = window.fetch.bind(window)
@@ -999,10 +994,10 @@ with sync_playwright() as p:
     def drive_stub(script, want, budget=45):
         """Open the tool on a stubbed page and wait for `want(page)`. Returns (page, met).
 
-        Its OWN browser context, not `ctx`: the tool restores a saved address from
-        IndexedDB, so a page sharing storage with the live run above never reaches the
-        claim path at all, and every assertion about claiming would pass or fail for the
-        wrong reason. A fresh context is the only way to test a first-run inbox.
+        Its own browser context rather than `ctx`, because the tool restores a saved
+        address from IndexedDB: a page sharing storage with the live run above never
+        reaches the claim path, so claim assertions would pass for the wrong reason. A
+        fresh context is the only way to reach a first-run inbox.
         """
         c = browser.new_context()
         pg = c.new_page()
@@ -1024,10 +1019,10 @@ with sync_playwright() as p:
           pg6.evaluate('window.__accounts') == 1, f'accounts={pg6.evaluate("window.__accounts")}')
     cx6.close()
 
-    # A refused claim is the only state with NO address on screen, so it is the one that most
-    # needs to retry itself. It used to stop dead: the status promised a next check, no timer
-    # was ever armed, and nothing happened again until someone pressed Refresh. Two attempts
-    # is the whole assertion; one is the wedge.
+    # A refused claim is the only state with no address on screen, so it is the one that
+    # most needs to retry. A status line promising a next check proves nothing on its own,
+    # because no timer need be armed behind it. Two claim attempts is the assertion; one
+    # means it wedged until Refresh.
     REFUSED = mailgw_stub(('return json({}, 429)', "return json({'hydra:member': []})"))
     (pg7, cx7), retried = drive_stub(REFUSED, lambda p: p.evaluate('window.__accounts') >= 2, budget=40)
     check('tempmail retries a claim the provider refused instead of wedging with no address',
@@ -1037,9 +1032,9 @@ with sync_playwright() as p:
           pg7.locator('.tm-status').first.inner_text()[:110])
     cx7.close()
 
-    # A 401 on /messages is an EXPIRED TOKEN, not a dead account. Re-claiming on it throws
-    # away an inbox that may already hold mail, so the tool has to log in again and keep the
-    # address it is showing.
+    # A 401 on /messages means an expired token, not a dead account. Re-claiming on it
+    # throws away an inbox that may already hold mail, so the tool has to log in again and
+    # keep the address it is showing.
     EXPIRED = mailgw_stub(("return json({address: 'stub' + AT + 'stub.example'}, 201)",
                            "if (window.__polls === 1) return json({}, 401);\n"
                            "              return json({'hydra:member': [M]})"))
@@ -1065,18 +1060,18 @@ with sync_playwright() as p:
     page.wait_for_timeout(500)
     check('deep-link #/t/base64 opens the tool', page.locator('details.card summary', has_text='Base64').count() >= 1)
 
-    # window.scrollY is ALWAYS 0 here because .app-shell is overflow:hidden, so the old
-    # assertion proved nothing: the composer could be squeezed to its padding and pushed
-    # under the viewport edge while this still passed. Two real bugs hid behind it at
-    # once. .composer-wrap carries overflow:hidden to reserve the scrollbar gutter, and a
-    # grid item only gets an automatic min-content floor while overflow is visible, so the
-    # row collapsed to 24px against the 122px it needed. Separately .center placed its rows
-    # positionally while the stage and captions are display:none when idle, so the feed slid
-    # onto the auto row and grew to full content height. Assert the geometry instead.
-    # The row-shift half of the bug only appears with an IDLE stage, because .tiles-region
-    # and .captions are display:none then and the remaining children slide up a row. Late in
-    # this run the stage still holds tiles, which accidentally restores the correct order, so
-    # the precondition has to be forced rather than assumed.
+    # window.scrollY is always 0 here because .app-shell is overflow:hidden, so asserting
+    # on it says nothing: the composer can be squeezed to its padding and pushed under the
+    # viewport edge while scrollY stays 0. Two separate bugs hid behind that. .composer-wrap
+    # carries overflow:hidden to reserve the scrollbar gutter, and a grid item only gets an
+    # automatic min-content floor while overflow is visible, so the row collapsed to 24px
+    # against the 122px it needed. Separately .center placed its rows positionally while the
+    # stage and captions are display:none when idle, so the feed slid onto the auto row and
+    # grew to full content height. Measure the geometry instead.
+    # The row-shift half only appears with an idle stage, since .tiles-region and .captions
+    # are display:none then and the remaining children slide up a row. Late in this run the
+    # stage may still hold tiles, which restores the correct order by accident, so the
+    # precondition is forced rather than assumed.
     page.evaluate("() => { const t=document.querySelector('.tiles-region');"
                  " return t ? getComputedStyle(t).display : 'absent' }")
     check('stage is idle for the composer geometry check',
@@ -1103,17 +1098,17 @@ with sync_playwright() as p:
     check('send button is reachable on screen', layout['sendVisible'], str(layout))
     check('topbar still visible at end', page.locator('.topbar .brand').is_visible())
     page.screenshot(path=f'{SNAP}/e2e-final-dark.png', full_page=False)
-    # Artifact only, not an assertion: the theme is asserted through the Settings control in
-    # section 4. Flipped on the element here so the light snapshot does not depend on
-    # opening a tool card this late in the run.
+    # Snapshot artifact only, no assertion; the theme itself is asserted through the
+    # Settings control in section 4. Flipped on the element here so the light snapshot does
+    # not depend on opening a tool card this late in the run.
     page.evaluate("document.documentElement.setAttribute('data-theme', 'light')")
     page.screenshot(path=f'{SNAP}/e2e-final-light.png', full_page=False)
     page.evaluate("document.documentElement.setAttribute('data-theme', 'dark')")
 
     # --- every registered tool must mount without crashing or violating the CSP ---
-    # OCR shipped completely broken because nothing in this suite ever opened it: the
-    # Worker constructor was blocked by Trusted Types, four features were dead, and the
-    # run stayed green. Opening every tool means a whole tool cannot go dark unnoticed.
+    # A tool nothing here opens can be entirely dead and leave the run green: a Worker
+    # constructor blocked by Trusted Types silently takes out every feature behind it.
+    # Opening every registered tool is what keeps a whole tool from going dark unnoticed.
     ids = tool_ids()
     print(f'\n--- mounting all {len(ids)} tools ---')
     mount_failures = []
@@ -1141,11 +1136,11 @@ with sync_playwright() as p:
     check(f'all {len(ids)} tools mount without a CSP violation or crash',
           not mount_failures, ' | '.join(mount_failures[:4]))
 
-    # --- every pure text tool is DRIVEN, not just mounted ---
-    # Mounting proves the module imports. It proves nothing about the tool working: the
-    # loop above passed on html-strip for as long as html-strip has been broken. Each tool
-    # with an obvious input and output gets a known input, a real trigger, and an assertion
-    # that something non-empty and non-error came back.
+    # --- every pure text tool is driven with real input, not just mounted ---
+    # Mounting only covers the module import; the loop above passed on html-strip for as
+    # long as html-strip was broken. Each tool with an obvious input and output gets a
+    # known input, a real trigger, and an assertion that something non-empty and non-error
+    # came back.
     # (id, [(selector, nth, value)], trigger button text or None, output selector, reject substrings)
     SMOKE = [
         ('base64', [('textarea', 0, 'urletc')], 'Encode', 'pre', ('error', 'invalid')),
@@ -1181,12 +1176,11 @@ with sync_playwright() as p:
               ok, (bad[0][:110] if bad else f'output={text[:70]!r}'))
 
     # ===================== url check + shorten (driven) =====================
-    # Appended as a self-contained block; nothing above is restructured. Both tools are
-    # driven with real input and asserted on real output, because a rendered card only
-    # ever proved that the module imported.
+    # Self-contained block; nothing above is restructured. Both tools get real input and
+    # are asserted on real output rather than on a card having rendered.
 
-    # The link itself must never be fetched, and the 3.6 MB bulk feed must never be
-    # pulled behind the user's back. Both are watched on the wire.
+    # The link under inspection must never be fetched, and the 3.6 MB bulk feed must never
+    # be pulled without being asked for. Both are watched on the wire.
     offsite = []
 
     def _watch_request(r):
@@ -1197,11 +1191,10 @@ with sync_playwright() as p:
 
     UC = tool_id_for('url-safety')
 
-    # A live known-bad URL, taken from OpenPhish AT TEST TIME. Hardcoding one is useless:
-    # the feed rotates, so a literal would silently stop being listed and the assertion
-    # would pass for the wrong reason (or fail forever). Fetched out of band via
-    # Playwright's request context, so picking the sample is independent of whether the
-    # page itself can reach the feed.
+    # A live known-bad URL, taken from OpenPhish at test time. The feed rotates, so a
+    # hardcoded sample stops being listed and the assertion then passes for the wrong
+    # reason or fails forever. Fetched out of band through Playwright's request context,
+    # so choosing the sample is independent of what the page can reach.
     OPENPHISH = 'https://raw.githubusercontent.com/openphish/public_feed/main/feed.txt'
     sample, feed_lines = None, 0
     try:
@@ -1221,12 +1214,12 @@ with sync_playwright() as p:
 
     # Every structural trick at once: credentials before the @, a brand in a subdomain, a
     # punycode label that decodes to Latin + Cyrillic, a free-registration TLD, an odd
-    # port, http, and double percent-encoding.
-    # The @ is spelled with chr(64) so the literal cannot be mistaken for an address.
+    # port, plain http, and double percent-encoding. The @ is spelled with chr(64) so the
+    # literal is not mistaken for an address.
     NASTY = ('http://admin:hunter2' + chr(64) + 'paypal.com.login-verify.xn--pypal-4ve.tk:8081'
              '/reset%2Fpass%2Fnow%252Fdeep%2Fx%2Fy?to=%2Faccount%2Fx')
-    # URL Inspector was merged into URL Check, so #/t/url-info is a retired id. Links to it
-    # are already out in shared history and must land on the merged tool instead of
+    # URL Inspector was merged into URL Check, so #/t/url-info is a retired id. Links to
+    # it are already out in shared history and must land on the merged tool instead of
     # dead-ending on a card that never opens.
     uc_cards = page.locator('details.card summary', has_text='URL Check')
     n_uc = uc_cards.count()  # the mount-all pass above already left one, so count the delta
@@ -1246,7 +1239,7 @@ with sync_playwright() as p:
     us = page.locator('details.card').last.locator('.card-body')
 
     def uc_run(value, want_feeds=True, budget=25):
-        # Type a URL, press Check, and wait for the FEED layer, not just the local one.
+        # Type a URL, press Check, and wait for the feed layer as well as the local one.
         us.locator('input.full').fill(value)
         us.locator('button', has_text='Check').first.click()
         for _ in range(budget):
@@ -1278,9 +1271,9 @@ with sync_playwright() as p:
           us.locator('.url-check-structural').count() == 1 and 'heuristic' in us_text, us_text[-200:])
 
     # The merged URL Inspector: the same component breakdown, driven by the same input,
-    # now a section of this card. Labels alone would be a proxy, so the values are asserted
-    # too, and the section must sit UNDER the verdict: it answers "what is in this link",
-    # which is only worth reading once "is it safe" has been answered.
+    # now a section of this card. Labels alone are a proxy, so the parsed values are
+    # asserted too, and the section must sit under the verdict, since "what is in this
+    # link" is only worth reading once "is it safe" has been answered.
     parts_txt = us.locator('.url-check-parts').inner_text().lower()
     check('url-check: the merged breakdown reports protocol, host, path and query',
           us.locator('.url-check-parts').count() == 1
@@ -1292,7 +1285,7 @@ with sync_playwright() as p:
           us.evaluate("e => { const v = e.querySelector('.url-check-structural');"
                       " const b = e.querySelector('.url-check-parts');"
                       " return !!(v && b) && !!(v.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING) }"))
-    # The whole point of the local layer: it reads the text, it does not open the link.
+    # The local layer reads the URL text without opening it.
     check('url-check: never fetches the link it is judging',
           not any('login-verify' in u or 'xn--pypal' in u for u in offsite), str(offsite[-4:])[:160])
 
@@ -1307,15 +1300,28 @@ with sync_playwright() as p:
               ' old' in listed and 'entries' in listed, listed[:200])
         check('url-check: a listing reads as a fact, not a score',
               us.locator('.url-check-feedresult .badge.danger').count() == 1, listed[:200])
-        check('url-check: the feed lookup really goes to the OpenPhish feed',
-              any('openphish/public_feed' in u for u in offsite), str(offsite[-5:])[:200])
+        # The listing above shows the app has the feed, not that it fetched one. The feed
+        # is cached in IndexedDB, so a lookup here is usually answered locally and
+        # watching the wire during it says nothing either way. Drive the row's own Refresh
+        # button, the one path that must always reach the network, and watch that.
+        _pre = len(offsite)
+        _op_row = us.locator('.url-check-feed-row', has_text='OpenPhish')
+        _refresh = _op_row.locator('button').filter(has_text=re.compile(r'^(Refresh|Download)$'))
+        check('url-check: the OpenPhish row offers a refresh', _refresh.count() >= 1,
+              f'{_refresh.count()} buttons in {_op_row.count()} rows')
+        if _refresh.count():
+            _refresh.first.click()
+            us.page.wait_for_timeout(6000)
+            check('url-check: refreshing really goes to the OpenPhish feed over the network',
+                  any('openphish/public_feed' in u for u in offsite[_pre:]),
+                  str(offsite[_pre:][-5:])[:200])
         check('url-check: checking a listed URL still never fetches it',
               sample_host == '' or not any(sample_host in u for u in offsite), str(offsite[-4:])[:200])
         check('url-check: the copy-report text carries the listing',
               'openphish' in bad_text, bad_text[:160])
 
-    # A verdict that flags everything is worthless, so prove the clean case is clean in
-    # BOTH layers: no structural findings and no listing.
+    # A verdict that flags everything is useless, so the clean case is asserted in both
+    # layers: no structural findings and no listing.
     clean_text = uc_run('https://example.com/pricing')
     clean_feeds = us.locator('.url-check-feedresult').inner_text().lower()
     check('url-check: an ordinary https URL raises nothing structural',
@@ -1329,7 +1335,7 @@ with sync_playwright() as p:
     check('url-check: rejects a non-URL', 'not a valid url' in uc_run('not a url at all', want_feeds=False))
     check('url-check: a non-URL gets no breakdown either', us.locator('.url-check-parts').count() == 0)
 
-    # The 3.6 MB list is opt in. Nothing may pull it on load or on a check.
+    # The 3.6 MB list is opt in, so nothing may pull it on load or during a check.
     check('url-check: the bulk feed is never downloaded unasked',
           not any('phishing-domains-ACTIVE' in u for u in offsite), str([u for u in offsite if 'jsdelivr' in u])[:200])
     rows = us.locator('.url-check-feed-row')
@@ -1354,23 +1360,22 @@ with sync_playwright() as p:
 
     def paste_verdict(url):
         # Peers in the code room push their own cards while this runs, so `.feed-item`
-        # .last is not the pasted one. Address the verdict directly instead.
+        # .last need not be the pasted one. Address the verdict element directly.
         page.evaluate("location.hash = '#/'")
         page.wait_for_timeout(400)
         before = page.locator('.url-check-card').count()
         page.evaluate(PASTE_JS, url)
-        # The card is built behind two dynamic imports, so poll instead of guessing a
-        # delay: a fixed wait turns a slow chunk load into a phantom failure.
+        # The card is built behind two dynamic imports, so poll rather than guess a
+        # delay; a fixed wait turns a slow chunk load into a phantom failure.
         for _ in range(40):
             page.wait_for_timeout(250)
             if page.locator('.url-check-card').count() > before:
                 break
         return before, page.locator('.url-check-card').last
 
-    # The off switch has to be real, not decorative: with it off a pasted link gets a
-    # button and nothing else, and that button still has to produce the full verdict.
-    # The mount-all pass above already left a URL Check card in the feed, so scope this
-    # to the card this block opened rather than matching both.
+    # With the switch off a pasted link must get a button and nothing else, and that
+    # button must still produce the full verdict. The mount-all pass above already left a
+    # URL Check card in the feed, so scope this to the card this block opened.
     auto = page.locator('.url-check-auto input[type="checkbox"]').last
     check('url-check: pasted links are checked by default', auto.is_checked())
     auto.uncheck()
@@ -1397,7 +1402,7 @@ with sync_playwright() as p:
         before, vc = paste_verdict(sample)
         check('pasted link is checked without opening the tool',
               page.locator('.url-check-card').count() == before + 1, f'{before} verdict cards before')
-        # The local layer paints before the network answers: that is why the paste is
+        # The local layer paints before the network answers, which is why the paste is
         # not blocked. Asserted while the feed answer may still be pending.
         check('pasted link shows the instant local verdict first',
               vc.locator('.url-check-structural').count() == 1, 'no structural block on the card')
@@ -1415,9 +1420,9 @@ with sync_playwright() as p:
     before, cvc = paste_verdict('https://example.com/pricing')
     check('clean url paste is checked on the card too',
           page.locator('.url-check-card').count() == before + 1, f'{before} verdict cards before')
-    # The pasted card deliberately does NOT carry the component breakdown the tool now
-    # shows: it pushed the verdict below the fold, which is why it was dropped from the
-    # card last round. Merging URL Inspector into the tool must not quietly undo that.
+    # The pasted card deliberately omits the component breakdown the tool now shows,
+    # because it pushed the verdict below the fold. Merging URL Inspector into the tool
+    # must not quietly bring it back here.
     check('a pasted link stays verdict-first, with no component breakdown',
           cvc.locator('.url-check-parts').count() == 0)
     cverdict = ''
@@ -1428,9 +1433,9 @@ with sync_playwright() as p:
         page.wait_for_timeout(500)
     check('pasted clean link is not reported as listed',
           bool(cverdict) and 'listed by' not in cverdict, cverdict[:200] or 'no verdict rendered')
-    # POINT 5: the verdict IS the card now. It used to open with the same host/path/query
-    # breakdown the URL Info tool already renders, which pushed the one thing a pasted
-    # link is asking (is this listed, by whom, how old is that answer) below the fold.
+    # The verdict is the whole card. A host/path/query breakdown duplicating the URL Info
+    # tool pushes the question a pasted link actually asks (is this listed, by whom, how
+    # old is that answer) below the fold, so the link itself is asserted here.
     cpaste = page.locator('.feed-item', has=page.locator('.url-check-card')).last
     check('a pasted link card shows the link itself',
           cpaste.locator('.url-paste-link').count() == 1 and 'example.com/pricing' in cpaste.locator('.url-paste-link').inner_text(),
@@ -1453,7 +1458,7 @@ with sync_playwright() as p:
     sh = page.locator('details.card').last.locator('.card-body')
     check('shorten: the card says the URL is sent to spoo.me', 'spoo.me' in sh.inner_text().lower())
 
-    # The local gate must reject before anything leaves the device.
+    # The local gate has to reject before anything leaves the device.
     pre_reqs = len(offsite)
     sh.locator('input.full').fill('definitely not a url')
     sh.locator('button', has_text='Shorten').first.click()
@@ -1477,7 +1482,7 @@ with sync_playwright() as p:
     got = link.count() > 0 and link.first.inner_text().strip().startswith('http')
     check('shorten: the request actually goes to spoo.me',
           any('spoo.me' in u for u in offsite[pre_reqs:]), str(offsite[pre_reqs:])[:140])
-    # Success or a rendered failure, never a spinner that never resolves.
+    # Success or a rendered failure; never a spinner that never resolves.
     check('shorten: ends in a real short link or a graceful message', got or bool(st), f'status={st!r} link={got}')
     if got:
         check('shorten: the short link points at spoo.me', 'spoo.me' in link.first.inner_text())
@@ -1492,9 +1497,9 @@ with sync_playwright() as p:
 
     # ===================== subtitles (driven, exact output) =====================
     # Self-contained block; nothing above is restructured. The tool is pure computation on
-    # text, so there is no excuse for asserting anything less than the exact bytes it
-    # writes. A known SRT goes in, and the WebVTT that comes back is compared character
-    # for character, which is what pins the comma-to-dot separator change.
+    # text, so the assertions are on exact bytes: a known SRT goes in and the WebVTT that
+    # comes back is compared character for character, which pins the comma-to-dot
+    # separator change.
     SUB_SRT = ('1\n'
                '00:00:01,000 --> 00:00:02,500\n'
                'Hello there\n'
@@ -1590,8 +1595,8 @@ with sync_playwright() as p:
     check('subtitles: the transcript drops timings and inline tags',
           txt == 'Hello there\nGeneral Kenobi\n', repr(txt)[:200])
 
-    # Malformed input is reported, not silently swallowed. This is the whole point of the
-    # tool: a file that will not parse is what the user is trying to diagnose.
+    # Malformed input has to be reported rather than swallowed, since a file that will
+    # not parse is the case the tool exists to diagnose.
     sub.locator('.subs-in').fill('1\n00:00:01,000 --> 0:0:xx\nbroken timing\n\n'
                                  '2\n00:00:09,000 --> 00:00:08,000\nbackwards\n')
     sub.locator('.subs-format').select_option('vtt')
@@ -1606,8 +1611,8 @@ with sync_playwright() as p:
           '00:00:09.000 --> 00:00:08.000' in sub.locator('.subs-out').input_value(),
           sub.locator('.subs-out').input_value()[:120])
 
-    # The file input is the other way in, and it also names the download. Fed here as a
-    # real File so the reader path runs, not just the paste path.
+    # The file input is the other way in, and it also names the download. Fed as a real
+    # File so the reader path runs alongside the paste path.
     sub.locator('.subs-file').set_input_files(files=[{
         'name': 'episode.01.srt', 'mimeType': 'text/plain', 'buffer': SUB_SRT.encode()}])
     page.wait_for_timeout(400)
@@ -1631,26 +1636,25 @@ with sync_playwright() as p:
 
 
     # ===================== OCR quality: small text keeps its punctuation =====================
-    # A user reported a browser screenshot whose address bar read a dotted hostname and came
-    # back with the dots gone: at 96 DPI the period between two labels is one or two pixels,
-    # and it is the first feature an LSTM drops when the bitmap is handed over at native size.
+    # A browser screenshot whose address bar held a dotted hostname came back with the dots
+    # gone. At 96 DPI the period between two labels is one or two pixels, and it is the
+    # first feature an LSTM drops when the bitmap is handed over at native size.
     #
-    # The fixture is BUILT HERE rather than committed. The original was a real screenshot of
-    # a user's own session and carried a personal email address, which must not live in a
-    # public repository; a committed binary also cannot be reviewed in a diff. This canvas
-    # reproduces the two properties that made the reported image hard, and nothing else.
+    # The fixture is generated here rather than committed: a real screenshot carries
+    # personal data that does not belong in a public repository, and a committed binary is
+    # opaque in a diff. This canvas reproduces the two properties that made that image
+    # hard, and nothing else.
     #
-    # Driven through the OCR tool's own file input, so this exercises the shipped path:
-    # preprocessing, the shared Trusted Types worker, and recognition. Asserting on a
-    # rendered card would prove nothing; the tool rendered fine while it was dropping dots.
+    # Driven through the OCR tool's own file input, so it exercises the shipped path:
+    # preprocessing, the shared Trusted Types worker, and recognition. The tool rendered
+    # fine while it was dropping dots, so a rendered card is not evidence.
     ocr_png = base64.b64decode(page.evaluate('''async () => {
-      // Synthetic on purpose. The bug was reported from a real browser screenshot, but a
-      // screenshot of somebody's session carries their address bar, their form fields and
-      // their email, none of which belongs in a public repository. What actually made that
-      // image hard is reproduced here instead: SMALL glyphs (13px, about what an address
-      // bar renders at 96 DPI, where a period between two hostname labels is one or two
-      // pixels), and MIXED POLARITY, light text on dark chrome above and dark text on a
-      // light page below, which is what rules out one global threshold for the whole frame.
+      // Synthetic on purpose: a real screenshot carries an address bar, form fields and
+      // an email address, none of which belongs in a public repository. The two properties
+      // that made the original hard are reproduced instead. Small glyphs (13px, about what
+      // an address bar renders at 96 DPI, where a period between two hostname labels is
+      // one or two pixels), and mixed polarity, light text on dark chrome above and dark
+      // text on a light page below, which rules out one global threshold for the frame.
       const c = document.createElement('canvas'); c.width = 760; c.height = 420
       const g = c.getContext('2d')
       g.fillStyle = '#f2f2f2'; g.fillRect(0, 0, 760, 420)
@@ -1659,8 +1663,8 @@ with sync_playwright() as p:
       // system-ui to different faces, and the fixture must not depend on which.
       g.font = '13px sans-serif'; g.textBaseline = 'middle'
       // No path after the host. The assertion is about the separators between labels
-      // surviving; a trailing '/login' only adds a slash-and-l ambiguity that is not the
-      // property under test, and it is what made this fail on the runner.
+      // surviving, and a trailing '/login' only adds a slash-and-l ambiguity that is not
+      // the property under test; it is also what made this fail on the runner.
       g.fillStyle = '#e8e8e8'; g.fillText('docs.example-site.org', 96, 17)
       // a mid-grey block, standing in for the photo that occupied half the reported image
       g.fillStyle = '#8a8a8a'; g.fillRect(470, 34, 290, 386)
@@ -1696,7 +1700,7 @@ with sync_playwright() as p:
     check('OCR reads the rendered page at all', len(low) > 20, repr(shot_text[:120]))
     # The regression itself. Both halves carry a dotted hostname, one in light-on-dark
     # chrome and one in a dark-on-light field, so a fix that rescues only one polarity
-    # does not pass.
+    # still fails here.
     check('OCR keeps the dots in a hostname on dark chrome',
           'docs.example-site.org' in low, repr(shot_text[:200]))
     check('OCR does not run hostname labels together',
@@ -1712,21 +1716,20 @@ with sync_playwright() as p:
     # =================== end OCR quality block ===================
 
 
-    # Heavy features build a Worker. Assert each kind can actually be constructed under
-    # the live CSP, rather than trusting that the UI rendered.
+    # Heavy features build a Worker, so check each kind can be constructed under the live
+    # CSP rather than inferring it from the UI having rendered.
     check('OCR worker shim is reachable and parses',
           page.evaluate("async () => { const r = await fetch('/tesseract/worker-tt.js');"
                         " return r.ok && (await r.text()).includes('createPolicy') }"))
 
     # =================== ICE configuration ===================
-    # Trystero's own default is four STUN servers and it CONCATENATES turnConfig onto them,
-    # so the previous config produced six entries and Firefox answered EVERY peer
-    # connection with "WebRTC: Using five or more STUN/TURN servers slows down discovery"
-    # (measured at 20 to 25 lines per page, and this app opens up to four rooms at once).
-    # Passing rtcConfig.iceServers replaces that default rather than adding to it, which is
-    # the only reason the count can be controlled at all. Read the argument the app hands
-    # RTCPeerConnection instead of the source: the source can set the field while Trystero
-    # still wins the merge, and that difference is the whole bug.
+    # Trystero defaults to four STUN servers and concatenates turnConfig onto them, so the
+    # earlier config produced six entries and Firefox warned on every peer connection:
+    # "WebRTC: Using five or more STUN/TURN servers slows down discovery", 20 to 25 lines
+    # per page, with up to four rooms open at once. Passing rtcConfig.iceServers replaces
+    # that default instead of adding to it, which is what makes the count controllable.
+    # Read the argument the app hands RTCPeerConnection rather than the source, since the
+    # source can set the field while Trystero still wins the merge.
     icx = browser.new_context()
     icp = icx.new_page()
     icp.add_init_script("""
@@ -1768,18 +1771,17 @@ with sync_playwright() as p:
           any(u.startswith('stun:') for u in worst), str(worst))
     # A relay that answers Allocate with "400 TURN allocate error" relays nothing while
     # still costing every connection a full gathering timeout and a slot in the count
-    # above. If a TURN entry is listed here it has to be one that is actually expected to
-    # work, so this asserts the retired openrelay credentials are not back.
+    # above. Any TURN entry here has to be one expected to work, so the retired openrelay
+    # credentials must stay out.
     check('the retired openrelay TURN endpoint is not in the ICE list',
           not any('openrelay' in u for u in worst), str(worst))
     icx.close()
 
     # =================== peer to peer file transfer ===================
-    # The core promise of the app, and until now nothing drove it: the suite checked that
-    # a card rendered, never that bytes reached another device. Two real browser contexts,
-    # a real code room over the real relays, a real multi-chunk image, and the assertion
-    # is on the DECODED image on the far side, not on a card having appeared.
-    FILE_CODE = 'wtf' + os.urandom(3).hex()
+    # Two real browser contexts, a real code room over the real relays, and a real
+    # multi-chunk image. The assertion is on the decoded image on the far side rather than
+    # on a card having appeared, which is all the earlier coverage checked.
+    FILE_CODE = 'x' + os.urandom(3).hex()
     SEND_PNG = os.path.join(SNAP, f'wt-send-{FILE_CODE}.png')
     DROP_PNG = os.path.join(SNAP, f'wt-drop-{FILE_CODE}.png')
     IMG_W, IMG_H = 900, 700
@@ -1832,19 +1834,19 @@ with sync_playwright() as p:
     check('two contexts in one code room reach a secure channel', bool(paired),
           f'A: {feed_text(pg_a)[-120:]!r} B: {feed_text(pg_b)[-120:]!r}')
 
-    # "Secure channel established" is printed when the handshake completes, but the send
-    # path asks reachableCount(), which is driven by the roster. On a slow runner the click
-    # can land in the gap between the two, and sendFileAll then finds nobody and does
-    # nothing: CI failed here with B's feed ending at the channel message and no file
-    # activity at all, while the same assertions passed locally. Wait for A to actually
-    # report a reachable peer, which is the condition the send itself tests.
+    # "Secure channel established" prints when the handshake completes, but the send path
+    # asks reachableCount(), which is driven by the roster. On a slow runner the click can
+    # land in the gap between the two and sendFileAll finds nobody, which is how CI failed
+    # here with B's feed ending at the channel message and no file activity, while the same
+    # assertions passed locally. Wait for A to report a reachable peer, the condition the
+    # send itself tests.
     reachable_a = poll(lambda: 'connected' in (pg_a.locator('.topbar .badge').inner_text() or ''), 60) if paired else None
     check('the sender counts the peer as reachable before sending', bool(reachable_a),
           f"A chip={pg_a.locator('.topbar .badge').inner_text()!r}" if paired else 'not paired')
 
     def transfer_diag():
-        # Both sides plus A's chip. The CI failure only ever showed B, which could not
-        # distinguish "A never sent" from "B never received".
+        # Both sides plus A's chip. A diagnostic showing only B cannot distinguish "A
+        # never sent" from "B never received".
         return (f"A chip={pg_a.locator('.topbar .badge').inner_text()!r} "
                 f"A feed={feed_text(pg_a)[-200:]!r} B feed={feed_text(pg_b)[-200:]!r}")
 
@@ -1857,9 +1859,9 @@ with sync_playwright() as p:
         landed = poll(lambda: pg_b.locator('.card img.preview').count() > 0, 180)
         check('a sent image actually arrives on the other device', bool(landed), transfer_diag())
         if landed:
-            # A card with a broken <img> is exactly what a truncated transfer produces, so
-            # the assertion is on the decoded pixels: same dimensions means every chunk
-            # was reassembled in the right order and decrypted.
+            # A truncated transfer produces a card with a broken <img>, so the assertion
+            # is on the decoded pixels: matching dimensions mean every chunk was
+            # decrypted and reassembled in order.
             dims = pg_b.locator('.card img.preview').last.evaluate(
                 'e => ({w: e.naturalWidth, h: e.naturalHeight, done: e.complete})')
             check('the received image decodes to the bytes that were sent',
@@ -1871,10 +1873,9 @@ with sync_playwright() as p:
         b_errs = poll(lambda: 'Failed to decrypt' in feed_text(pg_b), 1)
         check('no chunk failed to decrypt on the way', not b_errs, feed_text(pg_b)[-160:])
 
-        # An interrupted transfer must END, out loud. Before this the receiver kept the
-        # half-file forever: no card, no error, and the slot still counted against the
-        # sixteen-file ceiling, so after enough of them every later file was refused. That
-        # is the "the image never arrives and then everything breaks" report.
+        # An interrupted transfer has to terminate and say so. A half-file held with no
+        # card and no error still occupies a slot against the sixteen-file ceiling, and
+        # enough of them make every later file be refused.
         ctx_c, pg_c = join_room('C')
         met = poll(lambda: 'Secure channel established' in feed_text(pg_c), 150)
         check('a third device joins the same room', bool(met), feed_text(pg_c)[-120:])
@@ -1883,17 +1884,17 @@ with sync_playwright() as p:
             pg_c.locator('input[type=file][accept="image/*"]').set_input_files(DROP_PNG)
             pg_c.wait_for_selector('.card button:has-text("Send to devices")', timeout=20000)
             pg_c.locator('.card button', has_text='Send to devices').last.click()
-            # Wait for THIS file's offer by name. Waiting for the words "Incoming file"
-            # would match the transfer that already succeeded above and cut the sender
-            # before it had sent anything at all, which tests nothing.
+            # Wait for this file's offer by name. Waiting for the words "Incoming file"
+            # matches the transfer that already succeeded above and would cut the sender
+            # before it had sent anything.
             offered_drop = poll(lambda: drop_name in feed_text(pg_b), 90, step=0.1)
             check('the second offer is seen before its sender is cut', bool(offered_drop),
                   feed_text(pg_b)[-200:])
             ctx_c.close()  # sender vanishes mid-file
-            # The assertion is that the receive REACHES AN END: either the repair round
-            # completed it or it was given up on out loud. Silence is the bug, and it is
-            # what shipped: the half-file sat there for the life of the page with no card
-            # and no error, still holding one of the sixteen concurrent-receive slots.
+            # The assertion is that the receive reaches an end: either the repair round
+            # completed it, or it was abandoned in the feed. Silence is the failure mode
+            # being guarded, since a half-file that sits there holds one of the sixteen
+            # concurrent-receive slots for the life of the page.
             def drop_resolved():
                 txt = feed_text(pg_b)
                 if drop_name in txt and 'did not finish' in txt:
@@ -1913,14 +1914,14 @@ with sync_playwright() as p:
     ctx_b.close()
 
     # --- touch: the per-card delete control, driven by real taps ---
-    # This ran green for a whole release while the control did nothing on a phone, because
-    # every assertion above drives a desktop viewport with a MOUSE and the two defects only
-    # exist without one. So this needs its own context: has_touch + is_mobile, asserted to
-    # really report `(hover: none)` before anything is concluded from it, since an emulation
-    # that quietly still hovers would restore the desktop path and prove nothing again.
-    # Placed after the peer harness and closed immediately: a live context on this public IP
-    # is a nearby peer to every other one.
-    tctx = browser.new_context(viewport={'width': 390, 'height': 844}, has_touch=True,
+    # Every assertion above drives a desktop viewport with a mouse, so a control that does
+    # nothing on a phone passes them all. Revealing it wherever there is no hover is the
+    # other failure: that puts a trash icon on every card at once. Both the quiet state and
+    # the working gesture are asserted, since either alone is a regression. 344px is a
+    # foldable cover screen.
+    # Placed after the peer harness and closed immediately, because a live context on this
+    # public IP is a nearby peer to every other one.
+    tctx = browser.new_context(viewport={'width': 344, 'height': 882}, has_touch=True,
                                is_mobile=True, device_scale_factor=3)
     tp = tctx.new_page()
     terrs = []
@@ -1932,49 +1933,84 @@ with sync_playwright() as p:
                       " coarse: matchMedia('(pointer: coarse)').matches})")
     check('touch context really reports no hover and a coarse pointer',
           tmm['hover'] and tmm['coarse'], str(tmm))
-    for _msg in ('touch delete one', 'touch delete two'):
+    for _msg in ('touch delete one', 'touch delete two', 'touch delete three'):
         tp.locator('.composer textarea').fill(_msg)
         tp.locator('.composer textarea').press('Enter')
-        tp.wait_for_timeout(300)
-    check('touch: the feed has items to delete', tp.locator('.feed-item').count() >= 2,
-          f'{tp.locator(".feed-item").count()} items')
-    # Cause A. `.del` is opacity:0 revealed by :hover/:focus-within, and the sheet's single
-    # (hover: none) block covered .tile-ctl only, so on a phone the control was permanently
-    # invisible while still taking taps. Presence in the DOM is exactly the proxy that hid
-    # this, so the assertion is the COMPUTED opacity.
-    tdel = tp.locator('.feed-item').last.locator('button.del')
-    topac = tp.evaluate("() => { const d = [...document.querySelectorAll('.feed-item')].pop()"
-                        ".querySelector('button.del'); return d ? getComputedStyle(d).opacity : 'absent' }")
-    check('touch: the delete control is visible with no hover anywhere',
-          topac != 'absent' and float(topac) > 0.9, f'opacity={topac}')
-    # Cause B. A touch pointer is removed right after pointerup, so the `pointerleave`
-    # disarm fired at the end of every tap: the card armed and disarmed inside one gesture
-    # and the second tap re-armed instead of confirming. Both halves are asserted, because
-    # either one alone still leaves the control dead.
-    tbefore = tp.locator('.feed-item').count()
-    tdel.tap()
+        tp.wait_for_timeout(250)
+    _tn = tp.locator('.feed-item').count()
+    check('touch: the feed has items to delete', _tn >= 3, f'{_tn} items')
+    # Both directions are asserted on computed opacity, never on the node existing: the
+    # control is in the DOM either way, so presence cannot tell them apart.
+    _vis = tp.evaluate("""() => [...document.querySelectorAll('.feed-item > button.del')]
+        .filter(d => parseFloat(getComputedStyle(d).opacity) > 0.05).length""")
+    check('touch: no card wears a delete control until it is asked for',
+          _vis == 0, f'{_vis} of {_tn} showing one')
+    # ...and it still has to work. Tapping the card reveals and arms in one gesture.
+    tp.locator('.feed-item').last.tap(position={'x': 40, 'y': 8})
     tp.wait_for_timeout(250)
-    check('touch: one tap does NOT remove the card',
-          tp.locator('.feed-item').count() == tbefore,
-          f'{tp.locator(".feed-item").count()} items, was {tbefore}')
-    check('touch: one tap leaves the control armed',
+    tdel = tp.locator('.feed-item').last.locator('button.del')
+    _op = tp.evaluate("""() => { const d = [...document.querySelectorAll('.feed-item')].pop()
+        .querySelector('button.del'); return d ? getComputedStyle(d).opacity : 'absent' }""")
+    check('touch: tapping a card reveals that card\'s control',
+          _op != 'absent' and float(_op) > 0.9, f'opacity={_op}')
+    check('touch: exactly one card is revealed at a time',
+          tp.locator('.feed-item.revealed').count() == 1,
+          f'{tp.locator(".feed-item.revealed").count()} revealed')
+    check('touch: the revealing tap arms it, announced and not only coloured',
           'armed' in (tdel.get_attribute('class') or '')
           and tdel.get_attribute('aria-pressed') == 'true',
           f'class={tdel.get_attribute("class")!r} pressed={tdel.get_attribute("aria-pressed")!r}')
+    _tbefore = tp.locator('.feed-item').count()
     tdel.tap()
+    tp.wait_for_timeout(300)
+    check('touch: tapping the revealed control removes the card',
+          tp.locator('.feed-item').count() == _tbefore - 1,
+          f'{tp.locator(".feed-item").count()} items, was {_tbefore}')
+    # A tap that lands anywhere else has to put it away, or the quiet state only holds
+    # until the first accidental tap and the icons come back one card at a time.
+    tp.locator('.feed-item').first.tap(position={'x': 40, 'y': 8})
+    tp.wait_for_timeout(200)
+    check('touch: a card is revealed before the dismissing tap',
+          tp.locator('.feed-item.revealed').count() == 1)
+    tp.locator('.composer textarea').tap()
     tp.wait_for_timeout(250)
-    check('touch: the second tap removes the card',
-          tp.locator('.feed-item').count() == tbefore - 1,
-          f'{tp.locator(".feed-item").count()} items, was {tbefore}')
+    check('touch: a tap outside puts the control away again',
+          tp.locator('.feed-item.revealed').count() == 0,
+          f'{tp.locator(".feed-item.revealed").count()} still revealed')
+    # The devices & people drawer is the one topbar control with no second entry point, so
+    # it has to survive the shedding order down to a foldable cover screen. The room link
+    # sheds ahead of it because the address bar already carries the same invite.
+    _rt = tp.locator('.topbar button.roster-toggle')
+    check('touch: the devices & people button is on the bar at 344px',
+          _rt.count() == 1 and _rt.is_visible(), f'count={_rt.count()}')
+    _rt.tap()
+    tp.wait_for_timeout(400)
+    check('touch: it opens the drawer', tp.locator('.sidebar.open').count() == 1)
+    # A flex row shrinks its children before it overflows, so "no overflow" alone passes
+    # while a glyph is clipped inside its own button.
+    for _w in (320, 344, 360, 380, 390):
+        tp.set_viewport_size({'width': _w, 'height': 882})
+        tp.wait_for_timeout(250)
+        _bar = tp.evaluate("""() => { const t = document.querySelector('.topbar');
+            const box = t.getBoundingClientRect();
+            const kids = [...t.children].filter(k => getComputedStyle(k).display !== 'none');
+            const rb = t.querySelector('button.roster-toggle');
+            return { over: t.scrollWidth - t.clientWidth,
+                     clipped: kids.filter(k => k.scrollWidth > k.clientWidth + 1).map(k => k.className),
+                     outside: kids.filter(k => k.getBoundingClientRect().right > box.right + 0.5).map(k => k.className),
+                     roster: !!rb && getComputedStyle(rb).display !== 'none' } }""")
+        check(f'touch: topbar at {_w}px fits with nothing clipped or pushed off',
+              _bar['over'] <= 0 and not _bar['clipped'] and not _bar['outside'],
+              f"overflow={_bar['over']} clipped={_bar['clipped']} outside={_bar['outside']}")
+        check(f'touch: the drawer toggle survives at {_w}px', _bar['roster'])
     check('touch: no page error on the touch path', not terrs, ' | '.join(terrs)[:200])
     tctx.close()
 
     # --- on-screen keyboard: the shell insets by the occluded strip ---
-    # A headless browser cannot raise a real keyboard, and there is no honest way to pretend
-    # otherwise: nothing here proves the platform reports the geometry this code reads. What
-    # it does prove is the half that is ours, that a visualViewport shrinking by N moves the
-    # composer out from under it and leaves the feed on screen, driven through a stubbed
-    # visualViewport installed before the app boots.
+    # A headless browser cannot raise a real keyboard, so this covers only our half of the
+    # contract: a visualViewport that shrinks by N moves the composer out from under the
+    # occluded strip and leaves the feed on screen. Whether the platform reports that
+    # geometry is out of scope. Driven through a stub installed before the app boots.
     VV_STUB = """
     window.__vvH = window.innerHeight; window.__vvTop = 0;
     const t = new EventTarget();
@@ -2023,8 +2059,8 @@ with sync_playwright() as p:
           kopen['inset'].endswith('px') and abs(float(kopen['inset'][:-2]) - KB_PX) <= 2, str(kopen))
     check('keyboard: the composer bottom stays inside the visible area',
           kopen['composerBottom'] <= kopen['visibleBottom'] + 1, str(kopen))
-    # Insetting is only worth doing if it keeps the conversation too: scrolling the field
-    # into view in a shell that clips its overflow buys the composer at the feed's expense.
+    # Insetting has to keep the conversation too. Scrolling the field into view inside a
+    # shell that clips its overflow buys the composer at the feed's expense.
     check('keyboard: the feed is still on screen with the keyboard up',
           kopen['feedH'] > 40, str(kopen))
     kp.evaluate("window.__setVV(window.innerHeight, 0)")
@@ -2035,9 +2071,9 @@ with sync_playwright() as p:
     check('keyboard: no page error on the viewport path', not kerrs, ' | '.join(kerrs)[:200])
     kctx.close()
 
-    # Every browser without visualViewport (older Safari, any non-browser host) must get the
-    # layout it had before this existed, so the absent case is driven rather than reasoned
-    # about: the property stays at its 0px token and nothing throws on the way there.
+    # A browser without visualViewport (older Safari, any non-browser host) must still get
+    # the unshifted layout, so the absent case is driven rather than reasoned about: the
+    # property stays at its 0px token and nothing throws.
     nctx = browser.new_context(viewport={'width': 390, 'height': 844})
     npg = nctx.new_page()
     nerrs = []
@@ -2056,10 +2092,10 @@ with sync_playwright() as p:
     nctx.close()
 
     # --- scroll-to-bottom control ---
-    # addCard pins scrollTop to scrollHeight, so the feed follows new content, but after
-    # scrolling up there was no way back: no such control existed. Driven at a phone width
-    # because its one geometric constraint, never sitting on a card's own delete button, is
-    # a phone problem (at 390px that button moves INSIDE the card).
+    # addCard pins scrollTop to scrollHeight so the feed follows new content, but after
+    # scrolling up there was no way back. Driven at a phone width because its one geometric
+    # constraint, never sitting on a card's own delete button, is a phone problem: at 390px
+    # that button moves inside the card.
     sctx = browser.new_context(viewport={'width': 390, 'height': 844}, has_touch=True, is_mobile=True)
     spg = sctx.new_page()
     serrs = []
@@ -2077,9 +2113,9 @@ with sync_playwright() as p:
     for _i in range(26):
         spg.locator('.composer textarea').fill(f'scroll filler line {_i}')
         spg.locator('.composer textarea').press('Enter')
-    # Every one of those sends toasts "message queued", and the toast host is a real overlay
-    # over the lower half of the screen. Wait them out: hit-testing the control through a
-    # stack of toasts would answer a question about the toasts.
+    # Every one of those sends toasts "message queued", and the toast host is a real
+    # overlay across the lower half of the screen. Wait them out, or the hit tests below
+    # answer a question about the toasts instead of the control.
     for _ in range(40):
         if spg.locator('#toasts > *').count() == 0:
             break
@@ -2092,8 +2128,9 @@ with sync_playwright() as p:
           srest['over'] > 200 and srest['dist'] <= 4, str(srest))
     check('scroll: the control stays hidden while the feed sits at the bottom',
           not spg.locator(JUMP).is_visible(), str(srest))
-    # opacity:0 is exactly how the delete button shipped invisible AND still tappable, so
-    # the hidden state is asserted out of the hit tree rather than merely transparent.
+    # opacity:0 leaves an element invisible and still tappable, so the hidden state is
+    # asserted out of the hit tree (visibility, pointer-events, elementFromPoint) rather
+    # than merely transparent.
     shid = spg.evaluate("""() => { const b = document.querySelector('.feed .jump-latest')
       if (!b) return 'absent'
       const cs = getComputedStyle(b), r = b.getBoundingClientRect()
@@ -2125,8 +2162,8 @@ with sync_playwright() as p:
         sover = [d for d in sgeo['dels']
                  if sj['x'] < d['x'] + d['w'] and d['x'] < sj['x'] + sj['w']
                  and sj['y'] < d['y'] + d['h'] and d['y'] < sj['y'] + sj['h']]
-        # Without this the overlap check below passes on a feed that has no delete controls
-        # on screen at all, which is the proxy assertion this project keeps shipping.
+        # Without this the overlap check below passes on a feed with no delete controls on
+        # screen at all, which makes it a proxy rather than a test.
         check('scroll: there really are delete controls on screen to collide with',
               len(sgeo['dels']) >= 2, f"{len(sgeo['dels'])} on screen")
         check('scroll: the control does not overlap a delete control at 390px',
@@ -2134,8 +2171,8 @@ with sync_playwright() as p:
         check('scroll: the control clears the composer',
               sj['y'] + sj['h'] <= sgeo['compTop'] + 1,
               f"jump bottom={sj['y'] + sj['h']} composer top={sgeo['compTop']}")
-        # `scrollbar-gutter: stable both-edges` is what keeps the feed and the composer on
-        # one column; a control hanging outside that column is what breaks the alignment.
+        # `scrollbar-gutter: stable both-edges` keeps the feed and the composer on one
+        # column, and a control hanging outside that column breaks the alignment.
         check('scroll: the control stays inside the shared feed/composer column',
               sj['x'] >= max(sgeo['cardLeft'], sgeo['compLeft']) - 1
               and sj['x'] + sj['w'] <= min(sgeo['cardRight'], sgeo['compRight']) + 1,
@@ -2148,9 +2185,9 @@ with sync_playwright() as p:
           return at === b ? true : (at ? at.className || at.tagName : 'nothing') }""")
         check('scroll: the visible control is the topmost thing at its own centre',
               stop is True, str(stop))
-        # A real tap at real coordinates. locator.tap() first scrolls its target into view,
-        # and for a sticky element that means scrolling the feed to the bottom, which is the
-        # one thing that makes this control disappear before the tap lands.
+        # A real tap at real coordinates. locator.tap() scrolls its target into view
+        # first, and for a sticky element that means scrolling the feed to the bottom,
+        # which is the one thing that makes this control disappear before the tap lands.
         spg.touchscreen.tap(round(sj['x'] + sj['w'] / 2), round(sj['y'] + sj['h'] / 2))
     sland = spg.evaluate(FEED_DIST)
     for _ in range(24):
@@ -2165,10 +2202,10 @@ with sync_playwright() as p:
     check('scroll: no page error on the scroll-control path', not serrs, ' | '.join(serrs)[:200])
     sctx.close()
 
-    # --- clipboard: the app opens ON the Clipboard tool, and keeps it current ---
-    # Driven with REAL clipboard content through the real boot path, never by mounting a
-    # card: the whole report is that the app did not open with what had been copied. The
-    # headless clipboard is one surface for the entire browser, so this block writes known
+    # --- clipboard: the app opens on the Clipboard tool, and keeps it current ---
+    # Driven with real clipboard content through the real boot path rather than by mounting
+    # a card, since the behaviour under test is what boot does with what was copied. The
+    # headless clipboard is one surface for the whole browser, so this block writes known
     # content and blanks it again at the end.
     CLIP_TEXT = 'urletc clipboard boot probe ' + os.urandom(3).hex()
     CLIP_TEXT2 = 'urletc clipboard refocus probe ' + os.urandom(3).hex()
@@ -2181,8 +2218,8 @@ with sync_playwright() as p:
       const blob = await new Promise(r => c.toBlob(r, 'image/png'))
       await navigator.clipboard.write([new ClipboardItem({'image/png': blob})])
       return blob.size }"""
-    # Count reads at the API, so "nothing was read" is proved by the call never happening
-    # and not inferred from an absent card, which is what a merely broken read looks like.
+    # Count reads at the API, so "nothing was read" rests on the call never happening
+    # rather than on an absent card, which is also what a broken read looks like.
     COUNT_READS = """
       window.__clipReads = 0
       const orig = navigator.clipboard && navigator.clipboard.read
@@ -2190,9 +2227,9 @@ with sync_playwright() as p:
         value: function () { window.__clipReads++; return orig.apply(this, arguments) }})
     """
 
-    # Cards, not feed items: a peer connecting mid-window writes a `sys` line into the same
-    # feed, and counting those would make "nothing was appended" fail for a reason that has
-    # nothing to do with the clipboard.
+    # Cards rather than feed items: a peer connecting mid-window writes a `sys` line into
+    # the same feed, and counting those makes "nothing was appended" fail for a reason
+    # unrelated to the clipboard.
     def card_count(pg):
         return pg.locator('.feed-item details.card').count()
 
@@ -2216,7 +2253,7 @@ with sync_playwright() as p:
           gstate == 'granted', str(gstate))
     check('clipboard: boot really read the clipboard',
           (gpg.evaluate('window.__clipReads') or 0) >= 1, str(gpg.evaluate('window.__clipReads')))
-    check('clipboard: boot opens the Clipboard TOOL card, not a detection card',
+    check('clipboard: boot opens the clipboard tool card, not a capability-detection card',
           gpg.locator(CLIP_TOOL).count() == 1,
           f'{gpg.locator(CLIP_TOOL).count()} tool cards; feed={feed_text(gpg)[:200]!r}')
     check('clipboard: the card shows the text that was on the clipboard',
@@ -2244,7 +2281,7 @@ with sync_playwright() as p:
         if gpg.locator(CLIP_TOOL + ' img.preview').count() >= 1:
             gimg = True
             break
-    check('clipboard: an image copied AFTER load surfaces on refocus', gimg,
+    check('clipboard: an image copied after load surfaces on refocus', gimg,
           f'feed={feed_text(gpg)[:200]!r}')
     check('clipboard: refocus re-read the clipboard instead of reusing the boot read',
           (gpg.evaluate('window.__clipReads') or 0) > greads,
@@ -2262,11 +2299,11 @@ with sync_playwright() as p:
     check('clipboard: loading and refocusing raised no dialog', not gdialogs, str(gdialogs))
     gctx.close()
 
-    # The other half of the same story, and the half the console owns: with a blank clipboard
-    # at load there is no card, so content copied later is what has to open one. The tool
-    # keeps an OPEN card current (its own re-scan-on-focus switch); the console decides
-    # whether there is a card at all. Two owners for one job is how a tab collects a new card
-    # on every focus, so the dedupe is asserted over repeated focuses.
+    # The half the console owns: with a blank clipboard at load there is no card, so
+    # content copied later has to open one. The tool keeps an already-open card current via
+    # its re-scan-on-focus switch, while the console decides whether there is a card at
+    # all. Two owners for one job makes a tab collect a new card on every focus, so the
+    # dedupe is asserted over repeated focuses.
     rctx = browser.new_context(viewport={'width': 900, 'height': 820},
                                permissions=['clipboard-read', 'clipboard-write'])
     rpg = rctx.new_page()
@@ -2300,8 +2337,8 @@ with sync_playwright() as p:
     check('clipboard: no page error on the refocus path', not rerrs, ' | '.join(rerrs)[:200])
     rctx.close()
 
-    # The gate itself. Without the permission nothing may be read, at boot or on refocus, so
-    # that neither loading the page nor returning to the tab can be what raises a prompt.
+    # The gate itself: without the permission nothing may be read, at boot or on refocus,
+    # so neither loading the page nor returning to the tab can raise a prompt.
     uctx = browser.new_context(viewport={'width': 900, 'height': 820})
     upg = uctx.new_page()
     uerrs, udialogs = [], []
@@ -2323,16 +2360,68 @@ with sync_playwright() as p:
     check('clipboard: no page error on the ungranted path', not uerrs, ' | '.join(uerrs)[:200])
     uctx.close()
 
-    # Leave the shared headless clipboard blank: the blocks after this one are not about it.
+    # --- clipboard: a URL on the clipboard, and the auto-copy switch ---
+    # Boot opening the Clipboard tool card instead of a detection card moved the URL case
+    # onto a surface that only ran parseUrl, so the card on arrival answered "what is in
+    # this link" and never "is it safe", while the pasted-link card in the feed answered
+    # the latter. Same order as the URL Check tool: blocklist, structural read, then parts.
+    lctx = browser.new_context(viewport={'width': 900, 'height': 900},
+                               permissions=['clipboard-read', 'clipboard-write'])
+    lpg = lctx.new_page()
+    lerrs = []
+    lpg.on('pageerror', lambda e: lerrs.append(str(e)))
+    lpg.goto(BASE)
+    lpg.wait_for_selector('.composer', timeout=30000)
+    lpg.evaluate("() => navigator.clipboard.writeText('https://urletc.vercel.app/docs')")
+    lpg.evaluate("location.hash = '#/t/clipboard'")
+    lpg.wait_for_selector(CLIP_TOOL, timeout=20000)
+    lcard = lpg.locator(CLIP_TOOL).last
+    _scan = lcard.locator('button', has_text='Scan clipboard')
+    if _scan.count():
+        _scan.first.click()
+    lpg.wait_for_timeout(3500)
+    check('clipboard: a URL on the clipboard gets the structural verdict, not just a parse',
+          lcard.locator('.url-check-structural').count() >= 1,
+          lcard.inner_text()[:220].replace('\n', ' / '))
+    _ltxt = lcard.inner_text().lower()
+    check('clipboard: the blocklist answer is on the card',
+          'listed' in _ltxt or 'blocklist' in _ltxt or 'feeds unavailable' in _ltxt,
+          _ltxt[:220].replace('\n', ' / '))
+    check('clipboard: the parts breakdown is kept, under the verdict and not instead of it',
+          lcard.locator('.url-check-parts').count() >= 1)
+    # The switch the console reads before it overwrites the clipboard with OCR output. The
+    # contract is that it moves the preference the other surface reads, not that a checkbox
+    # exists, so it is asserted in Settings in both directions rather than in storage.
+    _ac = lcard.locator('label.row', has_text='images').locator('input[type=checkbox]')
+    check('clipboard: the auto-copy switch is on the clipboard card itself',
+          _ac.count() == 1, f'{_ac.count()} matching switches')
+    if _ac.count() == 1:
+        check('clipboard: it starts checked, matching the shipped default', _ac.is_checked())
+        _ac.uncheck()
+        lpg.wait_for_timeout(600)
+        lpg.evaluate("location.hash = '#/t/settings'")
+        lpg.wait_for_selector('select.ocr-select', timeout=20000)
+        lpg.wait_for_timeout(400)
+        _sel = lpg.locator('select.ocr-select').last
+        check('clipboard: unticking it moves the preference the console actually reads',
+              _sel.input_value() == 'show', f'settings select = {_sel.input_value()!r}')
+        _sel.select_option('copy')
+        lpg.wait_for_timeout(500)
+        check('clipboard: changing it in Settings updates the open clipboard card live',
+              _ac.is_checked(), f'checked={_ac.is_checked()}')
+    check('clipboard: no page error on the URL and auto-copy path', not lerrs, ' | '.join(lerrs)[:200])
+    lctx.close()
+
+    # Leave the shared headless clipboard blank; later blocks do not expect content on it.
     page.evaluate("() => navigator.clipboard.writeText(' ')")
 
-    # --- topbar geometry after the theme button left ---
-    # The sheet sheds topbar children at 560, 470 and 380 and its comment was written when
-    # the theme toggle had to survive every one of those steps for lack of another entry
-    # point. Settings is that entry point now, so the rules were re-measured rather than
-    # assumed: the bar must still not overflow, it must still shed the brand, the status
-    # chip and the roster toggle in that order, and the theme button must be gone at every
-    # width (not merely at the one the desktop run happens to use).
+    # --- topbar geometry after the theme button was removed ---
+    # The sheet sheds topbar children at 560, 470 and 360, ordered by which controls have a
+    # second entry point elsewhere. The drawer toggle has none, and was shed at 380 until
+    # the room link took its place, since the address bar already carries the same invite.
+    # Asserted at every width rather than the one the desktop run happens to use: the bar
+    # must not overflow, it must shed brand, status chip and room link in that order, the
+    # drawer toggle must survive all of them, and the theme button must be gone everywhere.
     vp0 = page.viewport_size
     TB = ("() => { const t = document.querySelector('.topbar');"
           " const vis = [...t.children].filter(c => getComputedStyle(c).display !== 'none');"
@@ -2346,31 +2435,33 @@ with sync_playwright() as p:
           "    .filter(b => (b.title || '').includes('black and white')).length,"
           "  brand: vis.some(c => c.classList.contains('brand')),"
           "  badge: vis.some(c => c.classList.contains('badge')),"
+          "  link: vis.some(c => c.classList.contains('room-link')),"
           "  roster: vis.some(c => c.classList.contains('roster-toggle'))} }")
-    # (width, brand visible, roster toggle visible). The status chip is only asserted where
-    # a rule hides it outright: above 470 its visibility is connection state, not layout.
-    for w, want_brand, want_roster in ((360, False, False), (390, False, True), (768, True, True)):
+    # (width, brand visible, room link visible). The status chip is only asserted where a
+    # rule hides it outright; above 470 its visibility is connection state, not layout.
+    for w, want_brand, want_link in ((320, False, False), (360, False, False), (390, False, True), (768, True, True)):
         page.set_viewport_size({'width': w, 'height': 720})
         page.wait_for_timeout(350)
         tb = page.evaluate(TB)
         check(f'topbar does not overflow at {w}px', not tb['over'] and tb['slack'] >= 0, str(tb))
         check(f'topbar sheds what the sheet claims at {w}px',
-              tb['brand'] == want_brand and tb['roster'] == want_roster
+              tb['brand'] == want_brand and tb['link'] == want_link
               and (tb['badge'] is False or w > 470), str(tb))
+        check(f'the drawer toggle is never shed, at {w}px', tb['roster'], str(tb))
         check(f'no theme button on the topbar at {w}px', tb['theme'] == 0, str(tb))
     page.set_viewport_size(vp0)
     page.wait_for_timeout(300)
 
     # --- service worker registers and its precache install does not reject ---
-    # sw.js is a THIRD execution context: an unhandled rejection inside it reaches neither
-    # page.on('console') nor page.on('pageerror'), which is exactly how
+    # sw.js is a third execution context, and an unhandled rejection inside it reaches
+    # neither page.on('console') nor page.on('pageerror'). That is how
     #   InvalidStateError: Cache.addAll(): duplicate requests (.../manifest.webmanifest)
-    # shipped unseen. vite-plugin-pwa injects its generated webmanifest into the precache
-    # list by itself, and vite.config.ts named it in globPatterns too, so the same URL was
-    # in the list twice, addAll rejected, the whole install event failed and offline
-    # support was dead on every load. Asserted three ways: the worker actually reaches
-    # "activated" (a rejected install never gets there, so `ready` never resolves), the
-    # served list has no duplicate URL, and addAll over that exact list resolves.
+    # went unseen: vite-plugin-pwa injects its generated webmanifest into the precache list
+    # itself and vite.config.ts also named it in globPatterns, so the URL appeared twice,
+    # addAll rejected, the install event failed and offline support was dead on every load.
+    # Asserted three ways: the worker reaches "activated" (a rejected install never does,
+    # so `ready` never resolves), the served list holds no duplicate URL, and addAll over
+    # that exact list resolves.
     sw = page.evaluate(r"""async () => {
       if (!('serviceWorker' in navigator)) return { err: 'no serviceWorker support' }
       const reg = await Promise.race([
@@ -2403,32 +2494,30 @@ with sync_playwright() as p:
     check('precache list holds manifest.webmanifest exactly once', sw.get('manifest') == 1, str(sw.get('manifest')))
     check('precache Cache.addAll resolves (no duplicate-requests InvalidStateError)',
           sw.get('addAll') == 'ok', str(sw.get('addAll'))[:160])
-    # Belt and braces for whichever context does surface it: the rejection names its class.
+    # Backstop for whichever context does surface it, since the rejection names its class.
     sw_reject = [l for l in logs
                  if 'addall' in l.lower() or 'duplicate requests' in l.lower() or 'invalidstateerror' in l.lower()]
     check('no Cache.addAll rejection anywhere in the run', not sw_reject, ' | '.join(sw_reject[:2])[:200])
-    # Only favicon is dropped. Relay/WebSocket lines used to be filtered out here, which
-    # is how a green suite coexisted with a devtools console full of red: every announce
-    # to a rate-limiting or proof-of-work relay logs a line, so a broken relay list was
-    # invisible to the suite AND meant discovery did not work at all.
+    # Only favicon is dropped. Filtering relay or WebSocket lines here would let a passing
+    # run coexist with a console full of red: every announce to a rate-limiting or
+    # proof-of-work relay logs a line, and a relay list refusing traffic is fatal to
+    # discovery.
     interesting = [l for l in logs if 'error' in l.lower() and 'favicon' not in l]
-    # A Trusted Types or CSP violation means a real feature is dead, so it fails the run
-    # instead of scrolling past.
-    # 'trustedhtml' is listed explicitly: the sink error reads "This document requires
-    # 'TrustedHTML' assignment", which matches neither 'trustedscript' nor 'trusted type',
-    # so a dead HTML sink used to slip past this filter entirely.
+    # A Trusted Types or CSP violation means a feature is dead, so it fails the run rather
+    # than scrolling past. 'trustedhtml' is matched explicitly because the sink error reads
+    # "This document requires 'TrustedHTML' assignment", which matches neither
+    # 'trustedscript' nor 'trusted type'.
     fatal = [l for l in interesting
              if 'trustedscript' in l.lower() or 'trustedhtml' in l.lower()
              or 'trusted type' in l.lower()
              or 'content security policy' in l.lower() or 'refused to load' in l.lower()]
     check('no Trusted Types or CSP violations in the console', not fatal, ' | '.join(fatal[:3]))
 
-    # Rendezvous relays are third-party and genuinely flap, and the app is built to
-    # tolerate that, so a few lines are fair. A wall of them is not: it means the relay
-    # list is refusing traffic (rate limit, proof-of-work, dead host) rather than one
-    # relay having a bad minute. Counted over the whole run, warnings included, because
-    # Trystero reports a refused announce via console.warn and the browser reports a
-    # failed socket via console.error.
+    # Rendezvous relays are third-party and do flap, and the app tolerates that, so a few
+    # lines are fair. A wall of them means the relay list is refusing traffic (rate limit,
+    # proof-of-work, dead host) rather than one relay having a bad minute. Counted over the
+    # whole run and including warnings, since Trystero reports a refused announce through
+    # console.warn while the browser reports a failed socket through console.error.
     relay_noise = [l for l in logs
                    if (l.startswith('error') or l.startswith('warning') or l.startswith('pageerror'))
                    and ('relay' in l.lower() or 'websocket' in l.lower() or 'wss://' in l.lower())]
@@ -2436,9 +2525,9 @@ with sync_playwright() as p:
           len(relay_noise) <= RELAY_NOISE_BUDGET,
           f'{len(relay_noise)} lines, e.g. ' + ' | '.join(l[:90] for l in relay_noise[:3]))
 
-    # The relay list lives in src/p2p/session.ts but only works if connect-src allows it.
-    # Drift between the two silently kills P2P, so assert the served CSP covers every
-    # relay the shipped bundle actually dials.
+    # The relay list lives in src/p2p/session.ts but only works if connect-src allows it,
+    # and drift between the two kills P2P silently, so the served CSP has to cover every
+    # relay the bundle dials.
     csp = (page.evaluate("() => fetch(location.href).then(r => r.headers.get('content-security-policy') || '')")
            or '')
     missing = sorted(h for h in relay_hosts() if csp and f'wss://{h}' not in csp)

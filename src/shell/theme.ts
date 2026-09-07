@@ -1,5 +1,5 @@
-// Monochrome theme: dark default, light toggle. Persisted in localStorage (not
-// sensitive, and we want it applied synchronously before paint).
+// Monochrome theme: dark default, light toggle. Persisted in localStorage (not sensitive,
+// and needed synchronously before paint).
 
 export type Theme = 'dark' | 'light'
 const KEY = 'wt-theme'

@@ -1,7 +1,7 @@
-// Clipboard content detection + routing (ARCHITECTURE section 4.1). Pure detection logic;
-// the actual clipboard *read* goes through ToolContext.clipboard (permission-gated),
-// so this module never touches navigator directly. Routing by ClipboardItem.types
-// first; text heuristics only for text/plain, capped at the first 10 KB.
+// Clipboard content detection + routing (ARCHITECTURE section 4.1). Detection only: the
+// clipboard read itself goes through ToolContext.clipboard (permission-gated), so this
+// module never touches navigator. Routes on ClipboardItem.types first; text heuristics
+// apply only to text/plain, capped at the first 10 KB.
 
 export type DetectedKind = 'image' | 'html' | 'json' | 'url' | 'text'
 

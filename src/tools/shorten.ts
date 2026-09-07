@@ -1,16 +1,16 @@
-// Link shortener. This is the ONE built-in that sends your data off the device: the URL
-// you submit is posted to spoo.me, which mints and stores the short link. Everything else
-// in this app runs locally, so that disclosure is stated in the card itself rather than
-// buried in a doc, and nothing is sent until you press the button.
+// Link shortener, the one built-in that sends data off the device. The submitted URL is
+// posted to spoo.me, which mints and stores the short link. Everything else in this app
+// runs locally, so that disclosure is stated in the card itself rather than in a doc, and
+// nothing is sent until the button is pressed.
 //
-// The provider is not interchangeable. is.gd, ulvis.net and cleanuri were all checked from
-// a real browser and none of them answers with CORS headers, so a client-only page cannot
-// read their response at all. spoo.me accepts a form-encoded POST and answers JSON with
-// permissive CORS, which is why it is the one wired up here. Its request is deliberately
-// CORS-"simple" (form content type + Accept), so there is no preflight to be refused.
+// The provider is not interchangeable. is.gd, ulvis.net and cleanuri were checked from a
+// browser and none answers with CORS headers, so a client-only page cannot read their
+// response. spoo.me accepts a form-encoded POST and answers JSON with permissive CORS.
+// Its request is kept CORS-simple (form content type plus Accept), so there is no
+// preflight to be refused.
 //
-// History is intentionally session-only and lives in the DOM of this card: no 'storage'
-// permission is declared, so the list of things you shortened does not outlive the tab.
+// History is session-only and lives in the DOM of this card. No 'storage' permission is
+// declared, so the list of shortened links does not outlive the tab.
 
 import type { ToolContext, ToolModule } from '../shell/registry'
 import { button, copyButton, el } from '../shell/ui'
@@ -67,9 +67,9 @@ function readError(body: unknown, status: number): string {
 }
 
 /**
- * POST the URL and return the short link. Rejects with a message meant to be shown, never
- * logged: the caller renders it in the card, so a dead network is a visible outcome rather
- * than a red console line.
+ * POST the URL and return the short link. Rejects with a message meant to be shown rather
+ * than logged, since the caller renders it in the card, so a dead network is a visible
+ * outcome rather than a red console line.
  */
 export async function shortenUrl(target: string, signal?: AbortSignal): Promise<string> {
   let res: Response
@@ -89,14 +89,14 @@ export async function shortenUrl(target: string, signal?: AbortSignal): Promise<
   try {
     body = JSON.parse(text)
   } catch {
-    // Provider answered with something that is not JSON (an HTML error page, usually).
+    // Provider answered with something that is not JSON, usually an HTML error page.
   }
   const short = readShortUrl(body)
   if (!res.ok || !short) throw new Error(readError(body, res.status))
   return short
 }
 
-// Per-card teardown keyed by container: launchTool shares one cached module across every
+// Per-card teardown keyed by container. launchTool shares one cached module across every
 // open card, so the in-flight request handle must be per-activation. A module-level
 // controller would let a second card abort the first card's request.
 const detachers = new WeakMap<HTMLElement, () => void>()
@@ -153,7 +153,7 @@ const tool: ToolModule = {
       } catch (e) {
         if (mine.signal.aborted) return
         result.classList.add('hidden')
-        // The message is rendered, never logged: a failed provider is a UI state here.
+        // The message is rendered rather than logged; a failed provider is a UI state.
         status.textContent = e instanceof Error ? e.message : 'Shortening failed.'
       } finally {
         if (inflight === mine) inflight = null

@@ -1,13 +1,13 @@
 // Live, on-device captions for the local mic, reusing the Whisper STT worker
-// (ARCHITECTURE section 4.3; nothing leaves the device). The mic track is CLONED
-// and recorded in ~4s standalone takes (a fresh MediaRecorder per take, because
-// continuation chunks of one recording are not independently decodable). Each take
-// decodes to 16 kHz mono, then Whisper-tiny. Silent takes are skipped cheaply by an
-// RMS gate. If transcription falls behind, only the SINGLE most-recent take is kept,
-// so captions stay current instead of lagging or queueing unboundedly. The worker +
-// decode AudioContext are torn down by disposeCaptions() when captioning ends.
+// (ARCHITECTURE section 4.3; nothing leaves the device). The mic track is cloned and
+// recorded in ~4s standalone takes, with a fresh MediaRecorder per take, because
+// continuation chunks of one recording are not independently decodable. Each take decodes
+// to 16 kHz mono, then Whisper-tiny. Silent takes are skipped cheaply by an RMS gate. If
+// transcription falls behind, only the most-recent take is kept, so captions stay current
+// instead of lagging or queueing unboundedly. The worker and decode AudioContext are torn
+// down by disposeCaptions() when captioning ends.
 
-const MODEL = 'Xenova/whisper-tiny' // smallest model: realtime latency beats accuracy here
+const MODEL = 'Xenova/whisper-tiny' // smallest model; realtime latency matters more than accuracy
 
 let worker: Worker | null = null
 let decodeCtx: AudioContext | null = null
@@ -23,14 +23,14 @@ function getWorker(): Worker {
 }
 
 function getDecodeCtx(): AudioContext {
-  // One reused context for the whole session: decodeAudioData accepts a shared
-  // context, and this avoids creating/closing an AudioContext every ~4s take.
+  // One reused context for the whole session. decodeAudioData accepts a shared context,
+  // which avoids creating and closing an AudioContext every ~4s take.
   decodeCtx ??= new AudioContext()
   return decodeCtx
 }
 
-// Whisper takes a language NAME ('portuguese'), not a BCP-47 tag. Derive it from the
-// browser locale so a pt-BR user gets Portuguese instead of tiny's shaky auto-detect.
+// Whisper takes a language name ('portuguese') rather than a BCP-47 tag. Derived from the
+// browser locale so a pt-BR user gets Portuguese instead of tiny's weak auto-detect.
 function captionLanguage(): string {
   const lang = (navigator.language || '').toLowerCase().split('-')[0]
   const map: Record<string, string> = {
@@ -109,10 +109,10 @@ export function startCaptions(stream: MediaStream, onLine: (text: string) => voi
   let stopped = false
   let rec: MediaRecorder | null = null
   let busy = false
-  let pending: Blob | null = null // single-slot: only the newest take waits
+  let pending: Blob | null = null // single slot, so only the newest take waits
 
   const enqueue = (blob: Blob) => {
-    if (stopped || blob.size < 2000) return // empty/too-short take: skip
+    if (stopped || blob.size < 2000) return // empty or too-short take, skipped
     if (busy) {
       pending = blob
       return
@@ -154,7 +154,7 @@ export function startCaptions(stream: MediaStream, onLine: (text: string) => voi
     }
     r.onstop = () => {
       const blob = new Blob(chunks, { type: chunks[0]?.type || 'audio/webm' })
-      cycle() // next take starts immediately; the capture gap stays tiny
+      cycle() // next take starts immediately, keeping the capture gap small
       enqueue(blob)
     }
     r.start()
@@ -178,8 +178,8 @@ export function startCaptions(stream: MediaStream, onLine: (text: string) => voi
   }
 }
 
-/** Free the Whisper worker + decode context; models stay cached in the browser.
- *  The console calls this when captioning ends so nothing lingers for the page's life. */
+/** Free the Whisper worker and decode context; models stay cached in the browser. The
+ *  console calls this when captioning ends so nothing lingers for the page's life. */
 export function disposeCaptions(): void {
   worker?.terminate()
   worker = null

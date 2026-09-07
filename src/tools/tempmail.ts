@@ -1,11 +1,11 @@
-// Disposable inbox. Client-only like the rest of the app: the browser talks to the
-// provider directly, there is no urletc backend in the path.
+// Disposable inbox. Client-only like the rest of the app, so the browser talks to the
+// provider directly and there is no urletc backend in the path.
 //
-// The provider is load-bearing and was settled from a REAL BROWSER, not curl. mail.tm,
-// tempmail.lol, etempmail, 1secmail and ulvis all answer curl happily and then fail a
-// page fetch (no CORS headers), so a working curl proves nothing here. api.mail.gw sends
-// the headers, so it is the one; swapping it means re-testing in a browser first, and
-// adding the new origin to connect-src in BOTH vercel.json and vite.config.ts.
+// The provider choice is load-bearing and was settled by testing in a browser rather than
+// with curl. mail.tm, tempmail.lol, etempmail, 1secmail and ulvis all answer curl happily
+// and then fail a page fetch for want of CORS headers, so a working curl proves nothing
+// here. api.mail.gw sends the headers. Swapping it means re-testing in a browser first and
+// adding the new origin to connect-src in both vercel.json and vite.config.ts.
 //
 // Five calls make the whole tool:
 //   GET  /domains        pick a live domain
@@ -16,13 +16,13 @@
 // Collections come back as a hydra envelope by default and as a bare array when the
 // request sets Accept: application/json, so `members()` accepts either.
 //
-// The receive path is verified, not assumed: an address claimed by this tool in a real
-// browser was sent a real message over SMTP by a third party, and it appeared in the card
-// within one poll with nothing clicked. So "no mail arrived" means no mail was sent, or
-// one of the states below was hit. Each of them now says which.
+// The receive path is verified end to end: an address claimed by this tool in a browser
+// was sent a message over SMTP by a third party and it appeared in the card within one
+// poll with nothing clicked. So "no mail arrived" means no mail was sent, or one of the
+// states below was hit, and each of those says which.
 //
-// Nothing here may write to the console: the e2e suite fails the run on a console error,
-// and a free third-party service WILL be down or rate limiting sometimes. Every failure
+// Nothing here may write to the console. The e2e suite fails the run on a console error,
+// and a free third-party service will be down or rate limiting sometimes, so every failure
 // path ends in a sentence in the status line instead.
 
 import type { ToolContext, ToolModule } from '../shell/registry'
@@ -54,7 +54,7 @@ interface ReqOpts {
   signal?: AbortSignal
 }
 
-/** status 0 means "no answer at all": offline, DNS, CORS, CSP or an aborted teardown. */
+/** status 0 means no answer at all: offline, DNS, CORS, CSP or an aborted teardown. */
 type Res<T> = { ok: true; data: T } | { ok: false; status: number }
 
 type Outcome = 'ok' | 'auth' | 'down' | 'limited'
@@ -85,8 +85,8 @@ async function req<T>(path: string, o: ReqOpts = {}): Promise<Res<T>> {
     if (!r.ok) return { ok: false, status: r.status }
     return { ok: true, data: (await r.json()) as T }
   } catch {
-    // Swallowed on purpose. A rejected fetch here is normal operation for a free service,
-    // and re-throwing or logging it would put red in a console the suite treats as fatal.
+    // Swallowed on purpose. A rejected fetch here is normal for a free service, and
+    // re-throwing or logging it would put red in a console the suite treats as fatal.
     return { ok: false, status: 0 }
   } finally {
     window.clearTimeout(timer)
@@ -94,7 +94,7 @@ async function req<T>(path: string, o: ReqOpts = {}): Promise<Res<T>> {
   }
 }
 
-/** Collection payloads: hydra envelope by default, bare array under Accept: application/json. */
+/** Collection payloads. Hydra envelope by default, bare array under Accept: application/json. */
 function members<T>(data: unknown): T[] {
   if (Array.isArray(data)) return data as T[]
   const m = (data as { 'hydra:member'?: unknown } | null)?.['hydra:member']
@@ -114,7 +114,7 @@ function randomText(n: number, alphabet: string): string {
 /**
  * `from` is declared as an array of strings in the provider's own OpenAPI and arrives as
  * {address, name} in practice, so accept object, string or array. A shape change then
- * degrades to a blank label instead of printing "[object Object]" at the user.
+ * degrades to a blank label instead of printing "[object Object]".
  */
 function addressOf(v: unknown): string {
   if (typeof v === 'string') return v
@@ -170,8 +170,8 @@ async function issue(signal: AbortSignal): Promise<{ ok: true; account: Account 
   const domain = members<{ domain?: unknown; isActive?: unknown }>(d.data).find((x) => x.isActive === true && str(x.domain))?.domain
   if (!str(domain)) return fail(-1, 'The mail service has no active domain right now.')
   const password = randomText(20, ALNUM)
-  // A collision on a 10-character local part is vanishingly unlikely, but 422 is the
-  // provider's "address taken" and retrying is cheaper than telling the user to click again.
+  // A collision on a 10-character local part is very unlikely, but 422 is the provider's
+  // "address taken" and retrying is cheaper than asking for another click.
   for (let attempt = 0; attempt < 3; attempt++) {
     const address = `${randomText(1, LETTERS)}${randomText(9, ALNUM)}@${str(domain)}`
     const acc = await req<unknown>('/accounts', { method: 'POST', body: JSON.stringify({ address, password }), signal })
@@ -179,17 +179,17 @@ async function issue(signal: AbortSignal): Promise<{ ok: true; account: Account 
       if (acc.status === 422) continue
       return fail(acc.status)
     }
-    // The account now EXISTS on the provider and its address is already receiving. Failing
-    // the token exchange here used to throw the whole thing away and claim a second one,
-    // which orphaned a live inbox on every transient blip; hand back the credentials with
-    // an empty token instead and let the caller log in on its next pass.
+    // The account already exists on the provider and its address is already receiving.
+    // Failing the token exchange here used to throw it away and claim a second one, which
+    // orphaned a live inbox on every transient blip. Hand back the credentials with an
+    // empty token instead and let the caller log in on its next pass.
     const t = await login(address, password, signal)
     return { ok: true, account: { address, password, token: t.token } }
   }
   return fail(-1, 'Every generated address was already taken. Use New address to retry.')
 }
 
-// Per-card teardown keyed by the container. launchTool shares ONE cached module instance
+// Per-card teardown keyed by the container. launchTool shares one cached module instance
 // across every open card, so a module-level timer or account would let a second card
 // clobber the first's poll loop and leak it.
 const detachers = new WeakMap<HTMLElement, () => void>()
@@ -205,10 +205,9 @@ const tool: ToolModule = {
     let pollMs = POLL_MS
     let busy = false
     let openId = ''
-    // A card scrolled out of the feed, or collapsed, is not being read by anyone, so it
-    // stops polling exactly like a hidden tab does. Without this the card keeps calling a
-    // free service for the whole session from somewhere off screen, and its traffic lands
-    // in the middle of whatever the user is actually doing.
+    // A card scrolled out of the feed, or collapsed, stops polling exactly like a hidden
+    // tab does. Without this the card keeps calling a free service for the whole session
+    // from off screen.
     let onScreen = true
     // Set by deactivate. Every await below re-checks it, so a late response can never
     // write into a container the console has already torn down.
@@ -231,10 +230,10 @@ const tool: ToolModule = {
     }
 
     // ctx.storage is the gated facade and the vault can be locked behind a passphrase, so
-    // persistence is best effort: a failure costs the address on reload, never the session.
-    // It is not silent, though. A locked vault makes every reload claim a DIFFERENT
+    // persistence is best effort and a failure costs the address on reload, not the
+    // session. It is reported, because a locked vault makes every reload claim a different
     // address, so mail sent to the one on screen lands in an inbox this card can no longer
-    // open, which reads exactly like "the mail never arrived". The status line says so.
+    // open, which looks like "the mail never arrived".
     let persists = true
     const save = async (a: Account) => {
       try {
@@ -266,12 +265,12 @@ const tool: ToolModule = {
     const schedule = () => {
       window.clearTimeout(timer)
       timer = 0
-      // A hidden tab or an off-screen card must not keep hammering a free service, and a
+      // A hidden tab or an off-screen card must not keep calling a free service, and a
       // torn-down card must not poll at all. Each re-arms through its own listener rather
       // than ticking on regardless.
       //
-      // Note there is no `!account` guard: a card that has NO address yet is the case that
-      // most needs the timer, because the claim itself can fail.
+      // There is no `!account` guard: a card with no address yet is the case that most
+      // needs the timer, because the claim itself can fail.
       if (dead || document.hidden || !onScreen) return
       timer = window.setTimeout(() => void tick(), pollMs)
     }
@@ -316,10 +315,10 @@ const tool: ToolModule = {
     /**
      * Read the inbox, logging in first whenever there is no usable token.
      *
-     * Only a 401 on the LOGIN is 'auth', because only that proves the account itself is
-     * gone. A 401 on /messages is an expired token, and a status 0 is a network blip; both
-     * used to be able to end as a re-claim, and a re-claim silently abandons every message
-     * already sitting in the old inbox.
+     * Only a 401 on the login is 'auth', because only that proves the account itself is
+     * gone. A 401 on /messages is an expired token and a status 0 is a network blip. Both
+     * could once end as a re-claim, which silently abandons every message already sitting
+     * in the old inbox.
      */
     const fetchInbox = async (retried = false): Promise<Outcome> => {
       if (!account) return 'auth'
@@ -344,12 +343,11 @@ const tool: ToolModule = {
     }
 
     /**
-     * The whole loop, in one pass: claim an address if there is none, then read the inbox,
-     * then re-arm. Claiming lives INSIDE the loop deliberately. It used to sit outside, so
-     * a claim that failed (the provider rate limits new accounts long before it rate limits
-     * reads) left the card with an empty address box, a status line promising a next check,
-     * and no timer anywhere: 0 further requests until someone pressed Refresh. That is
-     * indistinguishable from a tool that is simply broken.
+     * The whole loop in one pass: claim an address if there is none, read the inbox, then
+     * re-arm. Claiming lives inside the loop on purpose. With it outside, a failed claim
+     * (the provider rate limits new accounts long before it rate limits reads) left the
+     * card with an empty address box, a status line promising a next check, and no timer,
+     * so nothing further happened until someone pressed Refresh.
      */
     const tick = async () => {
       if (busy || dead) return
@@ -380,9 +378,9 @@ const tool: ToolModule = {
       }
       if (dead) return
       if (outcome === 'auth') {
-        // The provider retains an inbox for days, not forever, so a dead account is
-        // expected eventually. Drop it and let the NEXT pass claim, rather than re-claiming
-        // inline: an account that 401s the moment it is created would otherwise spin here,
+        // The provider retains an inbox for days, so a dead account is expected
+        // eventually. Drop it and let the next pass claim rather than re-claiming inline,
+        // because an account that 401s the moment it is created would otherwise spin here,
         // creating accounts against a free service as fast as the network allows.
         account = null
         addr.value = ''
@@ -394,16 +392,16 @@ const tool: ToolModule = {
       if (outcome === 'ok') pollMs = POLL_MS
       else pollMs = Math.min(MAX_POLL_MS, pollMs * 2)
       const secs = Math.round(pollMs / 1000)
-      // "while this card is open" is not filler: polling really does stop when the card is
-      // collapsed, scrolled out of the feed or in a background tab, and a status claiming
-      // an unconditional 15-second check would be false in all three.
+      // "while this card is open" is load-bearing wording. Polling stops when the card is
+      // collapsed, scrolled out of the feed or in a background tab, so a status claiming an
+      // unconditional 15-second check would be false in all three.
       const ready = `Inbox ready, checking every ${secs} seconds while this card is open.`
       setStatus(`${outcome === 'ok' ? ready : outcome === 'limited' ? LIMITED : message || DOWN}${persists ? '' : ` ${UNSAVED}`}`)
       schedule()
     }
 
-    // Both resume paths run the full driver, not just a poll: coming back on screen with
-    // no address yet has to retry the claim, which is the state the user is most stuck in.
+    // Both resume paths run the full driver rather than only a poll, because coming back
+    // on screen with no address yet has to retry the claim.
     const onVis = () => {
       if (document.hidden) {
         window.clearTimeout(timer)

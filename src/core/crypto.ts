@@ -1,7 +1,7 @@
-// Crypto core, native WebCrypto only (ARCHITECTURE section 9). No JS-crypto polyfill:
-// on a browser lacking native Ed25519/X25519 we hard-fail the crypto-dependent
-// features (P2P + Workshop) rather than ship a weaker, larger attack surface.
-// Single-user tools (clipboard/OCR/STT/TTS) do not depend on these curves.
+// Crypto core, native WebCrypto only (ARCHITECTURE section 9). No JS-crypto polyfill: a
+// browser lacking native Ed25519/X25519 hard-fails the crypto-dependent features (P2P +
+// Workshop) instead of running a weaker, larger attack surface. Single-user tools
+// (clipboard/OCR/STT/TTS) do not depend on these curves.
 
 export interface CryptoCaps {
   subtle: boolean
@@ -22,7 +22,7 @@ async function runProbe(): Promise<CryptoCaps> {
   let ed25519 = false
   let x25519 = false
   if (subtle) {
-    // A capability probe must be total: any failure means "unsupported here".
+    // Any failure means unsupported here, so both probes swallow everything.
     try {
       await crypto.subtle.generateKey({ name: 'Ed25519' }, false, ['sign', 'verify'])
       ed25519 = true
@@ -120,9 +120,9 @@ export function hexToBytes(hex: string): Uint8Array<ArrayBuffer> {
 }
 
 /**
- * Signal-style safety number for two device public keys (ARCHITECTURE section 9). Both
- * peers derive the identical code (inputs are sorted), so they can compare it
- * out-of-band to detect a man-in-the-middle on the TOFU key exchange.
+ * Signal-style safety number for two device public keys (ARCHITECTURE section 9). Inputs
+ * are sorted, so both peers derive the same code and can compare it out-of-band to detect
+ * a man-in-the-middle on the TOFU key exchange.
  */
 export async function safetyNumber(aHex: string, bHex: string): Promise<string> {
   const [lo, hi] = aHex < bHex ? [aHex, bHex] : [bHex, aHex]

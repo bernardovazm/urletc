@@ -1,13 +1,13 @@
 import type { ToolContext, ToolModule } from '../shell/registry'
 import { button, el, toast } from '../shell/ui'
 
-// Default TTS uses the browser's built-in SpeechSynthesis, filtered to ON-DEVICE
-// (localService) voices only. Cloud voices silently POST text off-device, which
-// breaks privacy-by-default (ARCHITECTURE section 4.4). Kokoro is a planned opt-in
-// add-on: higher quality, but a large download behind explicit consent.
+// Default TTS uses the browser's built-in SpeechSynthesis, filtered to on-device
+// (localService) voices only. Cloud voices silently POST text off-device, which breaks
+// privacy-by-default (ARCHITECTURE section 4.4). Kokoro is a planned opt-in add-on with
+// higher quality behind a large download and explicit consent.
 
-// Per-card cleanup keyed by container: the cached module is shared across open cards, so
-// a module-level handle would let one card's teardown detach another card's listener.
+// Per-card cleanup keyed by container. The cached module is shared across open cards, so a
+// module-level handle would let one card's teardown detach another card's listener.
 const cleanups = new WeakMap<HTMLElement, () => void>()
 
 const tool: ToolModule = {
@@ -21,8 +21,8 @@ const tool: ToolModule = {
     const voiceSel = el('select') as HTMLSelectElement
     const rate = el('input', { type: 'range', min: '0.5', max: '2', step: '0.1', value: '1' }) as HTMLInputElement
     const note = el('div', { class: 'muted small' })
-    // Some platforms (e.g. Chrome on Linux) ship NO on-device voices, so the private
-    // default would render an empty list. Cloud voices stay opt-in with a clear label.
+    // Some platforms, Chrome on Linux among them, ship no on-device voices, so the
+    // private default would render an empty list. Cloud voices stay opt-in and labelled.
     const cloudChk = el('input', { type: 'checkbox' }) as HTMLInputElement
     let shownVoices: SpeechSynthesisVoice[] = []
 

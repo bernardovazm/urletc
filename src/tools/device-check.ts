@@ -1,13 +1,12 @@
 import type { ToolModule } from '../shell/registry'
 import { button, el, toast } from '../shell/ui'
 
-// The pre-meeting gear check, without leaving the app: see yourself, watch the mic
-// level, hear yourself through a delayed loopback so the echo is distinguishable from
-// your own voice, record a short sample to play back or download, and beep the
-// speakers. Everything stays on-device.
+// Pre-meeting gear check, in-app: see yourself, watch the mic level, hear yourself through
+// a delayed loopback so the echo is distinguishable from your own voice, record a short
+// sample to play back or download, and beep the speakers. Everything stays on-device.
 
-// Per-card teardown, keyed by container: several open cards share this module object,
-// so a module-scoped handle would let a second card's teardown clobber the first's.
+// Per-card teardown, keyed by container. Several open cards share this module object, so a
+// module-scoped handle would let a second card's teardown clobber the first's.
 const cleanups = new WeakMap<HTMLElement, () => void>()
 
 const tool: ToolModule = {
@@ -124,8 +123,8 @@ const tool: ToolModule = {
 
     const startBtn = button('Start test', () => void start(), 'primary', 'Turn the camera and microphone on locally; nothing is shared')
 
-    // Loopback: route the mic to the speakers a beat later, so you can judge your own
-    // audio without the "talking over myself" effect. Headphones, or it will feed back.
+    // Loopback routes the mic to the speakers a beat later, so the delay separates the
+    // echo from your own voice. Needs headphones, or it feeds back.
     const loopChk = el('input', { type: 'checkbox' }) as HTMLInputElement
     loopChk.addEventListener('change', () => {
       if (!ac || !stream?.getAudioTracks().length) {
@@ -189,7 +188,7 @@ const tool: ToolModule = {
     }
     const recBtn = button('🔴 Record 5s sample', record, 'ghost', 'Record the mic and camera, then play it back or download it')
 
-    // Speaker check: a short beep through the default output.
+    // Speaker check, a short beep through the default output.
     const tone = () => {
       const a = ac ?? new AudioContext()
       const osc = a.createOscillator()
@@ -206,7 +205,7 @@ const tool: ToolModule = {
 
     for (const sel of [camSel, micSel]) {
       sel.addEventListener('change', () => {
-        if (stream) void start() // live switch: restart on the newly chosen device
+        if (stream) void start() // live switch, so restart on the newly chosen device
       })
     }
 

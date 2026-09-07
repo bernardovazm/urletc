@@ -1,7 +1,7 @@
 // Per-peer symmetric HKDF ratchet over an X25519 ECDH shared secret (ARCHITECTURE
-// sections 6 and 9). Gives forward secrecy WITHIN a session: each message advances a chain key
+// sections 6 and 9). Forward secrecy within a session: each message advances a chain key
 // and the previous key is discarded, so a key captured later cannot decrypt earlier
-// messages. (Full Double-Ratchet / post-compromise security is the P4 upgrade.)
+// messages. Full Double-Ratchet / post-compromise security is the P4 upgrade.
 
 import { aesKeyFromBytes, b64ToBytes, bytesToB64, hkdfBytes, randomBytes } from '../core/crypto'
 

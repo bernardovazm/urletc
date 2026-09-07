@@ -1,7 +1,7 @@
 import type { ToolContext, ToolModule } from '../shell/registry'
 import { button, copyText, el } from '../shell/ui'
 
-// Timestamp converter: epoch (s or ms), ISO 8601, local, UTC, relative. All local.
+// Timestamp converter for epoch (s or ms), ISO 8601, local, UTC and relative. All local.
 
 /** Parse an epoch number (s/ms auto-detected by magnitude) or any Date-parseable string. */
 export function parseWhen(raw: string): Date | null {

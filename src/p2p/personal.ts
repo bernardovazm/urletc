@@ -1,9 +1,8 @@
 // "Personal room": the client-side stand-in for LAN device discovery (ARCHITECTURE
-// section 5.4: web pages cannot mDNS-scan). A 32-byte secret is generated once per
+// section 5.4, web pages cannot mDNS-scan). A 32-byte secret is generated once per
 // identity and shared to your other devices via a one-time pairing link/QR. Every device
-// that holds the secret auto-joins the SAME private room; WebRTC ICE then connects them
-// directly over the LAN when they are on the same network. So "send an image to my
-// phone" means both devices auto-join the personal room and ICE goes LAN-direct.
+// holding the secret auto-joins the same private room, and WebRTC ICE then connects them
+// LAN-direct when they are on the same network.
 
 import { b64ToBytes, bytesToB64, randomBytes, sha256, toHex } from '../core/crypto'
 import { getItem, setItem } from '../core/store'

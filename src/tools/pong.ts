@@ -1,12 +1,13 @@
 // Multiplayer Pong, a P2P proof-of-concept (ARCHITECTURE sections 5 and 6). Built-in and
-// host-realm (NOT a sandboxed Workshop script: the sandbox has no P2P capability by
-// design): it plays over the room `game` channel (session.ts). It enumerates every
-// authenticated peer across ALL tiers (personal/nearby/code) into a lobby; you invite
-// one and they accept (mutual invites fast-start). The peer with the smaller id is the
-// physics host (authoritative for ball + score); the other sends its paddle and renders
-// host state with light dead-reckoning. Coordinates are normalized 0..1 in a canonical
-// space where the host is the LEFT paddle, so both sides agree at any canvas size. Game
-// state is transport-encrypted (room password) like media; it carries no secrets.
+// host-realm rather than a sandboxed Workshop script, because the sandbox has no P2P
+// capability by design, and it plays over the room `game` channel (session.ts). Every
+// authenticated peer across all tiers (personal/nearby/code) is enumerated into a lobby;
+// you invite one and they accept, and mutual invites fast-start. The peer with the smaller
+// id is the physics host, authoritative for ball and score, while the other sends its
+// paddle and renders host state with light dead-reckoning. Coordinates are normalized 0..1
+// in a canonical space where the host is the left paddle, so both sides agree at any canvas
+// size. Game state is transport-encrypted by the room password, like media, and carries no
+// secrets.
 
 import { getAllSessions } from '../p2p/session'
 import type { ToolModule } from '../shell/registry'
@@ -30,8 +31,8 @@ const CHAT_MAX = 80
 const clamp = (v: number, lo: number, hi: number) => (v < lo ? lo : v > hi ? hi : v)
 
 /** A canvas paints raw colours and cannot inherit a CSS variable, so the board resolves
- *  the live theme tokens instead of hardcoding one theme's palette (it re-reads them on
- *  the `wt:theme` event). Pure, and safe to share across cards. */
+ *  the live theme tokens instead of hardcoding one theme's palette, re-reading them on the
+ *  `wt:theme` event. Pure, and safe to share across cards. */
 const readPalette = () => {
   const cs = getComputedStyle(document.documentElement)
   const v = (n: string, fb: string) => cs.getPropertyValue(n).trim() || fb
@@ -43,8 +44,8 @@ const readPalette = () => {
   }
 }
 
-// Per-card teardown, keyed by container: launchTool shares one cached module across all
-// open cards, so RAF/interval handles and the teardown closure must be per-activation.
+// Per-card teardown, keyed by container. launchTool shares one cached module across all
+// open cards, so RAF and interval handles and the teardown closure must be per-activation.
 // A module-level handle would let a second card clobber the first's and leak its loop.
 const detachers = new WeakMap<HTMLElement, () => void>()
 
@@ -88,7 +89,7 @@ const tool: ToolModule = {
     const g = canvas.getContext('2d')
     if (!g) return
 
-    // --- match state (canonical: host = left paddle) ---
+    // --- match state, canonical, with the host as the left paddle ---
     let opp: string | null = null // opponent peerId while inviting-accepted / playing / over
     let oppName = ''
     let host = false
@@ -269,7 +270,7 @@ const tool: ToolModule = {
       showView()
     }
 
-    // --- physics (host) + dead-reckoning (guest) ---
+    // --- physics on the host, dead-reckoning on the guest ---
     const wallBounce = () => {
       if (ball.y < BALL_R) {
         ball.y = BALL_R
@@ -365,7 +366,7 @@ const tool: ToolModule = {
       switch (m.t) {
         case 'invite':
           if (pendingOut === from) {
-            // mutual invite: start immediately
+            // mutual invite, so start immediately
             sendTo(from, { t: 'accept' })
             startGame(from, mySelf() < from)
           } else if (opp) {
@@ -429,7 +430,7 @@ const tool: ToolModule = {
       for (const s of getAllSessions()) s.setGameHandler(onGame)
     }
 
-    // --- controls: pointer on the board, or the arrow keys and W/S when focused ---
+    // --- controls, either pointer on the board or arrow keys and W/S when focused ---
     const pointerY = (clientY: number) => {
       const r = canvas.getBoundingClientRect()
       return clamp((clientY - r.top) / r.height, PADDLE_HALF, 1 - PADDLE_HALF)
@@ -477,7 +478,7 @@ const tool: ToolModule = {
       raf = requestAnimationFrame(loop)
     }
 
-    // --- periodic re-sync of sessions + lobby + disconnect detection ---
+    // --- periodic re-sync of sessions and lobby, plus disconnect detection ---
     const tick = () => {
       syncHandlers()
       const peers = allPeers()

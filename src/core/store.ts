@@ -1,16 +1,17 @@
 // Encrypted-at-rest store facade (ARCHITECTURE section 9, "Key lifecycle"). Two modes:
 //
 //  - device (default): a non-extractable AES-GCM CryptoKey generated once and kept
-//    in IndexedDB. Protects an offline profile copy / other origin / casual IDB dump,
-//    but NOT same-origin XSS (an attacker in our origin can use the key). Boots silently.
+//    in IndexedDB. Protects an offline profile copy, another origin and a casual IDB
+//    dump, but not same-origin XSS, since an attacker in our origin can use the key.
+//    Boots silently.
 //
-//  - passphrase (opt-in): the wrapping key is DERIVED on unlock via PBKDF2 at 600k
-//    iterations from a user passphrase + stored salt and held ONLY in memory, zeroised
-//    on lock. This is the mode that actually raises the bar against an offline attacker
-//    AND a *later* XSS (a locked vault has no key in memory), at the cost of re-unlocking.
+//  - passphrase (opt-in): the wrapping key is derived on unlock via PBKDF2 at 600k
+//    iterations from a user passphrase plus stored salt, held only in memory and zeroised
+//    on lock. This raises the bar against an offline attacker and against a later XSS,
+//    since a locked vault has no key in memory, at the cost of re-unlocking.
 //
-// Primary XSS controls remain CSP + Trusted Types + DOMPurify. Encrypted-at-rest is
-// secondary and is NOT an XSS control in device mode.
+// Primary XSS controls remain CSP, Trusted Types and DOMPurify. Encrypted-at-rest is
+// secondary and is not an XSS control in device mode.
 
 import { createStore, del, get, keys, set } from 'idb-keyval'
 import { aesGcmDecrypt, aesGcmEncrypt, randomBytes, type AesGcmBlob } from './crypto'
@@ -42,17 +43,17 @@ let locked = false
  *
  * A mode switch (enable/disablePassphrase) is not a single atomic write, so a crash
  * mid-switch can leave items under a key the plain `MODE` would not select. The
- * MIGRATION marker makes that state detectable and recoverable instead of silent loss:
- * `MODE` is flipped only AFTER every item is re-wrapped, so `MODE` alone is always
- * trustworthy; the marker tells us to finish (or roll back) any leftover switch.
+ * MIGRATION marker makes that state detectable and recoverable instead of silent loss.
+ * `MODE` is flipped only after every item is re-wrapped, so `MODE` alone is always
+ * trustworthy, and the marker says to finish or roll back a leftover switch.
  */
 export async function initStore(): Promise<{ locked: boolean }> {
   const migrating = (await get<string>(MIGRATION_ID, keyStore)) as StoreMode | undefined
   const mode = ((await get<string>(MODE_ID, keyStore)) ?? 'device') as StoreMode
 
   if (migrating === 'passphrase' && mode !== 'passphrase') {
-    // Interrupted switch TO passphrase, not yet committed. If no item was re-wrapped
-    // (the salt is written just before the rewrite loop), roll back to device; else
+    // Interrupted switch to passphrase, not yet committed. If no item was re-wrapped
+    // (the salt is written just before the rewrite loop) roll back to device, otherwise
     // stay locked and let unlock() finish it under the passphrase key.
     if (await get(SALT_ID, keyStore)) {
       wrapKey = null
@@ -63,7 +64,7 @@ export async function initStore(): Promise<{ locked: boolean }> {
     await del(VERIFIER_ID, keyStore)
     await del(SALT_ID, keyStore)
   } else if (migrating === 'device' && mode === 'passphrase') {
-    // Interrupted switch TO device, not yet committed, so it needs the passphrase.
+    // Interrupted switch to device, not yet committed, so it needs the passphrase.
     wrapKey = null
     locked = true
     return { locked: true }
@@ -77,7 +78,7 @@ export async function initStore(): Promise<{ locked: boolean }> {
   }
 
   // Device mode, including a disable that already committed (MODE=device) but had not
-  // finished cleaning up: items are already under the device key, so tidy the leftovers.
+  // finished cleaning up. Items are already under the device key, so tidy the leftovers.
   let key = await get<CryptoKey>(WRAP_KEY_ID, keyStore)
   if (!key) {
     key = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt'])
@@ -95,9 +96,9 @@ export async function initStore(): Promise<{ locked: boolean }> {
 
 /**
  * Re-wrap every item from `fromKey` to `toKey`, then commit the target mode and clear the
- * marker. Idempotent and restartable: an item already under `toKey` is left untouched, so
- * a switch interrupted mid-rewrite can be finished by re-running this. `fromKey` may be
- * null only when every remaining item is already under `toKey`.
+ * marker. Idempotent and restartable, since an item already under `toKey` is left
+ * untouched, so a switch interrupted mid-rewrite can be finished by re-running this.
+ * `fromKey` may be null only when every remaining item is already under `toKey`.
  */
 async function finishSwitch(target: StoreMode, toKey: CryptoKey, fromKey: CryptoKey | null): Promise<void> {
   for (const k of await allKeys()) {
@@ -113,7 +114,7 @@ async function finishSwitch(target: StoreMode, toKey: CryptoKey, fromKey: Crypto
     }
     await set(k, await aesGcmEncrypt(toKey, pt), dataStore)
   }
-  await set(MODE_ID, target, keyStore) // durable commit: MODE now matches every item
+  await set(MODE_ID, target, keyStore) // durable commit; `MODE` now matches every item
   if (target === 'passphrase') {
     await del(WRAP_KEY_ID, keyStore)
   } else {
@@ -187,10 +188,10 @@ export function lock(): void {
 }
 
 /**
- * Switch to passphrase mode: re-wrap every stored item under a passphrase-derived key.
- * Guarded by the MIGRATION marker so an interruption is finished (or rolled back) on the
- * next boot/unlock rather than stranding items under the unselected key. `MODE` flips only
- * after the whole rewrite, and the old device key is dropped only after the commit.
+ * Switch to passphrase mode, re-wrapping every stored item under a passphrase-derived
+ * key. Guarded by the MIGRATION marker so an interruption is finished or rolled back on
+ * the next boot or unlock rather than stranding items under the unselected key. `MODE`
+ * flips only after the whole rewrite, and the old device key is dropped after the commit.
  */
 export async function enablePassphrase(passphrase: string): Promise<void> {
   const deviceKey = requireKey()
@@ -206,9 +207,9 @@ export async function enablePassphrase(passphrase: string): Promise<void> {
 }
 
 /**
- * Switch back to device mode (must be unlocked): re-wrap items under a fresh device key.
- * The new device key is persisted before the rewrite so an interrupted switch can be
- * finished without the passphrase once `MODE` has committed.
+ * Switch back to device mode, which requires being unlocked, re-wrapping items under a
+ * fresh device key. The new device key is persisted before the rewrite so an interrupted
+ * switch can be finished without the passphrase once `MODE` has committed.
  */
 export async function disablePassphrase(): Promise<void> {
   const ppKey = requireKey()

@@ -1,8 +1,8 @@
 /// <reference lib="webworker" />
-// Custom service worker (injectManifest). Built by vite-plugin-pwa; excluded from
-// the app tsconfig. Its one load-bearing job beyond precaching: re-inject COOP/COEP
-// on cached navigation responses, because caches strip them and crossOriginIsolated
-// would otherwise break on an offline reload (ARCHITECTURE sections 2 and 10).
+// Custom service worker (injectManifest). Built by vite-plugin-pwa and excluded from the
+// app tsconfig. Beyond precaching it re-injects COOP/COEP on cached navigation responses,
+// because caches strip them and crossOriginIsolated would otherwise break on an offline
+// reload (ARCHITECTURE sections 2 and 10).
 
 declare const self: ServiceWorkerGlobalScope & {
   __WB_MANIFEST: Array<{ url: string; revision: string | null }>
@@ -42,8 +42,8 @@ function withIsolation(res: Response): Response {
 self.addEventListener('fetch', (event) => {
   const req = event.request
 
-  // Navigations: network-first (gets real Vercel headers); offline fallback to the
-  // cached shell with COOP/COEP re-injected.
+  // Navigations are network-first, so they get the real Vercel headers, falling back
+  // offline to the cached shell with COOP/COEP re-injected.
   if (req.mode === 'navigate') {
     event.respondWith(
       fetch(req).catch(async () => {
@@ -56,10 +56,10 @@ self.addEventListener('fetch', (event) => {
 
   if (req.method !== 'GET') return
 
-  // Same-origin assets: cache-first, populating the cache on first fetch so lazy
-  // tool chunks/workers cache as they are used (not all precached up front).
-  // Cross-origin (HF models, OCR lang data, CDN wasm) is left to the libraries'
-  // own caching and never cached here.
+  // Same-origin assets are cache-first, populating the cache on first fetch so lazy tool
+  // chunks and workers cache as they are used rather than all being precached up front.
+  // Cross-origin (HF models, OCR lang data, CDN wasm) is left to the libraries' own
+  // caching and never cached here.
   const url = new URL(req.url)
   if (url.origin !== self.location.origin) return
 

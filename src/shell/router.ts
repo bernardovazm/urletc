@@ -5,9 +5,9 @@ export type RouteHandler = (path: string) => void | Promise<void>
 
 /**
  * Routes that no longer exist and must not dead-end. URL Inspector was merged into URL
- * Check, and links to the old id are already out in shared history. Rewriting the hash
- * (rather than silently handing the handler another path) keeps the address bar honest
- * and re-dispatches through `hashchange`, so the handler only ever sees a live route.
+ * Check, and links to the old id are already out in shared history. Rewriting the hash,
+ * rather than handing the handler another path, keeps the address bar accurate and
+ * re-dispatches through `hashchange`, so the handler only ever sees a live route.
  */
 const REDIRECTS: Record<string, string> = { '/t/url-info': '/t/url-check' }
 

@@ -1,11 +1,11 @@
-// Workshop tool manifest: schema, content-addressing, Ed25519 signing/verification,
-// and trust tiers (ARCHITECTURE section 7). A manifest is the single contract for a
-// shared tool. `type:'automation'` carries a bounded declarative rule list (safe-by-
-// construction, section 7.1); `type:'script'` carries JS source that only ever runs in
-// the sandbox (section 8, Phase 3b); `type:'html'` carries a self-contained HTML app that runs
-// only in the visible, no-deadline variant of the same null-origin sandbox
-// (sandbox.ts runHtmlApp). Integrity = SHA-256 content hash; authenticity = Ed25519
-// signature over the canonical metadata (which commits to the body via its hash).
+// Workshop tool manifest: schema, content-addressing, Ed25519 signing and verification,
+// and trust tiers (ARCHITECTURE section 7). A manifest is the single contract for a shared
+// tool. `type:'automation'` carries a bounded declarative rule list (safe by construction,
+// section 7.1), `type:'script'` carries JS source that only ever runs in the sandbox
+// (section 8, Phase 3b), and `type:'html'` carries a self-contained HTML app that runs only
+// in the visible, no-deadline variant of the same null-origin sandbox (sandbox.ts
+// runHtmlApp). Integrity is the SHA-256 content hash and authenticity is an Ed25519
+// signature over the canonical metadata, which commits to the body via that hash.
 
 import { z } from '../core/zod'
 import { b64ToBytes, bytesToB64, hexToBytes, sha256, signEd25519, toHex, verifyEd25519 } from '../core/crypto'
@@ -19,7 +19,7 @@ export const PermissionSchema = z.union([
   z.literal('clipboard-write'),
   z.literal('storage'),
   z.literal('notifications'),
-  z.literal('p2p-room'), // best-effort room-channel relay with game-channel semantics (section 5.4): scores/state, never secrets
+  z.literal('p2p-room'), // best-effort room-channel relay, game-channel semantics (section 5.4): scores and state, never secrets
   z.object({ net: z.array(z.string().max(200)).max(8) }),
 ])
 export type Permission = z.infer<typeof PermissionSchema>
@@ -54,7 +54,7 @@ export interface DraftManifest {
 
 export type TrustTier = 'self' | 'trusted' | 'unverified' | 'unsigned'
 
-/** Deterministic JSON: object keys sorted recursively. */
+/** Deterministic JSON, with object keys sorted recursively. */
 export function canonicalJSON(v: unknown): string {
   if (v === null || typeof v !== 'object') return JSON.stringify(v) ?? 'null'
   if (Array.isArray(v)) return `[${v.map(canonicalJSON).join(',')}]`
@@ -108,7 +108,7 @@ export async function signManifest(id: DeviceIdentity, displayName: string, draf
   return { ...meta, body: draft.body, sig: `ed25519:${bytesToB64(sig)}` }
 }
 
-/** Validate integrity (hashes) + authenticity (signature) of an untrusted manifest. */
+/** Validate integrity (hashes) and authenticity (signature) of an untrusted manifest. */
 export async function verifyManifest(m: Manifest): Promise<{ ok: boolean; reason?: string }> {
   if ((await hashOf(m.body)) !== m.contentHash) return { ok: false, reason: 'content hash mismatch' }
   const expectId = await hashOf({ name: m.name, version: m.version, type: m.type, permissions: m.permissions, contentHash: m.contentHash })

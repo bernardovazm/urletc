@@ -7,7 +7,7 @@ import { getActiveSession } from '../../p2p/session'
 import type { ToolContext, ToolModule } from '../../shell/registry'
 import { badge, button, consent, el, toast } from '../../shell/ui'
 
-// Per-card teardown keyed by container: the cached module is shared across open Workshop
+// Per-card teardown keyed by container. The cached module is shared across open Workshop
 // cards, so the running-app handle and the session tool-handler unsubscribe must be
 // per-activation. A module-level handle would let one card's close tear down another's.
 const teardowns = new WeakMap<HTMLElement, () => void>()
@@ -59,8 +59,8 @@ const tool: ToolModule = {
     const trusted = new Set<string>((await ctx.storage.get<string[]>('trusted')) ?? [])
     const displayName = (await ctx.storage.get<string>('name')) ?? 'me'
 
-    // Verify signatures of stored manifests on load so the displayed trust badge is
-    // honest even against a tampered IDB (ARCHITECTURE section 7, verify before any display).
+    // Verify signatures of stored manifests on load so the displayed trust badge holds
+    // even against a tampered IDB (ARCHITECTURE section 7, verify before any display).
     const verifiedMap = new Map<string, boolean>()
     for (const m of installed) verifiedMap.set(m.id, (await verifyManifest(m)).ok)
 
@@ -89,8 +89,8 @@ const tool: ToolModule = {
       if (!ok) return
       const i = installed.findIndex((x) => x.id === m.id)
       if (i >= 0) {
-        // Enforce same-key updates (section 7): a different author key for the same id must
-        // be an explicit override, not a silent overwrite.
+        // Enforce same-key updates (section 7). A different author key for the same id
+        // requires an explicit override, so it can never overwrite silently.
         if (
           installed[i].author.pubkey !== m.author.pubkey &&
           !confirm(`Author key changed for "${m.name}".\nfrom ${installed[i].author.pubkey.slice(0, 28)}...\nto   ${m.author.pubkey.slice(0, 28)}...\nReplace anyway?`)
@@ -101,14 +101,14 @@ const tool: ToolModule = {
       } else {
         installed.push(m)
       }
-      verifiedMap.set(m.id, true) // install() inputs are always verified (signed self / verified import / verified gossip)
+      verifiedMap.set(m.id, true) // install() inputs are verified: signed self, verified import or gossip
       await persist()
       renderList()
       toast('Installed')
     }
 
     const run = async (m: Manifest) => {
-      // Re-verify on every run (verify-before-display AND before-run).
+      // Re-verify on every run, both before display and before running.
       const v = await verifyManifest(m)
       if (!v.ok) {
         toast(`Verification failed: ${v.reason}`)
@@ -149,7 +149,7 @@ const tool: ToolModule = {
       }
 
       // type:'script' runs in the null-origin sandbox behind the capability API. Never
-      // autorun: the consent above is the gesture that authorises this run.
+      // autorun; the consent above is the gesture that authorises this run.
       out.textContent = 'Running in sandbox...'
       const logs: string[] = []
       const res = await runInSandbox(m.body.source, sandboxPerms(m.permissions), {
@@ -165,8 +165,8 @@ const tool: ToolModule = {
       out.textContent = (res.ok ? `Result: ${JSON.stringify(res.value, null, 2)}` : `Error: ${res.error}`) + (logs.length ? `\n\n--- logs ---\n${logs.join('\n')}` : '')
     }
 
-    // type:'html' opens a visible, persistent sandbox panel. One app at a time; name and
-    // trust badge live OUTSIDE the frame (the frame can imitate any UI inside it).
+    // type:'html' opens a visible, persistent sandbox panel. One app at a time, with the
+    // name and trust badge outside the frame, since the frame can imitate any UI inside.
     const openApp = (m: Manifest) => {
       if (m.body.kind !== 'html') return
       closeApp?.()
@@ -197,8 +197,8 @@ const tool: ToolModule = {
           storageSet: (k, val) => ctx.storage.set(`app:${m.id}:${k}`, val),
           netFetch: (u, init) => hostFetch(u, init),
           log: appLog,
-          // Tagged with the CONTENT hash: peers only hear it inside the app with the
-          // exact same body they consented to, the same trust story as install itself.
+          // Tagged with the content hash, so peers only hear it inside the app with the
+          // exact body they consented to, the same trust rule as install itself.
           roomSend: (data) => getActiveSession()?.sendGame({ ws: 1, id: m.contentHash, d: data }),
           roomPeers: () => Promise.resolve((getActiveSession()?.roster() ?? []).filter((p) => p.ready).map((p) => ({ peerId: p.peerId, name: p.name || 'peer' }))),
         },
@@ -328,8 +328,9 @@ const tool: ToolModule = {
       } else {
         body = { kind: 'script', source: bodyI.value }
       }
-      // Apps default to storage + room, which is what a shared game needs; automations and
-      // scripts keep the clipboard pair. Consent shows the exact list before install or run.
+      // Apps default to storage plus room, which is what a shared game needs, while
+      // automations and scripts keep the clipboard pair. Consent shows the exact list
+      // before install or run.
       const permissions: Permission[] = type === 'html' ? ['storage', 'p2p-room'] : ['clipboard-read', 'clipboard-write']
       const m = await signManifest(id, displayName, { name: nameI.value.trim() || 'Tool', version: verI.value.trim() || '0.1.0', type, permissions, body }, Date.now())
       await install(m, 'self')

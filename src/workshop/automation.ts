@@ -1,9 +1,9 @@
-// Declarative automation interpreter, safe-by-construction (ARCHITECTURE section 7.1).
-// The op set is a fixed discriminated-union whitelist: no eval, no Function, no
-// dynamic dispatch by arbitrary string, no property access into host objects. It
-// reads/writes only the value passed to it. The single dangerous op (text.replace,
-// a ReDoS vector) runs in a worker with a hard wall-clock timeout that terminates
-// the worker on overrun. This is why declarative tools get a lower consent barrier.
+// Declarative automation interpreter, safe by construction (ARCHITECTURE section 7.1).
+// The op set is a fixed discriminated-union whitelist with no eval, no Function, no dynamic
+// dispatch by arbitrary string and no property access into host objects. It reads and
+// writes only the value passed to it. The one dangerous op, text.replace as a ReDoS vector,
+// runs in a worker with a hard wall-clock timeout that terminates the worker on overrun.
+// That is why declarative tools get a lower consent barrier.
 
 import { z } from '../core/zod'
 
@@ -41,7 +41,7 @@ function sortKeys(v: unknown, recursive: boolean): unknown {
   return v
 }
 
-/** Run user regex in a worker with a hard timeout; terminate on overrun (ReDoS guard). */
+/** Run a user regex in a worker with a hard timeout, terminating on overrun (ReDoS guard). */
 function safeRegexReplace(input: string, pattern: string, flags: string, replacement: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const w = new Worker(new URL('../workers/re-engine.worker.ts', import.meta.url), { type: 'module' })
@@ -94,7 +94,7 @@ export async function runAutomation(steps: Step[], input: string): Promise<strin
         value = await safeRegexReplace(asString(value), step.pattern, step.flags, step.replacement)
         break
     }
-    // Bound intermediate growth (e.g. replace amplification) so a step can't build a
+    // Bound intermediate growth, such as replace amplification, so a step cannot build a
     // giant string that blocks the main thread on the next op or the structured clone.
     if (typeof value === 'string' && value.length > MAX_INPUT) {
       throw new Error('intermediate value too large for automation')

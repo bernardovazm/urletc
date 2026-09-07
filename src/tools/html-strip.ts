@@ -1,26 +1,26 @@
 import type { ToolContext, ToolModule } from '../shell/registry'
 import { button, copyButton, el } from '../shell/ui'
 
-// `DOMParser.parseFromString` IS a TrustedHTML sink, exactly like innerHTML, outerHTML,
+// `DOMParser.parseFromString` is a TrustedHTML sink, like innerHTML, outerHTML,
 // insertAdjacentHTML, document.write and Range.createContextualFragment. The CSP sets
 // `require-trusted-types-for 'script'` and the default policy in src/core/trusted-types.ts
-// deliberately implements only createScriptURL, so handing this sink a plain string threw
-// "This document requires 'TrustedHTML' assignment" and the tool did nothing in production.
+// implements only createScriptURL, so handing this sink a plain string threw "This document
+// requires 'TrustedHTML' assignment" and the tool did nothing in production.
 //
-// The fix is a NARROW NAMED policy, not `createHTML` on the default policy. A named policy
-// is reachable only through the policy object this module holds, so no other call site in
-// the app gains an HTML sink. Adding createHTML to the default policy would instead reopen
+// The fix is a narrow named policy rather than `createHTML` on the default policy. A named
+// policy is reachable only through the policy object this module holds, so no other call
+// site in the app gains an HTML sink. Adding createHTML to the default policy would reopen
 // innerHTML for the entire bundle to make one tool work.
 //
-// Pass-through is safe in this one case because nothing is ever executed or attached:
-//   * parseFromString(..., 'text/html') builds an INERT document with no browsing context,
+// Pass-through is safe here because nothing is executed or attached:
+//   * parseFromString(..., 'text/html') builds an inert document with no browsing context,
 //     so <script> never runs and event-handler attributes never fire.
 //   * that document is never inserted into the live DOM.
 //   * only textContent is read back out, so no markup survives the round trip.
 
-// Minimal local shape: the Trusted Types lib types are not in this TS target's lib.dom.
-// createHTML returns a TrustedHTML at runtime, which is what the sink accepts; typing it
-// as string keeps the call site honest to the compiler without pulling in the lib.
+// Minimal local shape, because the Trusted Types lib types are not in this TS target's
+// lib.dom. createHTML returns a TrustedHTML at runtime, which is what the sink accepts;
+// typing it as string satisfies the compiler without pulling in the lib.
 interface HtmlPolicy {
   createHTML(input: string): string
 }
@@ -39,23 +39,23 @@ function htmlPolicy(): HtmlPolicy | null {
     cached = tt?.createPolicy ? tt.createPolicy('html-strip', { createHTML: (s: string) => s }) : null
   } catch {
     // A `trusted-types` allow-list directive could reject the name. Fall back to the plain
-    // string so the failure is the browser's clear sink error, not a silent wrong answer.
+    // string so the failure surfaces as the browser's sink error rather than a wrong answer.
     cached = null
   }
   return cached
 }
 
-// Elements whose textContent is source code, not page text. Left in place,
+// Elements whose textContent is source code rather than page text. Left in place,
 // "<p>hi</p><script>alert(1)</script>" strips to "hialert(1)".
 const NON_TEXT = 'x-strip-script, x-strip-style, script, style, noscript, template'
 
-// Renaming script and style BEFORE parsing, rather than only removing them after, is
-// deliberate. Chromium evaluates style-src against a <style> element even inside the inert
-// document DOMParser builds, so parsing real-world markup (which nearly always carries a
-// <style>) logged "Applying inline style violates ... style-src 'self'" on every strip.
-// Removing the node afterwards is too late; the violation has already been reported. Under
-// a custom tag name the content is inert text, so no CSS is ever parsed. The names are
-// still in NON_TEXT so the subtree is dropped either way, including anything this misses.
+// script and style are renamed before parsing rather than removed afterwards. Chromium
+// evaluates style-src against a <style> element even inside the inert document DOMParser
+// builds, so parsing real-world markup, which nearly always carries a <style>, logged
+// "Applying inline style violates ... style-src 'self'" on every strip. Removing the node
+// afterwards is too late, since the violation has already been reported. Under a custom tag
+// name the content is inert text, so no CSS is parsed. The names stay in NON_TEXT so the
+// subtree is dropped either way, including anything this misses.
 const neutralize = (html: string) => html.replace(/<(\/?)(script|style)\b/gi, '<$1x-strip-$2')
 
 /** Strip HTML to plain text. Parses into an inert document and reads only textContent. */

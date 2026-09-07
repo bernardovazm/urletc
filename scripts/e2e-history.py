@@ -1,17 +1,17 @@
 """E2E: replayable history between two real browser contexts.
 
-Separate from e2e-console.py because it needs a SECOND browser context and real
+Separate from e2e-console.py because it needs a second browser context and real
 rendezvous over the relays, which costs tens of seconds; the main suite stays a
-single fast page. It drives the user's actual scenario end to end:
+single fast page. The scenario it drives end to end:
 
   A opens a code room and says three things, then reloads, so what is replayed can
-  only have come back out of the encrypted store and not out of the in-memory outbox
-  (which would otherwise deliver the same text live and make a dead replay look alive:
-  that confound is exactly why this was reported as working when it was not).
+  only have come back out of the encrypted store. An in-memory outbox still holding
+  the text would deliver it live, which makes a dead replay read as a working one, and
+  the reload is what removes that confound.
   B then joins the same code from a #/join link, like someone handed the link.
 
-Asserted, in order: the store survives the reload; B gets NOTHING by default (a
-forwarded code must not replay a room's past on its own); A is ASKED, by name and
+Asserted, in order: the store survives the reload; B is replayed nothing by default (a
+forwarded code must not replay a room's past on its own); A is asked, by name and
 count; the grant delivers the real message text to B; and the grant was per-person,
 so a later joiner C still gets nothing.
 """
@@ -22,7 +22,8 @@ from playwright.sync_api import sync_playwright
 
 BASE = os.environ.get('E2E_BASE', 'http://localhost:5199')
 # Unique per run for the same reason the console suite randomises its code: a fixed
-# literal lets a concurrent run (or the developer's own tab) join the room under test.
+# literal lets a concurrent run, or a stray tab on the same network, join the room
+# under test.
 CODE = 'hist' + os.urandom(3).hex()
 MSGS = ['alpha replay one', 'bravo replay two', 'charlie replay three']
 HANDSHAKE_TIMEOUT = 120  # seconds; third-party relays are slow before they are wrong
@@ -82,12 +83,11 @@ def replay_card(pg):
 
 
 def read_card(pg):
-    """Expand the replay card and read its BODY.
+    """Expand the replay card and read the message bodies inside it.
 
     The card is a collapsed <details>, so its summary renders "Earlier messages (3)"
-    whether or not a single message made it inside. Reading the closed summary is how a
-    test passes on an empty card, so it is expanded here and the bodies are read: the
-    assertion is on the text a person would actually see.
+    whether or not a single message made it inside. Assert the bubble text of the
+    expanded card, never the closed summary, which reads identically on an empty card.
     """
     card = replay_card(pg)
     if not card.count():
@@ -101,7 +101,7 @@ with sync_playwright() as p:
     browser = p.chromium.launch(args=['--no-sandbox'])
     # try/finally, not a bare close at the end: an assertion that raises would otherwise
     # leave a headless browser alive and still joined to the room. Those survivors are
-    # discoverable peers, and they make later runs of BOTH suites fail in ways that look
+    # discoverable peers, and they make later runs of either suite fail in ways that look
     # like product bugs (a message that should queue gets delivered to a ghost instead).
     try:
 
@@ -126,8 +126,8 @@ with sync_playwright() as p:
         by_label = dict(zip(labels, boxes))
         code_label = next((l for l in labels if 'join by code' in l), '')
         ask_label = next((l for l in labels if 'Ask for earlier messages' in l), '')
-        check('sharing into code rooms is OFF by default', by_label.get(code_label) is False, str(by_label))
-        check('asking for earlier messages is ON by default', by_label.get(ask_label) is True, str(by_label))
+        check('sharing into code rooms is off by default', by_label.get(code_label) is False, str(by_label))
+        check('asking for earlier messages is on by default', by_label.get(ask_label) is True, str(by_label))
 
         note = ' '.join(modal.locator('.muted.small').all_inner_texts())
         check('A kept the messages on this device across a reload', 'kept on this device' in note, note[:160])
@@ -142,14 +142,15 @@ with sync_playwright() as p:
         check('B reaches A over the relays', bool(wait_for(lambda: handshaked(B), HANDSHAKE_TIMEOUT)),
               f'no handshake in {HANDSHAKE_TIMEOUT}s (relays down?)')
 
-        # Default is off, and it must STAY off without a human in the loop: a six character
-        # code travels to whoever it is forwarded to, so silence is the correct answer here.
+        # Default is off, and it has to stay off without a human in the loop: a six
+        # character code travels to whoever it is forwarded to, so silence is the correct
+        # answer here.
         time.sleep(8)
         check('B is replayed nothing while sharing is off', replay_card(B).count() == 0,
               feed(B)[:200])
 
-        # ...but A is asked, in the feed, at the moment it matters. This is the whole fix:
-        # the setting used to be reachable only by opening a modal nobody had a reason to open.
+        # ...but A is asked, in the feed, at the moment it matters. A setting reachable
+        # only inside a modal nobody has a reason to open is a setting nobody finds.
         prompt = wait_for(lambda: A.locator('.sys', has_text='asked for the').count() and A.locator('.sys', has_text='asked for the').first, 30)
         check('A is asked to share, in the feed, when someone joins', bool(prompt),
               feed(A)[-300:])
@@ -188,10 +189,10 @@ with sync_playwright() as p:
             time.sleep(10)
             check('a later joiner is still replayed nothing', replay_card(C).count() == 0, feed(C)[:200])
 
-            # The other half of the fix: saying "always" must answer the person ALREADY
-            # waiting, not just the next one. A peer asks exactly once, at handshake, so
-            # without a deferred answer this switch could only ever help a future joiner
-            # and the person in front of you would keep seeing nothing.
+            # Saying "always" has to reach back to the peer already waiting. A peer asks
+            # exactly once, at handshake, so without a deferred answer this switch could
+            # only ever help a future joiner while the person in front of you keeps
+            # seeing nothing.
             p2 = wait_for(lambda: A.locator('.sys', has_text='asked for the').count() and A.locator('.sys', has_text='asked for the').first, 30)
             check('A is asked again for the new joiner', bool(p2), feed(A)[-250:])
             if p2:

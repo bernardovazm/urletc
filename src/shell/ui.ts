@@ -124,7 +124,7 @@ export function consent(o: ConsentOptions): Promise<boolean> {
     }
     document.addEventListener('keydown', onKey)
 
-    const head = el('div', { class: 'row' }, [el('strong', { text: o.title })])
+    const head = el('div', { class: 'row' }, [el('strong', { text: `⚠ ${o.title}` })])
     if (o.version) head.append(el('span', { class: 'muted', text: `v${o.version}` }))
     if (o.tier) head.append(badge(o.tier))
 

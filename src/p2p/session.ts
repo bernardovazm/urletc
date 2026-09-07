@@ -562,7 +562,7 @@ export async function joinRoomSession(opts: {
     const theirIdPub = b64ToBytes(data.idPub)
     const ok = await verifyEd25519(theirIdPub, b64ToBytes(data.sig), concat(theirEph, roomSalt))
     if (!ok) {
-      ev.onSystem?.('Rejected a peer with an invalid signature.')
+      ev.onSystem?.('⚠ Rejected a peer with an invalid signature.')
       peers.delete(peerId)
       emitRoster()
       return
@@ -666,7 +666,7 @@ export async function joinRoomSession(opts: {
         ev.onFileReceived?.({ id: inc.id, name: inc.name, ftype: inc.ftype, url, size: inc.size, from: inc.from })
       }
     } catch {
-      ev.onSystem?.('Failed to decrypt a file chunk.')
+      ev.onSystem?.('⚠ Failed to decrypt a file chunk.')
     }
   }
 
@@ -678,7 +678,7 @@ export async function joinRoomSession(opts: {
     try {
       env = JSON.parse(dec.decode(await st.channel.open(data))) as Envelope
     } catch {
-      ev.onSystem?.('Failed to decrypt a message (out of order or tampered).')
+      ev.onSystem?.('⚠ Failed to decrypt a message (out of order or tampered).')
       return
     }
     if (env.t === 'chat') {
@@ -711,14 +711,14 @@ export async function joinRoomSession(opts: {
       // bounded here rather than trusted. Ours are UUIDs, which pass.
       if (!HISTORY_ID_RE.test(String(env.fileId ?? ''))) return
       if (!Number.isInteger(env.total) || env.total < 1 || env.total > MAX_FILE_CHUNKS) {
-        ev.onSystem?.('Rejected an oversized or malformed file offer.')
+        ev.onSystem?.('⚠ Rejected an oversized or malformed file offer.')
         return
       }
       // Without this cap one authenticated peer can announce unlimited files, each
       // allocating a 32768-slot backing array. MAX_PENDING_FILES gates `pendingChunks`,
       // which is a different map and does not bound this one.
       if (incoming.size >= MAX_INCOMING_FILES) {
-        ev.onSystem?.('Too many files in flight from peers. Rejected one.')
+        ev.onSystem?.('⚠ Too many files in flight from peers. Rejected one.')
         return
       }
       // Name/MIME/size are peer-controlled and reach the feed, the download attribute
@@ -803,14 +803,14 @@ export async function joinRoomSession(opts: {
       const m = ManifestSchema.parse(data)
       const v = await verifyManifest(m)
       if (!v.ok) {
-        ev.onSystem?.(`Rejected a shared tool (${v.reason}).`)
+        ev.onSystem?.(`⚠ Rejected a shared tool (${v.reason}).`)
         return
       }
       const st = peers.get(ctx.peerId)
       ev.onSystem?.(`📦 ${st?.info.name ?? 'A peer'} shared a tool: "${m.name}".`)
       toolHandler?.(m, st?.info.name ?? 'peer')
     } catch {
-      ev.onSystem?.('Rejected a malformed shared tool.')
+      ev.onSystem?.('⚠ Rejected a malformed shared tool.')
     }
   }
 

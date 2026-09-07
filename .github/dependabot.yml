@@ -1,6 +1,6 @@
 version: 2
 updates:
-  # npm deps are exact-pinned, so group updates to keep PR volume sane.
+  # npm deps are exact-pinned, so updates are grouped to limit pull request volume.
   - package-ecosystem: npm
     directory: /
     schedule:

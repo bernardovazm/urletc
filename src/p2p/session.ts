@@ -11,13 +11,13 @@
 // Insertable Streams is Chromium-only and deferred).
 //
 // A fourth stream, 'inv', exists only on presenceOnly sessions and carries only a join
-// code, sealed over the same per-peer ratchet. It is how a peer you can merely SEE in the
-// online list becomes a peer you can message: they hand you a room to join. Receiving one
-// never joins anything (see onInvite).
+// code, sealed over the same per-peer ratchet. It is the upgrade path from a peer visible
+// in the online list to one you can message, by handing you a room to join. Receiving an
+// invite never joins anything (see onInvite).
 //
-// A fifth stream, 'hist', is the mirror image: it exists only on sessions opened with
-// allowHistory (never presenceOnly, never nearby) and carries only past chat records, so
-// a peer joining a room later can be handed what was said before it arrived.
+// A fifth stream, 'hist', exists only on sessions opened with allowHistory (never
+// presenceOnly, never nearby) and carries only past chat records, so a peer joining a room
+// later can be handed what was said before it arrived.
 
 import { getRelaySockets, joinRoom, selfId, type Room } from 'trystero/nostr'
 import { aesKeyFromBytes, b64ToBytes, bytesToB64, deriveSharedSecret, randomBytes, safetyNumber, sha256, signEd25519, toHex, verifyEd25519 } from '../core/crypto'
@@ -29,48 +29,48 @@ import { SecureChannel, type SealedMessage } from './ratchet'
 // Trystero namespace. Every room id derives from it, so changing this value moves the
 // whole app to a fresh namespace and older clients can no longer see newer ones.
 const APP_ID = 'urletc'
-// Rendezvous relays, chosen by measurement rather than reputation. The previous set
-// (relay.damus.io, nos.lol, relay.nostr.band) refused essentially every announce: damus
-// answered "rate-limited: you are noting too much", nos.lol demanded 28 bits of
-// proof-of-work, and nostr.band's socket returned 503. That is why the console filled
-// with one warning per announce per room, and it also meant discovery was dead, not
-// merely noisy. These three accepted and fanned out every event of a 75-second run at
-// the real announce cadence (5.3s per room, three rooms). One reachable relay is enough
-// to find a peer, so three is redundancy.
+// Rendezvous relays, chosen by measuring announce fan-out rather than reachability. A
+// relay can accept a subscription and answer EOSE fast while refusing every announce,
+// which leaves discovery dead: strfry.shock.network answered EOSE in 527ms and still
+// refused every announce with an empty reason (33 warnings over 35s on one page, against
+// 9 for offchain.pub and 0 for relay.primal.net), and the earlier set (relay.damus.io,
+// nos.lol, relay.nostr.band) refused with "rate-limited: you are noting too much", a
+// 28-bit proof-of-work demand and a 503. These three accepted and fanned out every event
+// of a 75-second run at the real announce cadence (5.3s per room, three rooms). One
+// reachable relay is enough to find a peer, so three is redundancy.
 //
-// Trystero keeps ONE socket and ONE batched subscription per relay URL across every
+// Trystero keeps one socket and one batched subscription per relay URL across every
 // room, so the tiers (personal / nearby / code / presence) share these three sockets.
-// What multiplies per tier is announce traffic, which is why the list stays short.
+// Announce traffic is what multiplies per tier, which is why the list stays short.
 //
 // Changing this list also requires connect-src in vercel.json and vite.config.ts, or the
 // CSP blocks the socket. scripts/e2e-console.py asserts the two agree.
-const NOSTR_RELAYS = ['wss://relay.mostr.pub', 'wss://bucket.coracle.social', 'wss://strfry.shock.network']
-// A relay flapping is an expected, tolerated condition, so it is reported once per page
-// as a quiet status line instead of being left to the console. Module-scoped because the
-// sockets are shared across tiers: three rooms must not produce three reports.
+const NOSTR_RELAYS = ['wss://relay.mostr.pub', 'wss://bucket.coracle.social', 'wss://relay.primal.net']
+// A flapping relay is expected and tolerated, so it is reported once per page as a status
+// line instead of being left to the console. Module-scoped because the sockets are shared
+// across tiers, so three rooms must not produce three reports.
 const RELAY_HEALTH_DELAY = 12_000
 // --- ICE ------------------------------------------------------------------------------
-// The list is passed EXPLICITLY as rtcConfig.iceServers, which replaces Trystero's own
-// default set rather than adding to it (peer.ts spreads rtcConfig last over
-// `defaultIceServers.concat(turnConfig)`). That matters: the defaults are four STUN
-// servers, so the previous turnConfig on top made six entries and Firefox answered every
-// single peer connection with "WebRTC: Using five or more STUN/TURN servers slows down
-// discovery" (measured: 20 to 25 lines per page, and this app opens up to four rooms).
+// The list is passed as rtcConfig.iceServers, which replaces Trystero's own default set
+// rather than adding to it (peer.ts spreads rtcConfig last over
+// `defaultIceServers.concat(turnConfig)`). The defaults are four STUN servers, so a
+// turnConfig stacked on top made six entries and Firefox logged "WebRTC: Using five or
+// more STUN/TURN servers slows down discovery" on every peer connection (20 to 25 lines
+// per page, and this app opens up to four rooms).
 //
-// Two STUN servers on two operators is redundancy without the penalty. A server-reflexive
-// address is one binding request; asking four hosts for the same answer only widens the
+// Two STUN servers on two operators is redundancy without that penalty. A server-reflexive
+// address is one binding request, so asking four hosts for the same answer only widens the
 // window before gathering completes.
 const STUN_SERVERS: RTCIceServer[] = [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun.cloudflare.com:3478' }]
-// Relay servers. EMPTY, and that is a measured state rather than an oversight: the
-// openrelay.metered.ca entry that used to live here answers an Allocate with
-// "400 TURN allocate error" (the free openrelayproject credentials were retired), so it
-// relayed nothing while still costing every connection a full gathering timeout waiting
-// on a host that would never answer, and counting toward Firefox's five-server warning.
-// A dead relay is worse than no relay.
+// Relay servers, deliberately empty. The openrelay.metered.ca entry that used to live
+// here answers an Allocate with "400 TURN allocate error" (the free openrelayproject
+// credentials were retired), so it relayed nothing while costing every connection a full
+// gathering timeout on a host that would never answer, and counting toward Firefox's
+// five-server warning.
 //
-// The consequence is honest and worth stating: without a relay, peers behind symmetric
-// NAT or carrier-grade NAT cannot reach each other at all. Adding a working TURN entry
-// here is the single-line fix, and relayOnly (below) refuses to pretend otherwise.
+// Without a relay, peers behind symmetric NAT or carrier-grade NAT cannot reach each
+// other at all. Adding a working TURN entry here is the fix, and relayOnly (below)
+// refuses rather than pretending otherwise.
 const TURN_SERVERS: RTCIceServer[] = []
 const ICE_SERVERS: RTCIceServer[] = [...STUN_SERVERS, ...TURN_SERVERS]
 let relayHealthReported = false
@@ -104,47 +104,46 @@ const MAX_MIME_CHARS = 100 // received file MIME type, inbound
 const MAX_INCOMING_FILES = 16 // concurrent in-flight receives
 
 // --- Finishing a file -----------------------------------------------------------------
-// Chunks are fire-and-forget: Trystero stops feeding a channel that will not drain within
+// Chunks are fire-and-forget. Trystero stops feeding a channel that will not drain within
 // its own 10s backpressure window, and a peer that disappears mid-file takes the rest of
-// its chunks with it. Neither case raises anything, so before this the receiver simply
-// sat on a half-file for the lifetime of the page: no card, no error, and the slot still
-// counted against MAX_INCOMING_FILES, so after sixteen of them every later file was
-// refused outright. That is the "the image never arrives, then everything breaks" report.
+// its chunks with it. Neither case raises anything, so a half-file used to sit for the
+// lifetime of the page with no card and no error, while its slot still counted against
+// MAX_INCOMING_FILES, and after sixteen of those every later file was refused.
 //
-// The repair is a short conversation on the ratcheted 'msg' stream, not a redesign of the
-// bulk path: the sender says it is done, the receiver asks for exactly the pieces it is
-// missing, and a receive that goes quiet with nobody to ask is ABANDONED out loud so the
-// slot is freed and the user learns the file is not coming.
+// The repair rides the ratcheted 'msg' stream rather than the bulk path: the sender says
+// it is done, the receiver asks for exactly the pieces it is missing, and a receive that
+// goes quiet with nobody left to ask is abandoned out loud, so the slot is freed and the
+// user learns the file is not coming.
 const FILE_STALL_MS = 20_000 // silence on an in-flight receive before asking, then giving up
 const MAX_REPAIR_ROUNDS = 3 // repair asks honoured per incoming file
 const MAX_REPAIR_CHUNKS = 256 // indices carried by one repair ask
 const OUTGOING_TTL_MS = 120_000 // how long a sent file stays re-sendable for repairs
 const MAX_OUTGOING_FILES = 8 // sent files kept re-sendable at once
 const MAX_CODE_CHARS = 20 // inbound join code ceiling (the Connect field's own maxlength)
-const MIN_CODE_CHARS = 4 // shorter than this is not a room, it is a typo
+const MIN_CODE_CHARS = 4 // anything shorter is treated as a mistyped code
 
 // --- Replayable history ---------------------------------------------------------------
 // There is no server, so "what was said before you arrived" lives on the devices that were
-// there. A joiner PULLS it from a peer that already holds it. Four properties keep that
-// from becoming the worst leak in the app (ARCHITECTURE section 9.1):
+// there. A joiner pulls it from a peer that already holds it. Four properties bound the
+// exposure (ARCHITECTURE section 9.1):
 //
 //   1. The path exists only on a session opened with `allowHistory`, and never on a
 //      presenceOnly one. Checked here, in the session layer, so a tier cannot be opted in
 //      by someone later editing a list in the console.
 //   2. Answering requires a provider the app installed. No provider is silence, which is
 //      also what an empty room looks like, so the setting itself does not leak. The
-//      request is REMEMBERED though, because a peer asks exactly once (at handshake):
-//      without that, agreeing to share a moment later could only ever help the NEXT
-//      joiner, never the person actually waiting.
+//      request is remembered, because a peer asks exactly once (at handshake): without
+//      that, agreeing to share a moment later could only help the next joiner, never the
+//      person already waiting.
 //   3. Records are accepted only from a peer we asked, once, capped. Unsolicited history
-//      is dropped: this is a pull, never a push.
+//      is dropped, so this path is a pull and never a push.
 //   4. The stream carries records and nothing else. It cannot make a peer join a room,
 //      publish media, install a tool or run anything.
 const HISTORY_CHUNK = 25 // records per outbound message
 const MAX_HISTORY_ITEMS = 500 // records sent in one answer, and accepted from one peer per session
 const MAX_HISTORY_CHUNK = 50 // inbound records read from a single message; the rest is discarded
 const MAX_HISTORY_FUTURE_MS = 5 * 60_000 // clock skew tolerated on an inbound timestamp
-const MIN_HISTORY_TS = Date.UTC(2020, 0, 1) // sanity floor; retention policy is the app's, not the wire's
+const MIN_HISTORY_TS = Date.UTC(2020, 0, 1) // sanity floor; the app owns the retention policy
 const MAX_PENDING_HISTORY_ASKS = 32 // peers whose unanswered request we remember, so a later grant can honour it
 // Message ids are minted by the sender and are the dedupe key on arrival, so they are
 // bounded and character-restricted like every other inbound string.
@@ -154,19 +153,17 @@ const HISTORY_ID_RE = /^[A-Za-z0-9_.:-]{1,64}$/
 // Transport tuning only. It reads this room's own senders and never changes who receives
 // what, so the tier rules in the console still decide routing on their own.
 //
-// The browser default is the source of the slideshow: for a screen share the spec asks for
-// 'maintain-resolution', so the encoder keeps every pixel and spends frame rate instead.
-// These profiles pick a preference per source kind, and the loop below adds the floor no
-// preference value can express on its own.
+// The browser default turns a screen share into a slideshow: the spec asks for
+// 'maintain-resolution' there, so the encoder keeps every pixel and spends frame rate
+// instead. These profiles pick a preference per source kind, and the loop below adds the
+// fps floor that no preference value can express on its own.
 //
-//   cam    A face is motion. It stays readable at half resolution and stops being watchable
-//          the moment it stutters, so resolution is the first thing to spend, and the fps
-//          floor sits high.
-//   screen Mostly static text is the opposite case: downscaling it makes it unreadable,
-//          which is worse than a slower cadence. 'balanced' keeps a detail bias while still
-//          letting the encoder shed pixels, and the low fps floor means the loop only
-//          intervenes once the share has genuinely become a slideshow rather than merely
-//          idling on an unchanged screen.
+//   cam    A face stays readable at half resolution and unwatchable when it stutters, so
+//          resolution is the first thing to spend and the fps floor sits high.
+//   screen Downscaling mostly static text makes it unreadable, which is worse than a
+//          slower cadence. 'balanced' keeps a detail bias while still letting the encoder
+//          shed pixels, and the low fps floor means the loop only intervenes once the
+//          share has become a slideshow rather than merely idling on an unchanged screen.
 const ADAPT_PROFILES: Record<'cam' | 'screen', { degradation: RTCDegradationPreference; minFps: number }> = {
   cam: { degradation: 'maintain-framerate', minFps: 18 },
   screen: { degradation: 'balanced', minFps: 8 },
@@ -176,14 +173,14 @@ const ADAPT_STEP = 1.5 // multiplicative move on scaleResolutionDownBy
 const ADAPT_MAX_SCALE = 4 // ratio floor: never below a quarter of each dimension
 const ADAPT_MIN_WIDTH = 320 // absolute floor, so a small source is not scaled into uselessness
 const ADAPT_DOWN_STRIKES = 2 // about 6s of trouble before shedding resolution
-const ADAPT_UP_STRIKES = 5 // about 15s of health before taking any back: recovery is deliberately slower than shedding
+const ADAPT_UP_STRIKES = 5 // about 15s of health before taking any back; recovery is slower than shedding
 const ADAPT_COOLDOWN = 9_000 // ms of quiet after any change, so one step cannot chase the next
 const ADAPT_RECOVER_BPS = 600_000 // estimator headroom required before spending bits on pixels again
 
 /** Control state for one outbound video sender, meaning one peer and one track. */
 interface AdaptEntry {
   scale: number // current scaleResolutionDownBy
-  bad: number // consecutive polls that were encoder-limited AND under the fps floor
+  bad: number // consecutive polls that were encoder-limited and under the fps floor
   good: number // consecutive polls the encoder reported unlimited
   until: number // no further change before this timestamp
 }
@@ -204,7 +201,7 @@ export interface RosterPeer {
 }
 
 export interface ChatMessage {
-  /** Minted by the SENDER and carried on the wire, so a message replayed later by two
+  /** Minted by the sender and carried on the wire, so a message replayed later by two
    *  different peers is recognisably one message. This is the history dedupe key. */
   id: string
   peerId: string
@@ -244,10 +241,10 @@ export interface InviteSignal {
 }
 
 /**
- * One replayable feed entry. `kind: 'file'` is a REFERENCE only: `text` is the file name
- * and `size` its byte count. File bytes are never persisted or replayed, because a blob
- * URL does not survive a reload and re-sending megabytes to every late joiner is not
- * what "history" should mean.
+ * One replayable feed entry. `kind: 'file'` is a reference only, where `text` is the file
+ * name and `size` its byte count. File bytes are never persisted or replayed: a blob URL
+ * does not survive a reload, and re-sending megabytes to every late joiner is out of scope
+ * for history.
  */
 export interface HistoryRecord {
   id: string
@@ -268,17 +265,17 @@ export interface SessionEvents {
   onPeerStream?: (peerId: string, stream: MediaStream, meta?: unknown) => void
   onPeerLeave?: (peerId: string) => void
   /**
-   * A peer on the presence tier signalled on the invite channel. An `offer` is a
-   * REQUEST, never an instruction: the handler must present it and wait for a click.
-   * Auto-joining here would let anyone in the online list pull the user into a room
-   * they control, which is the vulnerability the chat-code path was already fixed for.
+   * A peer on the presence tier signalled on the invite channel. An `offer` is a request,
+   * never an instruction, so the handler must present it and wait for a click. Auto-joining
+   * would let anyone in the online list pull the user into a room they control, the same
+   * hole already closed on the chat-code path.
    */
   onInvite?: (sig: InviteSignal) => void
   /**
    * An authenticated peer asked for history and we answered with silence, because no
-   * provider is installed. Reported so the app can ASK the user at the only moment the
-   * question is meaningful, instead of leaving the setting to be found in a modal.
-   * Purely informational: the peer is told nothing until `answerHistory` is called.
+   * provider is installed. Reported so the app can prompt at the moment the question is
+   * meaningful instead of leaving the setting to be found in a modal. Informational only;
+   * the peer is told nothing until `answerHistory` is called.
    */
   onHistoryRequest?: (peerId: string) => void
 }
@@ -292,13 +289,13 @@ export interface RoomSession {
    * Send to every authenticated peer except those whose pubKeyHex is in `skipKeys`.
    * Returns the pubKeyHex of the peers actually sent to. The console accumulates
    * these across tiers (personal/nearby/code) so a device present in two rooms
-   * receives each message exactly once. No local echo: the caller renders its own.
+   * receives each message exactly once. No local echo; the caller renders its own.
    */
   sendChat(text: string, skipKeys?: ReadonlySet<string>, id?: string): Promise<string[]>
   sendFile(file: File, skipKeys?: ReadonlySet<string>): Promise<string[]>
-  /** Rename this device live: connected peers get a ratcheted announce; future
-   *  handshakes carry the new name. (Names travel only in the handshake otherwise,
-   *  so without this a rename was invisible until reconnect.) */
+  /** Rename this device live. Connected peers get a ratcheted announce and future
+   *  handshakes carry the new name. Names travel only in the handshake otherwise, so
+   *  without this a rename stayed invisible until reconnect. */
   setName(name: string): Promise<void>
   /** Publish a stream to the room. `meta` (e.g. {kind,label}) rides Trystero's per-stream
    *  metadata so recipients can label the source (webcam vs screen vs mic). */
@@ -310,10 +307,10 @@ export interface RoomSession {
   setToolHandler(cb: ((m: Manifest, fromName: string) => void) | null): void
   /**
    * Send a small real-time payload (e.g. game state) to one authenticated peer, or to
-   * all when `targetPeerId` is omitted. Best-effort and UNORDERED by design: it does
-   * NOT ride the forward-secret ratchet (which enforces ordering and would stall on the
-   * UDP loss that real-time state tolerates). Transport-encrypted by the room password
-   * only, like media (ARCHITECTURE section 5.4). Carry coordinates/scores, nothing sensitive.
+   * all when `targetPeerId` is omitted. Best-effort and unordered by design: it does not
+   * ride the forward-secret ratchet, which enforces ordering and would stall on the UDP
+   * loss that real-time state tolerates. Transport-encrypted by the room password only,
+   * like media (ARCHITECTURE section 5.4). Carry coordinates/scores, nothing sensitive.
    */
   sendGame(payload: unknown, targetPeerId?: string): void
   /** Register (or clear) the handler for game payloads from authenticated peers. */
@@ -321,27 +318,27 @@ export interface RoomSession {
   /**
    * Ask one authenticated presence peer to join `code`. Presence-only sessions and
    * handshake-authenticated peers only; returns false when either does not hold. The
-   * code is sealed over the peer's ratchet, not merely transport-encrypted, because a
-   * join code is a room credential and the presence room's password is a constant every
-   * client derives.
+   * code is sealed over the peer's ratchet rather than left to transport encryption,
+   * because a join code is a room credential and the presence room's password is a
+   * constant every client derives.
    */
   sendInvite(peerId: string, code: string): Promise<boolean>
   /**
-   * Configure replayable history. Sending and receiving are SEPARATE decisions and are
-   * passed as separate fields: `provide` non-null installs the answerer for inbound
-   * requests, `request` asks every authenticated peer for theirs, `onRecords` receives
-   * what comes back. `{provide: null, request: false, onRecords: null}` makes the session
-   * inert on this path, which is also its state until this is called.
+   * Configure replayable history. Sending and receiving are separate decisions carried in
+   * separate fields: `provide` non-null installs the answerer for inbound requests,
+   * `request` asks every authenticated peer for theirs, `onRecords` receives what comes
+   * back. `{provide: null, request: false, onRecords: null}` makes the session inert on
+   * this path, which is also its state until this is called.
    *
-   * Ignored outright on a session without `allowHistory`, which is how nearby and
-   * presence stay incapable of carrying history no matter what the caller asks for.
+   * Ignored on a session without `allowHistory`, which is how nearby and presence stay
+   * incapable of carrying history no matter what the caller asks for.
    */
   setHistory(cfg: { provide: (() => HistoryRecord[]) | null; request: boolean; onRecords: ((records: HistoryRecord[], fromPeerId: string) => void) | null }): void
   /**
-   * Answer ONE peer that already asked, without installing a provider for the room.
-   * This is the per-person grant: it is still a pull, because the peer's own request is
-   * the precondition. Returns false when the peer never asked, has already been answered,
-   * is not authenticated, or the session cannot carry history at all.
+   * Answer one peer that already asked, without installing a provider for the room. The
+   * per-person grant is still a pull, since the peer's own request is the precondition.
+   * Returns false when the peer never asked, has already been answered, is not
+   * authenticated, or the session cannot carry history at all.
    */
   answerHistory(peerId: string, records: HistoryRecord[]): Promise<boolean>
   /** Whether this session may carry history at all. */
@@ -354,8 +351,8 @@ export interface RoomSession {
 }
 
 // Several sessions can be alive at once (personal / nearby / code tiers). Tools that
-// need "a mesh" without caring which (Workshop) get the primary one: the personal
-// room when joined, else whichever came first.
+// need "a mesh" without caring which (Workshop) get the primary one, meaning the
+// personal room when joined, else whichever came first.
 let active: RoomSession | null = null
 export function getActiveSession(): RoomSession | null {
   return active
@@ -429,29 +426,28 @@ export async function joinRoomSession(opts: {
    * no-ops. Such a session also stays out of getAllSessions()/getActiveSession(), so a
    * P2P tool enumerating "every reachable peer" cannot reach these peers either.
    *
-   * The single exception is the 'inv' channel, which exists ONLY on these sessions and
-   * carries ONLY a join code: it is the upgrade path from visible to reachable. It adds
-   * no content path, because acting on an invite means joining a normal code room where
-   * the usual tier rules apply.
+   * The single exception is the 'inv' channel, which exists only on these sessions and
+   * carries only a join code, as the upgrade path from visible to reachable. It adds no
+   * content path, because acting on an invite means joining a normal code room where the
+   * usual tier rules apply.
    *
-   * This is enforced HERE rather than in the console so that a tier which is only meant
-   * to answer "who is online" cannot become a message path by someone later adding a
-   * tier to a list somewhere else.
+   * Enforced here rather than in the console, so that a tier meant only to answer "who is
+   * online" cannot become a message path by someone later adding a tier to a list
+   * somewhere else.
    */
   presenceOnly?: boolean
   /**
-   * Permit the 'hist' stream on this session. Off by default, so a new tier is opted OUT
+   * Permit the 'hist' stream on this session. Off by default, so a new tier is opted out
    * of replaying what was said before a peer arrived until someone says otherwise, the
-   * same failure direction as MEDIA_TIERS. Never combine with presenceOnly: the two are
+   * same failure direction as MEDIA_TIERS. Never combine with presenceOnly; the two are
    * ANDed below and presenceOnly wins.
    */
   allowHistory?: boolean
   events: SessionEvents
 }): Promise<RoomSession> {
   const ev = opts.events
-  // 'relay' means "use ONLY a relay", so with no TURN entry the browser gathers zero
-  // candidates and the room connects nobody, silently and forever. Refusing here is the
-  // difference between an answer and a bug report.
+  // 'relay' means "use only a relay", so with no TURN entry the browser gathers zero
+  // candidates and the room silently connects nobody. Refusing here surfaces that instead.
   if (opts.relayOnly && !TURN_SERVERS.length) throw new Error('Relay-only needs a TURN server, and none is configured.')
   let displayName = opts.displayName
   const id = await loadOrCreateIdentity()
@@ -465,7 +461,7 @@ export async function joinRoomSession(opts: {
       appId: APP_ID,
       password: opts.password,
       relayConfig: { urls: NOSTR_RELAYS },
-      // iceServers here, not turnConfig: this REPLACES Trystero's four default STUN
+      // iceServers, not turnConfig, so this replaces Trystero's four default STUN
       // servers instead of stacking on top of them (see ICE_SERVERS above).
       rtcConfig: { iceServers: ICE_SERVERS, iceTransportPolicy: opts.relayOnly ? 'relay' : 'all' },
     },
@@ -485,14 +481,14 @@ export async function joinRoomSession(opts: {
   const fdata = room.makeAction<FileChunk>('fdata')
   const wshop = room.makeAction('wshop')
   const gameAction = room.makeAction('game')
-  // Its own action rather than another Envelope case on 'msg', so the unconditional
-  // presenceOnly drop in msg.onMessage stays unconditional. Both streams seal against
-  // the same per-peer channel, which is safe because each SealedMessage carries its own
-  // counter `n`, so a message dropped on one stream cannot desync the other.
+  // Its own action rather than another Envelope case on 'msg', so the presenceOnly drop
+  // in msg.onMessage stays unconditional. Both streams seal against the same per-peer
+  // channel, which is safe because each SealedMessage carries its own counter `n`, so a
+  // message dropped on one stream cannot desync the other.
   const inv = room.makeAction<SealedMessage>('inv')
-  // Same reasoning as 'inv': its own action, so the presenceOnly / allowHistory check that
-  // governs it is one unconditional line at the top of one handler rather than a case
-  // buried in the Envelope switch that someone can later add a branch beside.
+  // Same reasoning as 'inv': its own action, so the presenceOnly / allowHistory check is
+  // one unconditional line at the top of one handler rather than a case in the Envelope
+  // switch that someone can later add a branch beside.
   const hist = room.makeAction<SealedMessage>('hist')
   let toolHandler: ((m: Manifest, fromName: string) => void) | null = null
   let gameHandler: ((payload: unknown, fromPeerId: string) => void) | null = null
@@ -503,9 +499,9 @@ export async function joinRoomSession(opts: {
   let historyProvide: (() => HistoryRecord[]) | null = null
   let historyRequest = false
   let historyRecords: ((records: HistoryRecord[], fromPeerId: string) => void) | null = null
-  const historyServed = new Set<string>() // peers already answered: one answer each, ever
+  const historyServed = new Set<string>() // peers already answered; one answer each, ever
   const historyPending = new Set<string>() // peers that asked while no provider existed
-  const historyAsked = new Set<string>() // peers we asked: ONLY these may hand us records
+  const historyAsked = new Set<string>() // peers we asked; only these may hand us records
   const historyTaken = new Map<string, number>() // records accepted per peer, capped
 
   const emitRoster = () => ev.onRoster?.([...peers.values()].map((p) => p.info))
@@ -533,15 +529,15 @@ export async function joinRoomSession(opts: {
     peers.set(peerId, st)
     emitRoster()
     // No card for the attempt. Every peer used to cost two feed cards, one for joining and
-    // one for the handshake completing, which is process narration. Only the result speaks.
+    // one for the handshake completing; only the result is reported now.
     await sendHandshake(peerId, st)
   }
 
   room.onPeerLeave = (peerId: string) => {
     const st = peers.get(peerId)
     peers.delete(peerId)
-    // Their half-sent files can never complete now: nobody is left to ask. Say so and
-    // free the slot, rather than holding it against MAX_INCOMING_FILES for the page's life.
+    // Their half-sent files can never complete, since nobody is left to ask. Report and
+    // free the slot rather than holding it against MAX_INCOMING_FILES for the page's life.
     for (const [fileId, inc] of [...incoming]) if (inc.peerId === peerId) abandonIncoming(fileId)
     historyServed.delete(peerId)
     historyPending.delete(peerId)
@@ -566,7 +562,7 @@ export async function joinRoomSession(opts: {
     const theirIdPub = b64ToBytes(data.idPub)
     const ok = await verifyEd25519(theirIdPub, b64ToBytes(data.sig), concat(theirEph, roomSalt))
     if (!ok) {
-      ev.onSystem?.('⚠ Rejected a peer with an invalid signature.')
+      ev.onSystem?.('Rejected a peer with an invalid signature.')
       peers.delete(peerId)
       emitRoster()
       return
@@ -579,9 +575,9 @@ export async function joinRoomSession(opts: {
     st.info = {
       peerId,
       deviceId: toHex(await sha256(theirIdPub)),
-      // The handshake is the PRIMARY inbound name path; the {t:'name'} rename envelope
-      // below is the secondary one. Both are capped: an uncapped one lets a peer seat an
-      // unbounded string in the roster, every chat author line and the system feed.
+      // The handshake is the primary inbound name path and the {t:'name'} rename envelope
+      // below is the secondary one. Both are capped, because an uncapped one lets a peer
+      // seat an unbounded string in the roster, every chat author line and the feed.
       name:
         String(data.name ?? '')
           .trim()
@@ -597,8 +593,8 @@ export async function joinRoomSession(opts: {
     // meta is always a {kind,label} object (or undefined), a valid JSON value for Trystero.
     for (const [stream, meta] of activeStreams) room.addStream(stream, { target: peerId, metadata: meta as Record<string, string> | undefined })
     runAdaptTick() // the new peer's senders start on the browser default until this asserts the profile
-    // Backfill is requested at exactly this point: after the peer's signature verified and
-    // its ratchet exists, so the ask is authenticated and sealed like everything else.
+    // Backfill is requested here, after the peer's signature verified and its ratchet
+    // exists, so the ask is authenticated and sealed like everything else.
     void askHistory(peerId, st)
   }
 
@@ -617,7 +613,7 @@ export async function joinRoomSession(opts: {
     return true
   }
 
-  /** Give up on a receive, out loud. Freeing the slot is the half that matters: a wedged
+  /** Give up on a receive, out loud. Freeing the slot matters most, because a wedged
    *  entry counts against MAX_INCOMING_FILES for the life of the page. */
   function abandonIncoming(fileId: string): void {
     const inc = incoming.get(fileId)
@@ -670,7 +666,7 @@ export async function joinRoomSession(opts: {
         ev.onFileReceived?.({ id: inc.id, name: inc.name, ftype: inc.ftype, url, size: inc.size, from: inc.from })
       }
     } catch {
-      ev.onSystem?.('⚠ Failed to decrypt a file chunk.')
+      ev.onSystem?.('Failed to decrypt a file chunk.')
     }
   }
 
@@ -682,18 +678,18 @@ export async function joinRoomSession(opts: {
     try {
       env = JSON.parse(dec.decode(await st.channel.open(data))) as Envelope
     } catch {
-      ev.onSystem?.('⚠ Failed to decrypt a message (out of order or tampered).')
+      ev.onSystem?.('Failed to decrypt a message (out of order or tampered).')
       return
     }
     if (env.t === 'chat') {
-      // Cap inbound text like the display name below it: rendering is textContent so this
+      // Cap inbound text like the display name below it. Rendering is textContent, so this
       // is not an XSS control, but without it a peer can push an unbounded string into
       // the feed.
       const text = String(env.text ?? '').slice(0, MAX_CHAT_CHARS)
       if (!text) return
-      // The id is the SENDER's, so two peers replaying the same message later agree on
+      // The id is the sender's, so two peers replaying the same message later agree on
       // what one message is. Bounded like any other inbound string; a peer that sends
-      // none (or a malformed one) gets a local id, which only costs dedupe against it.
+      // none, or a malformed one, gets a local id, which only costs dedupe against it.
       const rawId = String(env.id ?? '')
       ev.onChat?.({
         id: HISTORY_ID_RE.test(rawId) ? rawId : crypto.randomUUID(),
@@ -715,14 +711,14 @@ export async function joinRoomSession(opts: {
       // bounded here rather than trusted. Ours are UUIDs, which pass.
       if (!HISTORY_ID_RE.test(String(env.fileId ?? ''))) return
       if (!Number.isInteger(env.total) || env.total < 1 || env.total > MAX_FILE_CHUNKS) {
-        ev.onSystem?.('⚠ Rejected an oversized or malformed file offer.')
+        ev.onSystem?.('Rejected an oversized or malformed file offer.')
         return
       }
       // Without this cap one authenticated peer can announce unlimited files, each
       // allocating a 32768-slot backing array. MAX_PENDING_FILES gates `pendingChunks`,
       // which is a different map and does not bound this one.
       if (incoming.size >= MAX_INCOMING_FILES) {
-        ev.onSystem?.('⚠ Too many files in flight from peers. Rejected one.')
+        ev.onSystem?.('Too many files in flight from peers. Rejected one.')
         return
       }
       // Name/MIME/size are peer-controlled and reach the feed, the download attribute
@@ -764,7 +760,7 @@ export async function joinRoomSession(opts: {
       if (!(await requestRepair(inc.id))) abandonIncoming(inc.id)
       else watchIncoming(inc.id)
     } else if (env.t === 'fneed') {
-      // A recipient is asking for pieces of a file WE sent. Only a file we still hold can
+      // A recipient is asking for pieces of a file we sent. Only a file we still hold can
       // be answered, only to the peer that asked, and only for in-range indices.
       const out = outgoing.get(String(env.fileId ?? ''))
       if (!out || out.expires < Date.now()) return
@@ -785,7 +781,7 @@ export async function joinRoomSession(opts: {
   fdata.onMessage = async (data, ctx) => {
     if (opts.presenceOnly) return
     // Only handshake-authenticated peers may send file data (the per-file key was
-    // delivered over their ratchet anyway). This + the caps below bound the buffer.
+    // delivered over their ratchet anyway). This and the caps below bound the buffer.
     if (!peers.get(ctx.peerId)?.channel) return
     if (!HISTORY_ID_RE.test(String(data.fileId ?? ''))) return // same bound as the offer above
     if (!incoming.has(data.fileId)) {
@@ -799,7 +795,7 @@ export async function joinRoomSession(opts: {
     await handleChunk(data.fileId, data)
   }
 
-  // Workshop tool gossip: verify integrity + signature BEFORE surfacing (section 7).
+  // Workshop tool gossip. Integrity and signature are verified before surfacing (section 7).
   wshop.onMessage = async (data, ctx) => {
     if (opts.presenceOnly) return
     if (!peers.get(ctx.peerId)?.channel) return // only authenticated peers may gossip tools
@@ -807,42 +803,42 @@ export async function joinRoomSession(opts: {
       const m = ManifestSchema.parse(data)
       const v = await verifyManifest(m)
       if (!v.ok) {
-        ev.onSystem?.(`⚠ Rejected a shared tool (${v.reason}).`)
+        ev.onSystem?.(`Rejected a shared tool (${v.reason}).`)
         return
       }
       const st = peers.get(ctx.peerId)
       ev.onSystem?.(`📦 ${st?.info.name ?? 'A peer'} shared a tool: "${m.name}".`)
       toolHandler?.(m, st?.info.name ?? 'peer')
     } catch {
-      ev.onSystem?.('⚠ Rejected a malformed shared tool.')
+      ev.onSystem?.('Rejected a malformed shared tool.')
     }
   }
 
-  // Real-time game/state payloads. Authenticated peers only (same gate as chat/gossip);
-  // the payload is handed opaque to the registered handler (e.g. the Pong tool).
+  // Real-time game/state payloads. Authenticated peers only, the same gate as chat and
+  // gossip; the payload is handed opaque to the registered handler (e.g. the Pong tool).
   gameAction.onMessage = (data, ctx) => {
     if (!peers.get(ctx.peerId)?.channel) return
     gameHandler?.(data, ctx.peerId)
   }
 
   // Invite channel (presence tier only). Everything here is one join code and nothing
-  // else, and it NEVER acts: it hands the signal to the app, which must ask the user.
+  // else, and it never acts. It hands the signal to the app, which must ask the user.
   inv.onMessage = async (data, ctx) => {
     if (!opts.presenceOnly) return // the channel does not exist on content-carrying tiers
     const st = peers.get(ctx.peerId)
     if (!st?.channel) return // handshake-authenticated peers only
     let env: InviteEnvelope
     try {
-      // Sealed, so this also rejects a replayed invite: the ratchet refuses a counter
-      // it has already consumed.
+      // Sealed, so this also rejects a replayed invite, because the ratchet refuses a
+      // counter it has already consumed.
       env = JSON.parse(dec.decode(await st.channel.open(data))) as InviteEnvelope
     } catch {
       return // a malformed or replayed invite is dropped in silence, not reported
     }
     const who = { peerId: ctx.peerId, deviceId: st.info.deviceId, name: st.info.name, pubKeyHex: st.info.pubKeyHex }
     if (env.t === 'offer') {
-      // Bounded and normalised here, at the trust boundary, exactly like every other
-      // inbound string. Anything that is not a plausible code is not surfaced at all.
+      // Bounded and normalised here at the trust boundary, like every other inbound
+      // string. Anything that is not a plausible code is not surfaced at all.
       const code = normalizeJoinCode(String(env.code ?? '')).slice(0, MAX_CODE_CHARS)
       if (code.length < MIN_CODE_CHARS) return
       ev.onInvite?.({ ...who, kind: 'offer', code })
@@ -853,9 +849,9 @@ export async function joinRoomSession(opts: {
 
   /**
    * Validate one inbound history record. Every field is peer-controlled, so each is
-   * bounded here at the session boundary exactly like inbound chat text, display names
-   * and file metadata. A record that is not well-formed is DROPPED, never repaired:
-   * a missing id would defeat dedupe, and a bogus timestamp would reorder the replay.
+   * bounded here at the session boundary like inbound chat text, display names and file
+   * metadata. A malformed record is dropped rather than repaired: a missing id would
+   * defeat dedupe, and a bogus timestamp would reorder the replay.
    */
   function sanitizeHistory(v: unknown): HistoryRecord | null {
     if (!v || typeof v !== 'object') return null
@@ -890,7 +886,7 @@ export async function joinRoomSession(opts: {
   // History channel. Only on sessions that may carry it, only between authenticated
   // peers, only records, and only as an answer to a request we made.
   hist.onMessage = async (data, ctx) => {
-    if (!historyOk) return // nearby / presence / any tier not opted in: the stream does not exist here
+    if (!historyOk) return // nearby, presence, any tier not opted in: no such stream here
     const st = peers.get(ctx.peerId)
     if (!st?.channel) return // handshake-authenticated peers only
     let env: HistEnvelope
@@ -898,16 +894,16 @@ export async function joinRoomSession(opts: {
       // Sealed, so a replayed request is refused by the ratchet before it is parsed.
       env = JSON.parse(dec.decode(await st.channel.open(data))) as HistEnvelope
     } catch {
-      return // malformed or replayed: dropped in silence
+      return // malformed or replayed, dropped in silence
     }
     if (env.t === 'hreq') {
-      // A second request is ignored: one answer per peer, so a request cannot be looped
-      // to make us re-encrypt and re-send the whole store.
+      // One answer per peer, so a second request is ignored and a request cannot be
+      // looped to make us re-encrypt and re-send the whole store.
       if (historyServed.has(ctx.peerId)) return
-      // No provider means the app has not agreed to share into this room. That answers
-      // with silence, which is exactly what an empty room answers, so a peer cannot probe
-      // the setting. The ASK is kept locally (bounded, and never told to them) so that a
-      // grant made seconds later can still reach the person who is waiting for it.
+      // No provider means sharing into this room is not enabled, and the answer is
+      // silence, which is also what an empty room answers, so a peer cannot probe the
+      // setting. The request is kept locally, bounded and never acknowledged, so a grant
+      // made seconds later can still reach the peer that is waiting for it.
       if (!historyProvide) {
         if (historyPending.size < MAX_PENDING_HISTORY_ASKS) historyPending.add(ctx.peerId)
         ev.onHistoryRequest?.(ctx.peerId)
@@ -917,8 +913,8 @@ export async function joinRoomSession(opts: {
       return
     }
     if (env.t !== 'hres') return
-    // A pull, never a push. Records from a peer we did not ask are dropped, so no peer
-    // can seed our feed (or our own future replays) on its own initiative.
+    // A pull and never a push. Records from a peer we did not ask are dropped, so no peer
+    // can seed our feed, or our own future replays, on its own initiative.
     if (!historyRecords || !historyAsked.has(ctx.peerId)) return
     const taken = historyTaken.get(ctx.peerId) ?? 0
     if (taken >= MAX_HISTORY_ITEMS) return
@@ -935,8 +931,8 @@ export async function joinRoomSession(opts: {
   }
 
   /**
-   * Send our records to one peer that asked. The single outbound path for history, so
-   * the "one answer per peer, ever" rule and the outbound cap are enforced in one place
+   * Send our records to one peer that asked. The only outbound path for history, so the
+   * "one answer per peer, ever" rule and the outbound cap are enforced in one place
    * whether the answer is automatic (a provider is installed) or granted by hand.
    */
   async function serveHistory(peerId: string, records: HistoryRecord[]): Promise<boolean> {
@@ -956,7 +952,7 @@ export async function joinRoomSession(opts: {
   async function askHistory(peerId: string, st: PeerState): Promise<void> {
     if (!historyOk || !historyRequest || !st.channel) return
     if (historyAsked.has(peerId)) return
-    historyAsked.add(peerId) // set BEFORE the send: this is also the "may answer us" gate
+    historyAsked.add(peerId) // set before the send; it is also the "may answer us" gate
     await hist.send(await st.channel.seal(enc.encode(JSON.stringify({ t: 'hreq' } satisfies HistEnvelope))), { target: peerId })
   }
 
@@ -988,8 +984,8 @@ export async function joinRoomSession(opts: {
     for (const [stream, meta] of activeStreams) {
       if (!stream.getVideoTracks().some((t) => t.id === track.id)) continue
       const k = metaKind(meta)
-      // An unlabelled video source is treated as a camera. That is the assumption that
-      // fails safe: a mislabelled screen share only loses pixels, never cadence.
+      // An unlabelled video source is treated as a camera, the assumption that fails
+      // safe, since a mislabelled screen share only loses pixels and never cadence.
       return k === 'mic' ? null : ADAPT_PROFILES[k === 'screen' ? 'screen' : 'cam']
     }
     return null // a sender for a stream this session no longer publishes
@@ -998,9 +994,9 @@ export async function joinRoomSession(opts: {
   /**
    * Write encoding parameters back. setParameters() rejects unless it is handed the very
    * object getParameters() returned, encodings can be empty while a renegotiation is in
-   * flight, and the promise rejects benignly when the transaction has gone stale. All three
-   * are non-events, so all three are swallowed: a rejection here must neither kill the loop
-   * nor reach the console.
+   * flight, and the promise rejects benignly when the transaction has gone stale. All
+   * three are non-events and all three are swallowed, because a rejection here must
+   * neither kill the loop nor reach the console.
    */
   async function applyEncoding(sender: RTCRtpSender, scale: number, degradation: RTCDegradationPreference): Promise<void> {
     let params: RTCRtpSendParameters
@@ -1042,7 +1038,7 @@ export async function joinRoomSession(opts: {
     return { limited: reason === 'bandwidth' || reason === 'cpu', fps: best.framesPerSecond, width: best.frameWidth, bps }
   }
 
-  /** One pass: assert the profile on every outbound video sender, then act on its stats. */
+  /** One pass. Asserts the profile on every outbound video sender, then acts on its stats. */
   async function adaptTick(): Promise<void> {
     let conns: Record<string, RTCPeerConnection>
     try {
@@ -1081,19 +1077,19 @@ export async function joinRoomSession(opts: {
           st.bad++
           st.good = 0
         } else if (!s.limited) {
-          // Health is judged by the encoder, not by the frame rate: a static screen share
-          // legitimately emits almost no frames while reporting no limitation at all, and
-          // reading that as distress would scale a readable document into mush.
+          // Health is judged by the encoder rather than the frame rate. A static screen
+          // share legitimately emits almost no frames while reporting no limitation, and
+          // reading that as distress would scale a readable document to unreadable.
           st.good++
           st.bad = 0
         } else {
           st.bad = 0
-          st.good = 0 // limited but still fast enough: hold where we are
+          st.good = 0 // limited but still fast enough, so hold where we are
         }
         if (now < st.until) continue
-        // Only scaleResolutionDownBy moves. maxBitrate is deliberately left alone: fewer
-        // pixels is what buys frames back, while capping the rate merely fights the
-        // bandwidth estimator, which already reads the link far more often than a 3s poll.
+        // Only scaleResolutionDownBy moves. maxBitrate is left alone because fewer pixels
+        // is what buys frames back, while capping the rate fights the bandwidth estimator,
+        // which already reads the link far more often than a 3s poll.
         const roomToShrink = st.scale < ADAPT_MAX_SCALE && (s.width === undefined || s.width / ADAPT_STEP >= ADAPT_MIN_WIDTH)
         if (st.bad >= ADAPT_DOWN_STRIKES && roomToShrink) {
           st.scale = Math.min(ADAPT_MAX_SCALE, st.scale * ADAPT_STEP)
@@ -1103,7 +1099,7 @@ export async function joinRoomSession(opts: {
         } else if (st.good >= ADAPT_UP_STRIKES && st.scale > 1 && (s.bps === undefined || s.bps >= ADAPT_RECOVER_BPS)) {
           // Taking pixels back costs bits, so it waits for the estimator to show headroom.
           // Without that gate the loop walks up onto a link with no room and immediately
-          // walks back down, which is the oscillation this is built to avoid.
+          // walks back down.
           st.scale = Math.max(1, st.scale / ADAPT_STEP)
           st.good = 0
           st.until = now + ADAPT_COOLDOWN
@@ -1130,7 +1126,7 @@ export async function joinRoomSession(opts: {
     adaptState.clear()
   }
 
-  /** Run the loop exactly while this session publishes video, and not one publish longer. */
+  /** Run the loop only while this session publishes video. */
   function syncAdaptLoop(): void {
     const wanted = !opts.presenceOnly && [...activeStreams.keys()].some((s) => s.getVideoTracks().length > 0)
     if (wanted === (adaptTimer !== null)) return
@@ -1179,14 +1175,14 @@ export async function joinRoomSession(opts: {
     },
 
     setHistory(cfg) {
-      if (!historyOk) return // the one place a caller's intent is overruled, on purpose
+      if (!historyOk) return // a caller's intent is overruled here, on purpose
       historyProvide = cfg.provide
       historyRequest = cfg.request
       historyRecords = cfg.onRecords
-      // A provider installed AFTER a peer asked answers that peer now. Without this the
-      // switch only ever helped the NEXT joiner, because a peer asks once and never again.
+      // A provider installed after a peer asked answers that peer now. Without this the
+      // switch only helped the next joiner, because a peer asks once and never again.
       if (historyProvide && historyPending.size) {
-        const owed = historyProvide() // read once: every waiting peer is answered from the same snapshot
+        const owed = historyProvide() // read once, so every waiting peer sees one snapshot
         for (const peerId of [...historyPending]) void serveHistory(peerId, owed)
       }
       // A setting flipped after the room filled must still reach the peers already in it,
@@ -1194,8 +1190,8 @@ export async function joinRoomSession(opts: {
       if (historyRequest) for (const [peerId, st] of peers) if (st.channel) void askHistory(peerId, st)
     },
     async answerHistory(peerId, records) {
-      // Still a pull: only a peer whose own request is outstanding can be answered, so
-      // this cannot be turned into a way to push history at someone who never asked.
+      // Still a pull. Only a peer whose own request is outstanding can be answered, so
+      // this cannot become a way to push history at someone who never asked.
       if (!historyOk || !historyPending.has(peerId)) return false
       return serveHistory(peerId, records)
     },
@@ -1214,7 +1210,7 @@ export async function joinRoomSession(opts: {
 
     async setName(name: string) {
       displayName = name.trim().slice(0, 32) || displayName
-      // A presence peer DROPS {t:'name'} (msg.onMessage returns early there), so
+      // A presence peer drops {t:'name'} (msg.onMessage returns early there), so
       // announcing a rename to them is traffic nobody reads. Skipping it also leaves the
       // presence ratchet to the invite stream alone. Presence names refresh on handshake.
       if (opts.presenceOnly) return
@@ -1235,8 +1231,8 @@ export async function joinRoomSession(opts: {
       const aesKey = await aesKeyFromBytes(keyBytes)
 
       // Deliver the per-file key to each recipient over their ratchet. A peer that has
-      // gone since `ready` was taken is DROPPED here rather than allowed to reject the
-      // whole call: losing one recipient must not cancel the file for the others.
+      // gone since `ready` was taken is dropped here rather than allowed to reject the
+      // whole call, so losing one recipient does not cancel the file for the others.
       const recipients: typeof ready = []
       for (const [peerId, st] of ready) {
         const env: Envelope = { t: 'file', fileId, name: file.name, ftype: file.type || 'application/octet-stream', size: file.size, total, key: bytesToB64(keyBytes) }
@@ -1249,8 +1245,8 @@ export async function joinRoomSession(opts: {
       }
       if (!recipients.length) return []
       // Kept re-sendable for a while so a recipient can ask for pieces that never landed
-      // (the 'fneed' branch above). Bounded in both count and time: this holds the whole
-      // file in memory.
+      // (the 'fneed' branch above). Bounded in both count and time, since this holds the
+      // whole file in memory.
       if (outgoing.size >= MAX_OUTGOING_FILES) {
         const oldest = [...outgoing.entries()].sort((a, b) => a[1].expires - b[1].expires)[0]
         if (oldest) outgoing.delete(oldest[0])
@@ -1260,10 +1256,9 @@ export async function joinRoomSession(opts: {
       // Chunks are encrypted once with the per-file key and targeted at the recipients
       // only. Peers we skipped (already reached via another tier) get nothing.
       //
-      // One send covers every recipient, so one peer whose channel closed mid-file used
-      // to reject the whole call and abandon the transfer to everyone else (and, with no
-      // catch upstream, as an unhandled rejection). Drop the peers that are gone and
-      // carry on with the rest instead.
+      // One send covers every recipient, so a peer whose channel closed mid-file used to
+      // reject the whole call and abandon the transfer to everyone else, as an unhandled
+      // rejection. Drop the peers that are gone and carry on with the rest.
       let live = recipients.map(([peerId]) => peerId)
       for (let i = 0; i < total && live.length; i++) {
         const buf = new Uint8Array(await file.slice(i * CHUNK, (i + 1) * CHUNK).arrayBuffer())
@@ -1284,8 +1279,8 @@ export async function joinRoomSession(opts: {
         }
         ev.onFileProgress?.(fileId, file.name, i + 1, total, true)
       }
-      // Say so explicitly. Chunks carry no acknowledgement, so without this a receive that
-      // lost pieces has nothing to react to until its watchdog fires.
+      // Announce the end explicitly. Chunks carry no acknowledgement, so without this a
+      // receive that lost pieces has nothing to react to until its watchdog fires.
       for (const [peerId, st] of recipients) {
         if (!live.includes(peerId) || !st.channel) continue
         try {
@@ -1307,7 +1302,7 @@ export async function joinRoomSession(opts: {
     removeMedia(stream: MediaStream) {
       activeStreams.delete(stream)
       room.removeStream(stream)
-      syncAdaptLoop() // stops the loop on the last video stream, not merely on leave()
+      syncAdaptLoop() // stops the loop when the last video stream goes, as well as on leave()
     },
 
     async leave() {

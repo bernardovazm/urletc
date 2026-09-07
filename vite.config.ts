@@ -9,11 +9,13 @@ const isolation = {
   'Cross-Origin-Embedder-Policy': 'credentialless',
 }
 
-// Production CSP + Trusted Types, kept in sync with vercel.json. Applied to
-// `vite preview`, which serves the built, inline-script-free bundle exactly like the
-// deploy. Contributors and CI therefore exercise Trusted Types / style-src 'self' locally
-// and a regression fails the e2e instead of only surfacing in production. NOT applied to the dev
-// server: Vite HMR injects inline scripts/eval that a strict CSP would break.
+// Production CSP and Trusted Types, kept in sync with vercel.json. Applied to
+// `vite preview`, which serves the built bundle the way the deploy does, so a Trusted
+// Types or style-src regression fails the e2e run locally instead of in production. The
+// dev server does not get it: HMR injects inline scripts and eval.
+//
+// vite preview reads this file once at startup, so a change here needs a restart and not
+// just a rebuild.
 const CSP = [
   "default-src 'none'",
   "script-src 'self' 'wasm-unsafe-eval'",
@@ -23,7 +25,7 @@ const CSP = [
   "media-src 'self' blob:",
   "font-src 'self'",
   "manifest-src 'self'",
-  "connect-src 'self' https://api.mail.gw https://spoo.me https://raw.githubusercontent.com https://tessdata.projectnaptha.com https://huggingface.co https://*.huggingface.co https://*.hf.co https://*.xethub.hf.co https://cdn.jsdelivr.net wss://relay.mostr.pub wss://bucket.coracle.social wss://strfry.shock.network",
+  "connect-src 'self' https://api.mail.gw https://spoo.me https://raw.githubusercontent.com https://tessdata.projectnaptha.com https://huggingface.co https://*.huggingface.co https://*.hf.co https://*.xethub.hf.co https://cdn.jsdelivr.net wss://relay.mostr.pub wss://bucket.coracle.social wss://relay.primal.net",
   "frame-src 'self' blob:",
   "frame-ancestors 'none'",
   "require-trusted-types-for 'script'",
@@ -40,19 +42,17 @@ export default defineConfig({
       srcDir: 'src',
       filename: 'sw.ts',
       registerType: 'autoUpdate',
-      // No inline registration script, because strict CSP forbids inline <script>.
-      // We call registerSW() from main.ts instead.
+      // No inline registration script: the CSP forbids inline <script>. main.ts calls
+      // registerSW() instead.
       injectRegister: false,
       injectManifest: {
         // Precache only the app shell. Lazy tool chunks + workers are runtime-cached
         // on first use by the SW fetch handler (sw.ts). That keeps SW install light and
         // preserves lazy loading. Heavy self-hosted OCR core is never precached.
         //
-        // manifest.webmanifest is NOT listed here. vite-plugin-pwa injects the manifest it
-        // generates into the precache list on its own, so naming it again put the same URL
-        // in the list twice and `Cache.addAll` rejects duplicate requests with
-        // InvalidStateError. That failed the whole install event, so nothing was precached
-        // and offline support was dead on every load.
+        // Do not add manifest.webmanifest: vite-plugin-pwa injects it into the precache
+        // list itself, and a duplicate URL makes Cache.addAll reject with InvalidStateError,
+        // which fails the install event and leaves nothing precached.
         globPatterns: ['index.html', 'assets/index-*.{js,css}', 'assets/workbox-window*.js'],
         maximumFileSizeToCacheInBytes: 3_000_000,
       },

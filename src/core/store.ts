@@ -13,12 +13,16 @@
 // Primary XSS controls remain CSP and Trusted Types. Encrypted-at-rest is secondary and
 // is not an XSS control in device mode.
 
-import { createStore, del, get, keys, set } from 'idb-keyval'
+import { clear, createStore, del, get, keys, set } from 'idb-keyval'
 import { aesGcmDecrypt, aesGcmEncrypt, randomBytes, type AesGcmBlob } from './crypto'
 import type { ToolStorage } from '../shell/registry'
 
 const keyStore = createStore('wt-keys', 'kv')
 const dataStore = createStore('wt-data', 'kv')
+// Feed bodies are cached outside the vault by src/tools/url-safety.ts. Its own handle to
+// the same database stays there; this one exists so the reset below does not have to
+// import a tool from core.
+const feedStore = createStore('wt-feeds', 'kv')
 const WRAP_KEY_ID = 'wrap-key:v1'
 const MODE_ID = 'mode:v1'
 const SALT_ID = 'pp-salt:v1'
@@ -240,6 +244,42 @@ export async function removeItem(key: string): Promise<void> {
 
 export async function allKeys(): Promise<string[]> {
   return (await keys(dataStore)).map(String)
+}
+
+/**
+ * Factory reset: erase everything this origin persists.
+ *
+ * Ciphertext is dropped before the keys that unwrap it, so an interruption leaves
+ * unreadable items rather than readable ones under a wrapping key that initStore is about
+ * to regenerate. Clearing wt-keys destroys the wrapping key, the passphrase salt and
+ * verifier, and the device identity keypairs, so the in-memory key is dropped and the
+ * store is marked locked: any write still in flight then throws instead of re-seeding the
+ * vault under a key that no longer exists on disk. The caller must reload; nothing can
+ * continue in memory once the identity is gone.
+ */
+export async function wipeAll(): Promise<void> {
+  await clear(dataStore) // vault items, including every tool:<id>: namespace
+  await clear(keyStore) // wrap key, mode, salt, verifier, migration marker, identity keypairs
+  wrapKey = null
+  locked = true
+
+  try {
+    localStorage.clear() // wt-theme, plus anything else this origin parked there
+  } catch {
+    // storage blocked by policy, so there is nothing of ours in it
+  }
+
+  // Independent of the vault and of each other, so one unavailable API does not strand the
+  // rest. Every cache name is dropped, not just the current precache, since a superseded
+  // one is still app data. Losing the precache costs offline start until the next online
+  // load.
+  await Promise.allSettled([
+    clear(feedStore),
+    (async () => {
+      if (!('caches' in globalThis)) return
+      for (const name of await caches.keys()) await caches.delete(name)
+    })(),
+  ])
 }
 
 /** Sum the ciphertext bytes already stored under a namespace (no decryption). */

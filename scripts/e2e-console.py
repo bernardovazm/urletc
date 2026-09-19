@@ -2562,6 +2562,146 @@ with sync_playwright() as p:
     check('every relay in the source is allowed by connect-src', not missing,
           ('CSP header absent' if not csp else 'missing: ' + ', '.join(missing)))
 
+    # --- factory reset ("Delete everything on this device") ---
+    # Last in the suite and in its own context on purpose: the main page auto-accepts every
+    # dialog (see page.on('dialog') above), and accepting this one destroys the device
+    # identity and vault key that every earlier block depends on.
+    #
+    # Both paths are driven. Dismissing must leave every store untouched; accepting must
+    # take out three separate persistence layers, so all three are read back directly:
+    # localStorage (the theme), IndexedDB wt-data (the OCR preference) and IndexedDB
+    # wt-keys (the identity keypair, read as its exported public key so a regenerated one
+    # is visibly different rather than merely present).
+    IDENT = r"""async () => {
+      const db = await new Promise((res, rej) => {
+        const r = indexedDB.open('wt-keys')
+        r.onupgradeneeded = () => r.result.createObjectStore('kv')
+        r.onsuccess = () => res(r.result)
+        r.onerror = () => rej(r.error)
+      })
+      if (!db.objectStoreNames.contains('kv')) { db.close(); return null }
+      const pair = await new Promise((res) => {
+        const rq = db.transaction('kv', 'readonly').objectStore('kv').get('identity:sign:v1')
+        rq.onsuccess = () => res(rq.result)
+        rq.onerror = () => res(null)
+      })
+      db.close()
+      if (!pair || !pair.publicKey) return null
+      const raw = new Uint8Array(await crypto.subtle.exportKey('raw', pair.publicKey))
+      return [...raw].map((b) => b.toString(16).padStart(2, '0')).join('')
+    }"""
+    # Opened exactly the way idb-keyval opens it (no explicit version, store created in
+    # onupgradeneeded) so probing or seeding cannot leave the app's own handle facing a
+    # database with no 'kv' store.
+    KV = r"""async ([name, put]) => {
+      const db = await new Promise((res, rej) => {
+        const r = indexedDB.open(name)
+        r.onupgradeneeded = () => r.result.createObjectStore('kv')
+        r.onsuccess = () => res(r.result)
+        r.onerror = () => rej(r.error)
+      })
+      if (!db.objectStoreNames.contains('kv')) { db.close(); return [] }
+      if (put) {
+        await new Promise((res, rej) => {
+          const tx = db.transaction('kv', 'readwrite')
+          tx.objectStore('kv').put(put[1], put[0])
+          tx.oncomplete = () => res()
+          tx.onerror = () => rej(tx.error)
+        })
+      }
+      const ks = await new Promise((res) => {
+        const rq = db.transaction('kv', 'readonly').objectStore('kv').getAllKeys()
+        rq.onsuccess = () => res(rq.result.map(String))
+        rq.onerror = () => res([])
+      })
+      db.close()
+      return ks
+    }"""
+
+    wctx = browser.new_context(viewport={'width': 900, 'height': 900})
+    wpg = wctx.new_page()
+    werrs = []
+    wpg.on('pageerror', lambda e: werrs.append(str(e)))
+    wdlg, wmode = [], ['dismiss']
+    wpg.on('dialog', lambda d: (wdlg.append(d.message), d.accept() if wmode[0] == 'accept' else d.dismiss()))
+    wpg.goto(BASE)
+    wpg.wait_for_selector('.composer', timeout=30000)
+    wpg.evaluate("location.hash = '#/t/settings'")
+    wpg.wait_for_selector('select.ocr-select', timeout=20000)
+    wpg.wait_for_timeout(600)
+    wcard = wpg.locator('details.card').last
+
+    # Real writes into each layer, through the app's own controls.
+    wcard.locator('select.theme-select').select_option('light')       # localStorage wt-theme
+    wcard.locator('select.ocr-select').select_option('off')           # IndexedDB wt-data
+    wpg.wait_for_timeout(800)
+    wpg.evaluate(KV, ['wt-feeds', ['e2e-wipe-probe', {'text': 'x', 'fetchedAt': 0, 'bytes': 1}]])
+    before_ident = wpg.evaluate(IDENT)
+    check('wipe: setup wrote every layer the reset must reach',
+          wpg.evaluate("localStorage.getItem('wt-theme')") == 'light'
+          and 'image-ocr' in wpg.evaluate(KV, ['wt-data', None])
+          and 'e2e-wipe-probe' in wpg.evaluate(KV, ['wt-feeds', None])
+          and isinstance(before_ident, str) and len(before_ident) == 64,
+          f'theme={wpg.evaluate("localStorage.getItem(\'wt-theme\')")!r} ident={before_ident!r}')
+
+    wbtn = wcard.locator('button', has_text='Delete everything on this device')
+    check('settings: the factory reset control is on the card', wbtn.count() == 1, f'{wbtn.count()} matches')
+    check('settings: the factory reset control carries the danger styling',
+          'danger' in (wbtn.first.get_attribute('class') or ''), wbtn.first.get_attribute('class'))
+
+    # Dismiss path. The sentinel proves the page never reloaded, which a wipe always does.
+    wpg.evaluate('window.__wtAlive = 1')
+    wbtn.first.click()
+    wpg.wait_for_timeout(2500)
+    check('settings: the factory reset asks before doing anything', len(wdlg) == 1, str(wdlg))
+    _msg = (wdlg[0] if wdlg else '').lower()
+    check('settings: the confirm names what is lost',
+          all(w in _msg for w in ('messages', 'identity', 'pairing', 'preferences')), _msg[:160])
+    check('settings: dismissing the confirm does not reload',
+          wpg.evaluate('window.__wtAlive') == 1)
+    check('settings: dismissing the confirm leaves the vault intact',
+          'image-ocr' in wpg.evaluate(KV, ['wt-data', None])
+          and wcard.locator('select.ocr-select').input_value() == 'off')
+    check('settings: dismissing the confirm leaves the identity and theme intact',
+          wpg.evaluate(IDENT) == before_ident
+          and wpg.evaluate("localStorage.getItem('wt-theme')") == 'light')
+
+    # Accept path. Everything above is asserted first because this destroys the context.
+    wmode[0] = 'accept'
+    wbtn.first.click()
+    try:
+        wpg.wait_for_function('() => window.__wtAlive === undefined', timeout=20000)
+        wpg.wait_for_selector('.composer', timeout=30000)
+        wpg.wait_for_timeout(1200)
+        _reloaded = True
+    except Exception as e:
+        _reloaded = False
+        check('settings: accepting the confirm wipes and reloads', False, str(e)[:160])
+    if _reloaded:
+        check('settings: accepting the confirm wipes and reloads', True)
+        check('wipe: localStorage is cleared (theme falls back to the dark default)',
+              wpg.evaluate("localStorage.getItem('wt-theme')") is None
+              and wpg.evaluate('document.documentElement.dataset.theme') == 'dark',
+              str(wpg.evaluate("localStorage.getItem('wt-theme')")))
+        check('wipe: the wt-feeds blocklist cache is cleared',
+              'e2e-wipe-probe' not in wpg.evaluate(KV, ['wt-feeds', None]))
+        after_ident = wpg.evaluate(IDENT)
+        check('wipe: wt-keys is cleared, so the device identity is a new keypair',
+              isinstance(after_ident, str) and after_ident != before_ident,
+              f'{before_ident!r} -> {after_ident!r}')
+        # Boot re-seeds a few wt-data keys (join code, personal secret), so the assertion is
+        # that the preference written above is gone, not that the store is empty.
+        wpg.evaluate("location.hash = ''")
+        wpg.wait_for_timeout(300)
+        wpg.evaluate("location.hash = '#/t/settings'")
+        wpg.wait_for_selector('select.ocr-select', timeout=20000)
+        wpg.wait_for_timeout(600)
+        check('wipe: wt-data is cleared, so saved preferences are back to their defaults',
+              'image-ocr' not in wpg.evaluate(KV, ['wt-data', None])
+              and wpg.locator('details.card').last.locator('select.ocr-select').input_value() == 'copy')
+    check('wipe: no page error on the factory reset path', not werrs, ' | '.join(werrs)[:200])
+    wctx.close()
+
     print('\nconsole errors (filtered):', *interesting[:10], sep='\n  ')
     print(f'relay/websocket lines this run: {len(relay_noise)}')
     browser.close()

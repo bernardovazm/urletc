@@ -1,5 +1,5 @@
 import { OCR_MODE_EVENT, getOcrMode, setOcrMode, type OcrMode } from '../core/prefs'
-import { disablePassphrase, enablePassphrase, getItem, getStoreMode, lock, setItem } from '../core/store'
+import { disablePassphrase, enablePassphrase, getItem, getStoreMode, lock, setItem, wipeAll } from '../core/store'
 import type { ToolModule } from '../shell/registry'
 import { currentTheme, toggleTheme } from '../shell/theme'
 import { button, el, toast } from '../shell/ui'
@@ -158,6 +158,34 @@ const tool: ToolModule = {
             text: 'Ask when closing tab. The browser shows its own generic confirmation, only after you have interacted with the page, and the wording cannot be changed.',
           }),
         ]),
+      )
+
+      // Last on the card because it is the only control here that nothing survives: it
+      // destroys the vault key and the device identity, so every other setting above it
+      // is gone with it.
+      const wipeBtn = button(
+        'Delete everything on this device',
+        () => {
+          if (!confirm('Delete everything stored on this device? Stored messages, this device identity and its pairing, and saved preferences are erased. This cannot be undone.'))
+            return
+          wipeBtn.setAttribute('disabled', '')
+          void wipeAll()
+            .then(() => location.reload()) // the identity and wrapping key are gone; there is nothing left to run on
+            .catch((e: unknown) => {
+              wipeBtn.removeAttribute('disabled')
+              toast(`Failed: ${(e as Error).message}`)
+            })
+        },
+        'danger',
+        'Erase stored messages, this device identity and pairing, and saved preferences',
+      )
+      container.append(
+        el('div', { class: 'group-label', text: 'This device' }),
+        el('p', {
+          class: 'muted',
+          text: 'Erases stored messages, cached blocklists, this device identity and its pairing, and every saved preference. Paired devices stop recognising this one until you pair again. The app reloads as if it had never been opened here.',
+        }),
+        el('div', { class: 'row' }, [wipeBtn]),
       )
     }
     await render()

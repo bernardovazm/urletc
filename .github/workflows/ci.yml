@@ -9,11 +9,12 @@ on:
 permissions:
   contents: read
 
-# Supersede pull request runs, never pushes to main. Cancelling on main meant a run of
-# commits landed with two of them cancelled and no verdict, which is indistinguishable
-# from not having run them at all.
+# Pull request runs share a group per ref so a new push supersedes the old run. Pushes to
+# main get a group per commit instead: within one group GitHub keeps only the newest queued
+# run and cancels any older pending one, so pushing a series of commits left the middle ones
+# cancelled with no verdict, which is indistinguishable from never having run them.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:

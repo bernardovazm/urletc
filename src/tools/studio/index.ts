@@ -14,10 +14,12 @@ const RES = [
   { v: 1280, label: '720p' },
   { v: 1920, label: '1080p' },
 ]
-const LAYOUTS: Array<{ v: StageLayout; label: string }> = [
-  { v: 'grid', label: 'Grid' },
-  { v: 'spotlight', label: 'Spotlight' },
-  { v: 'solo', label: 'Solo' },
+// The labels match the stage head controls, so one layout is not named twice in one app.
+// The 'spotlight' value stays as the stored/CSS name for the layout.
+const LAYOUTS: Array<{ v: StageLayout; label: string; tip: string }> = [
+  { v: 'grid', label: 'Grid', tip: 'Arrange the stage: every source the same size' },
+  { v: 'spotlight', label: 'Focus', tip: 'Arrange the stage: one source large, the others as thumbnails' },
+  { v: 'solo', label: 'Solo', tip: 'Arrange the stage: only the spotlighted source' },
 ]
 
 // Per-card onChange subscription, keyed by container. The cached module singleton is
@@ -75,7 +77,7 @@ const tool: ToolModule = {
       layoutRow.replaceChildren(
         el('span', { class: 'muted small', text: 'Layout' }),
         ...LAYOUTS.map((l) => {
-          const b = button(l.label, () => studio.setLayout(l.v), studio.layout() === l.v ? 'primary' : 'ghost', `Arrange the stage: ${l.label.toLowerCase()}`)
+          const b = button(l.label, () => studio.setLayout(l.v), studio.layout() === l.v ? 'primary' : 'ghost', l.tip)
           return b
         }),
       )

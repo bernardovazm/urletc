@@ -831,8 +831,8 @@ with sync_playwright() as p:
     studio = page.locator('details.card').last
     check('studio renders publish controls', studio.locator('button', has_text='Publish camera').count() == 1)
     check('studio has camera + mic + res selects', studio.locator('select').count() == 3)
-    check('studio has grid/spotlight/solo layout switch',
-          studio.locator('button', has_text=re.compile(r'^(Grid|Spotlight|Solo)$')).count() == 3)
+    check('studio has grid/focus/solo layout switch',
+          studio.locator('button', has_text=re.compile(r'^(Grid|Focus|Solo)$')).count() == 3)
     # publish the fake camera, so a labeled stage tile and a source-list entry appear
     studio.locator('button', has_text='Publish camera').click()
     try:
@@ -840,8 +840,9 @@ with sync_playwright() as p:
         check('publishing camera creates a stage tile', page.locator('.stage-tile').count() >= 1)
         check('stage tile has a nameplate', page.locator('.stage-tile .tile-name').count() >= 1)
         check('source appears in the studio list', studio.locator('.src-name').count() >= 1)
-        # switch layout, so the stage container reflects it and a tile is spotlighted
-        studio.locator('button', has_text=re.compile(r'^Spotlight$')).click()
+        # switch layout, so the stage container reflects it and a tile is spotlighted.
+        # The button reads Focus, the layout value and its stage class stay 'spotlight'.
+        studio.locator('button', has_text=re.compile(r'^Focus$')).click()
         page.wait_for_timeout(200)
         check('layout switch applies to the stage', page.locator('.tiles.stage.layout-spotlight').count() == 1)
         check('a tile is spotlighted', page.locator('.stage-tile.spot').count() == 1)

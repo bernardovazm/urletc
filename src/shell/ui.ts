@@ -1,7 +1,8 @@
 // Shared, framework-free UI primitives (ARCHITECTURE section 10). All DOM is built
 // with createElement + textContent, never innerHTML from untrusted strings (Trusted
-// Types is enforced via CSP). DOMPurify is used only where trusted HTML must be
-// rendered, in the clipboard tool.
+// Types is enforced via CSP). The only place HTML is parsed is src/tools/html-strip.ts,
+// which reads back textContent from an inert DOMParser document. No HTML sanitizer is
+// bundled, so no helper here may grow an HTML sink.
 
 import type { TrustTier } from './registry'
 

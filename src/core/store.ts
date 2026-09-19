@@ -10,8 +10,8 @@
 //    on lock. This raises the bar against an offline attacker and against a later XSS,
 //    since a locked vault has no key in memory, at the cost of re-unlocking.
 //
-// Primary XSS controls remain CSP, Trusted Types and DOMPurify. Encrypted-at-rest is
-// secondary and is not an XSS control in device mode.
+// Primary XSS controls remain CSP and Trusted Types. Encrypted-at-rest is secondary and
+// is not an XSS control in device mode.
 
 import { createStore, del, get, keys, set } from 'idb-keyval'
 import { aesGcmDecrypt, aesGcmEncrypt, randomBytes, type AesGcmBlob } from './crypto'

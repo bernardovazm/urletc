@@ -247,7 +247,7 @@ therefore progressive enhancement rather than one-tap-only:
 - Each action is toggleable and on by default. Continuous "watch clipboard" mode (re-read on
   `focus` or poll) stays off by default and is disclosed.
 - Detected URLs are never auto-fetched, which would leak the clipboard to a third party;
-  preview is a manual button. `text/html` is parsed via `DOMParser` plus DOMPurify (bundled).
+  preview is a manual button. `text/html` is parsed via `DOMParser` and only `textContent` is read back.
   Never `innerHTML`. `DOMParser.parseFromString` is itself a TrustedHTML sink and needs a
   named policy (section 9.1).
 
@@ -715,7 +715,7 @@ Footguns do not become safety properties by being documented, so these are absol
 | Network MITM at first key exchange | substitute keys (TOFU window) | out-of-band safety-number or QR verification, offered and not forced (section 10) |
 | Malicious Workshop author | ship signed-but-harmful code | null-origin iframe plus QuickJS plus the enumerated postMessage API (8.2) plus mandatory source review; declarative interpreter safe by construction (7.1) |
 | Sybil / gossip poisoner | flood or fake-vouch | challenge-response (signature) admission, trusted-peers-only vouching, re-verify before relay; PoW is an anti-flood speed-bump only, no part of the Sybil answer (5.5) |
-| XSS into host origin | read IDB, use in-realm keys, exfiltrate | strict CSP (no eval, no inline) plus Trusted Types plus DOMPurify as the primary control; encrypted IDB is secondary (see the key-lifecycle caveat below) |
+| XSS into host origin | read IDB, use in-realm keys, exfiltrate | strict CSP (no eval, no inline) plus Trusted Types plus the DOMParser strip as the primary control; encrypted IDB is secondary (see the key-lifecycle caveat below) |
 | Offline disk-image attacker | copy browser profile | non-extractable CryptoKeys plus passphrase-lock mode (PBKDF2>=600k into AES-GCM) |
 | Supply chain | tampered dep or model | exact-pinned deps plus lockfile, bundle rather than CDN, SRI where applicable, model-weight hash verification |
 
@@ -746,7 +746,7 @@ non-extractable key in place. What each mode buys:
 - MVP at-rest mode, no passphrase: the AES-GCM wrapping key is a non-extractable `CryptoKey`
   generated once and stored in IDB. It protects against offline profile copy, another origin,
   and a casual IDB dump, but not against same-origin XSS, which can call the key. The primary
-  XSS control is therefore CSP plus Trusted Types plus DOMPurify, and the threat-model table
+  XSS control is therefore CSP plus Trusted Types plus the DOMParser strip, and the threat-model table
   reflects that ordering. Encrypted IDB is not claimed to stop XSS.
 - Phase 4 passphrase-lock mode: the wrapping key is derived on unlock via PBKDF2>=600k from a
   user passphrase and held only in memory, zeroised on lock or idle timeout. This is the mode
@@ -927,7 +927,7 @@ headers, `src/shell/ui.ts` primitives.
   on a browser lacking Ed25519; zero inline scripts; lockfile committed.
 
 Phase 1: MVP, single-user tools. Clipboard hybrid one-tap plus router plus sub-tools (OCR via
-Tesseract v7, NLP via compromise, JSON, URL, HTML via DOMPurify); transcription (files first
+Tesseract v7, NLP via compromise, JSON, URL, HTML via the DOMParser strip); transcription (files first
 via singlethread ffmpeg, then VAD live); TTS (SpeechSynthesis plus Kokoro opt-in). All
 lazy-loaded and Cache/OPFS-cached.
 - Security gate: no clipboard data ever leaves the device; no auto-URL-fetch;
@@ -1018,7 +1018,7 @@ self-hosted coturn; Double-Ratchet upgrade if the threat model escalates.
   saturating around 2027 `[v]`. Crypto-dependent features hard-fail on older browsers instead
   of shipping a weaker JS-crypto polyfill. Single-user tools still work.
 - **Encrypted-at-rest IDB does nothing against XSS (see section 9).** A same-origin attacker can use the
-  non-extractable key in place. CSP plus Trusted Types plus DOMPurify are the primary XSS
+  non-extractable key in place. CSP plus Trusted Types plus the DOMParser strip are the primary XSS
   controls, and passphrase-lock mode (Phase 4) is the only mode that protects against a later
   compromise.
 - **Mesh ceiling is roughly 20-30 peers `[~]`, video roughly 6 `[~]`.** No free SFU exists, so

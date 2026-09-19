@@ -9,6 +9,16 @@ const isolation = {
   'Cross-Origin-Embedder-Policy': 'credentialless',
 }
 
+// Static hardening headers, kept in sync with vercel.json. Preview only, like the CSP
+// below: the dev server stays at isolation only. Strict-Transport-Security is absent
+// here because vercel.json does not declare it either; Vercel adds it at the platform
+// level, and preview serves over http where the header has no meaning.
+const hardening = {
+  'X-Content-Type-Options': 'nosniff',
+  'X-Frame-Options': 'DENY',
+  'Referrer-Policy': 'no-referrer',
+}
+
 // Production CSP and Trusted Types, kept in sync with vercel.json. Applied to
 // `vite preview`, which serves the built bundle the way the deploy does, so a Trusted
 // Types or style-src regression fails the e2e run locally instead of in production. The
@@ -34,7 +44,7 @@ const CSP = [
 
 export default defineConfig({
   server: { headers: isolation },
-  preview: { headers: { ...isolation, 'Content-Security-Policy': CSP } },
+  preview: { headers: { ...isolation, ...hardening, 'Content-Security-Policy': CSP } },
   build: { target: 'es2022', sourcemap: true },
   plugins: [
     VitePWA({

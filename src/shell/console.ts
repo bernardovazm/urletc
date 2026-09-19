@@ -126,7 +126,8 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   // joins just that code room, and publishes nothing (pure viewer). Detected at mount so
   // the auto-pilot can skip the personal/nearby tiers.
   // A shared #/join link can carry "?p=1", meaning the sender has the online list on.
-  // Read before anything rewrites the hash. It is only ever a question: see offerPresence.
+  // Read before anything rewrites the hash, which the first syncCodeUrl() does. It is only
+  // ever a question, and it is persisted rather than answered here: see offerPresence.
   const invitedToPresence = /^#\/join\/[A-Za-z0-9-]{2,64}\?p=1$/.test(location.hash)
   const stageRoute = /^#\/stage\/([A-Za-z0-9-]{2,64})$/.exec(location.hash)
   const stageViewCode = stageRoute ? stageRoute[1] : null
@@ -2709,27 +2710,59 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
    * A link carrying ?p=1 propagates the sender's opt-in and stops at a question. Being on
    * the online list makes this device visible to every stranger running the app, so a URL
    * somebody else authored must never flip it directly. Carrying the flag still saves the
-   * hunt through Settings: one click. Declining leaves no trace, because syncCodeUrl writes
-   * the flag from our own state, so the link we hand on drops it.
+   * hunt through Settings: one click. Declining propagates nothing either, because
+   * syncCodeUrl writes the flag from our own state, so the link we hand on drops it.
+   *
+   * The question has to outlive the URL that carried it: syncCodeUrl rewrites the address
+   * bar from our own state once the code room is joined, so ?p=1 vanishes from the hash and
+   * a reload would otherwise drop the invitation in silence. 'presence-invite' carries it
+   * instead: a count of the times it may still be raised, where 0 means closed. Once the
+   * key exists the flag in the URL no longer arms anything, so reopening or reloading the
+   * same link cannot reset the count and turn one invitation into an endless prompt.
    */
+  const PRESENCE_INVITE_OFFERS = 3
   const offerPresence = () => {
+    const card = el('div', { class: 'sys presence-offer' })
+    // Both answers close the question. Declining writes the terminal 0 rather than clearing
+    // the key, so the same link reopened cannot ask again; accepting clears it because
+    // 'presence-on' then holds the answer, and turning the list off later is a fresh start.
+    const decided = (text: string, record: () => Promise<void>) => {
+      enable.remove()
+      no.remove()
+      card.append(el('span', { class: 'muted small', text }))
+      void record()
+    }
     const enable = button(
       'Turn it on',
       () => {
         presenceChk.checked = true
         void setItem('presence-on', true)
         window.dispatchEvent(new CustomEvent('wt:presence', { detail: true }))
-        enable.replaceWith(el('span', { class: 'muted small', text: 'Online list on.' }))
+        decided('Online list on.', () => removeItem('presence-invite'))
       },
       'ghost small',
       'Join the online list, so other users can see you and invite you to connect',
     )
-    addCard(el('div', { class: 'sys' }, [el('span', { text: 'Whoever sent this link is on the online list. Join it too? ' }), enable]))
+    const no = button('Not now', () => decided('Staying off the online list.', () => setItem('presence-invite', 0)), 'ghost small', 'Stay invisible to other users')
+    card.append(el('span', { text: 'Whoever sent this link is on the online list. Join it too? ' }), enable, no)
+    addCard(card)
   }
   void (async () => {
     presenceWanted = (await getItem<boolean>('presence-on')) ?? false
-    if (presenceWanted) await startPresence()
-    else if (invitedToPresence) offerPresence()
+    if (presenceWanted) {
+      await removeItem('presence-invite') // already on: the question no longer has an answer to give
+      await startPresence()
+      return
+    }
+    // An unanswered invitation survives a reload but not indefinitely: it is raised at most
+    // PRESENCE_INVITE_OFFERS times, so ignoring it ends the asking instead of making every
+    // visit carry a prompt. ?p=1 only sets the count when there is none, and the count is
+    // spent down to the terminal 0, because a reload is indistinguishable from reopening
+    // the link and either would otherwise re-arm it forever.
+    const left = (await getItem<number>('presence-invite')) ?? (invitedToPresence ? PRESENCE_INVITE_OFFERS : 0)
+    if (left <= 0) return
+    await setItem('presence-invite', left - 1)
+    offerPresence()
   })()
   window.addEventListener('wt:presence', (e) => {
     presenceWanted = !!(e as CustomEvent).detail

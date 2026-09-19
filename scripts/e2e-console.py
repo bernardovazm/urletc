@@ -74,6 +74,18 @@ def relay_hosts():
     return hosts
 
 
+def presence_invite_offers():
+    """How many times an unanswered "?p=1" invite is re-offered, parsed from console.ts.
+
+    Parsed rather than hardcoded so raising or lowering the cap moves this assertion with
+    it instead of leaving a stale number that no longer describes the policy.
+    """
+    src = io.open(os.path.join(os.path.dirname(__file__), '..', 'src', 'shell', 'console.ts'), encoding='utf-8').read()
+    m = re.search(r'const PRESENCE_INVITE_OFFERS = (\d+)', src)
+    assert m, 'could not find PRESENCE_INVITE_OFFERS in src/shell/console.ts'
+    return int(m.group(1))
+
+
 # A real rendered-text PNG pasted as a file. A stub with only a valid PNG signature
 # fails in libpng before OCR runs, so it cannot tell a working pipeline from a dead one.
 # Shared by the proactive-OCR block and the clipboard block so both drive the same
@@ -687,6 +699,116 @@ with sync_playwright() as p:
         chip3 = pg3.locator('button.code-chip').inner_text() if pg3.locator('button.code-chip').count() else 'no chip'
         check('invite link auto-joins the room', False, chip3)
     pg3.close()
+
+    # --- 13i2. online-list invite (?p=1): a question that survives a reload ---
+    # A "?p=1" invite link says the sender is on the online list. Joining it makes a device
+    # visible to every other user, so the link may only ask. The first syncCodeUrl() rewrites
+    # the address bar from this device's own state and drops the flag, so the pending question
+    # has to be stored: without that, a reload throws the invitation away in silence.
+    def presence_box(pg):
+        return pg.locator('label', has_text='Go online').locator('input[type=checkbox]')
+
+    # Its own code room, so these contexts never become peers of the main page.
+    PRES_CODE = 'p' + os.urandom(3).hex()
+    pctx = browser.new_context()
+    ppg = pctx.new_page()
+    ppg.goto(f'{BASE}/#/join/{PRES_CODE}?p=1')
+    ppg.wait_for_selector('.composer', timeout=20000)
+    try:
+        ppg.wait_for_selector('.presence-offer', timeout=15000)
+    except Exception:
+        pass
+    check('?p=1 asks whether to join the online list', ppg.locator('.presence-offer').count() == 1)
+    check('?p=1 does not join the online list on its own', not presence_box(ppg).is_checked())
+    ppg.reload()
+    ppg.wait_for_selector('.composer', timeout=20000)
+    try:
+        ppg.wait_for_selector('.presence-offer', timeout=15000)
+    except Exception:
+        pass
+    check('the online-list invite is re-offered after a reload',
+          ppg.locator('.presence-offer').count() == 1, ppg.evaluate('location.hash'))
+    check('the re-offered invite still has not joined the online list', not presence_box(ppg).is_checked())
+    # The chromeless stage route returns before the presence bootstrap, so an OBS browser
+    # source neither raises the question nor spends one of the offers behind it. Its own
+    # page, because a goto that only changes the hash never remounts, and the chromeless
+    # assertion guards against that: without it a page that stayed on the console route
+    # would report a clean pass.
+    spg = pctx.new_page()
+    spg.goto(f'{BASE}/#/stage/{PRES_CODE}')
+    spg.wait_for_selector('.app-shell', timeout=20000)
+    spg.wait_for_timeout(1500)
+    check('the stage route entered chromeless mode',
+          spg.evaluate("document.documentElement.classList.contains('stage-view')"))
+    check('the stage route never offers the online list', spg.locator('.presence-offer').count() == 0)
+    spg.close()
+    # A page opened at the plain #/join URL: nothing in this address bar says "?p=1", so an
+    # offer here can only have come out of storage. syncCodeUrl strips the flag on its own
+    # schedule (it waits on the code-room join), so asserting on the address bar instead
+    # would be asserting on relay timing.
+    ppg.close()
+    ppg = pctx.new_page()
+    ppg.goto(f'{BASE}/#/join/{PRES_CODE}')
+    ppg.wait_for_selector('.composer', timeout=20000)
+    try:
+        ppg.wait_for_selector('.presence-offer', timeout=15000)
+    except Exception:
+        pass
+    check('the pending invite is offered on a URL that never carried ?p=1',
+          ppg.locator('.presence-offer').count() == 1, ppg.evaluate('location.hash'))
+    _accept = ppg.locator('.presence-offer button', has_text='Turn it on')
+    check('the online-list invite can be accepted', _accept.count() == 1)
+    if _accept.count():
+        _accept.click()
+        ppg.wait_for_timeout(500)
+        check('accepting the invite turns the online list on', presence_box(ppg).is_checked())
+        ppg.reload()
+        ppg.wait_for_selector('.composer', timeout=20000)
+        ppg.wait_for_timeout(2500)
+        check('an accepted invite is not offered again', ppg.locator('.presence-offer').count() == 0)
+        check('an accepted invite leaves the online list on', presence_box(ppg).is_checked())
+    pctx.close()
+
+    # Declining is final too: the question is recorded as closed, so no reload re-asks.
+    dctx = browser.new_context()
+    dpg = dctx.new_page()
+    dpg.goto(f'{BASE}/#/join/{PRES_CODE}?p=1')
+    dpg.wait_for_selector('.composer', timeout=20000)
+    try:
+        dpg.wait_for_selector('.presence-offer', timeout=15000)
+    except Exception:
+        pass
+    _declined = dpg.locator('.presence-offer button', has_text='Not now')
+    check('the online-list invite can be declined', _declined.count() == 1)
+    if _declined.count():
+        _declined.click()
+        dpg.wait_for_timeout(300)
+        dpg.reload()
+        dpg.wait_for_selector('.composer', timeout=20000)
+        dpg.wait_for_timeout(2500)
+        check('a declined invite is not offered again', dpg.locator('.presence-offer').count() == 0)
+        check('declining leaves the online list off', not presence_box(dpg).is_checked())
+    dctx.close()
+
+    # Ignoring it is bounded: the invite is raised a fixed number of times and then drops, so
+    # an invitation nobody answers cannot become a prompt on every visit. Each pass opens the
+    # ?p=1 link again rather than reloading, because that is the case the budget has to hold
+    # against: the flag is still in the address bar when the app mounts (syncCodeUrl only
+    # strips it once the code room is joined), and a mount that re-armed on it would ask
+    # forever.
+    offers = presence_invite_offers()
+    ictx = browser.new_context()
+    seen = []
+    for _ in range(offers + 1):
+        ipg = ictx.new_page()
+        ipg.goto(f'{BASE}/#/join/{PRES_CODE}?p=1')
+        ipg.wait_for_selector('.composer', timeout=20000)
+        ipg.wait_for_timeout(2500)
+        seen.append(ipg.locator('.presence-offer').count())
+        ipg.close()
+    check(f'reopening an ignored ?p=1 link asks {offers} times and then stops',
+          seen == [1] * offers + [0], str(seen))
+    ictx.close()
 
     # --- 13j. composer: typing a join code connects ---
     # The placeholder names the field and does not explain join codes; the 🔗 share

@@ -446,7 +446,11 @@ tiers that all derive the room name client-side (implemented in `src/p2p/discove
      it, in either direction.
    - *Opt-in, default off* (`presence-on`, `wt:presence`). Unlike nearby, which is scoped to
      your own NAT, this announces you to everyone running the app, so the app does not turn
-     it on for you.
+     it on for you. An invite link may carry `?p=1`, meaning the sender is on the list; it
+     only raises the question. The pending question is stored (`presence-invite`, a count of
+     the offers still owed, 0 meaning closed) because the address bar is rewritten from this
+     device's own state and loses the flag. The count is never re-armed while it exists, so
+     reloading or reopening the link cannot ask forever, and both answers close it.
    - *Roster:* a stranger's row leads with the first 6 hex of their identity-key fingerprint,
      which they cannot choose, and demotes the self-asserted name, so a stranger cannot copy
      a paired device's display name and pass for it. Ordered last in `TIER_ORDER`, so

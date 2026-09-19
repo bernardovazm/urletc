@@ -212,7 +212,7 @@ export function registerBuiltins(): void {
 
   registry.register({
     id: 'tempmail',
-    name: 'Disposable Inbox',
+    name: 'Disposable Email',
     description: 'A throwaway email address, received and read in the app',
     category: 'util',
     version: '0.1.0',

@@ -10,10 +10,10 @@ Live: [urletc.vercel.app](https://urletc.vercel.app)
 
 - Each tool is lazily loaded and has its own deep link: clipboard router, image to text,
   speech to text, text to speech, HTML to text, URL check (blocklist feeds plus a
-  structural read), subtitle conversion and retiming, disposable inbox, link shortener,
+  structural read), subtitle conversion and retiming, disposable email, link shortener,
   text tools, JSON, Base64, hashing, diff, timestamps, regional test data generators,
   session uptime, microphone and camera check, and a two-player game over the peer
-  channel. Everything runs on the device except the disposable inbox and the link
+  channel. Everything runs on the device except the disposable email and the link
   shortener, which are labelled as such in the tool list; model weights and blocklist
   feeds download from their sources and never carry anything you typed.
 - Discovery works over same-network peers, a six character code for anyone anywhere, or a

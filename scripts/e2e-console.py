@@ -871,7 +871,7 @@ with sync_playwright() as p:
         check('stage route hides the composer', not stage_pg.locator('.composer-wrap').is_visible())
         stage_pg.close()
 
-    # --- 13p. disposable inbox: an address is really issued, not just mounted ---
+    # --- 13p. disposable email: an address is really issued, not just mounted ---
     # The tool depends on a live third party handing back a working address, so drive it:
     # wait for a real address on a real domain, copy it, and check it survives into a fresh
     # page, where the only place it can come from is ctx.storage (per-card state is a
@@ -881,7 +881,7 @@ with sync_playwright() as p:
     page.evaluate("location.hash = '#/t/tempmail'")
     page.wait_for_timeout(600)
     tm = page.locator('details.card').last
-    check('tempmail card renders', 'Disposable Inbox' in tm.locator('summary').inner_text(),
+    check('tempmail card renders', 'Disposable Email' in tm.locator('summary').inner_text(),
           tm.locator('summary').inner_text()[:80])
     check('tempmail states the inbox is public and third-party run',
           'never for anything private' in tm.inner_text().lower(), tm.inner_text()[:140])

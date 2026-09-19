@@ -49,14 +49,26 @@ function htmlPolicy(): HtmlPolicy | null {
 // "<p>hi</p><script>alert(1)</script>" strips to "hialert(1)".
 const NON_TEXT = 'x-strip-script, x-strip-style, script, style, noscript, template'
 
-// script and style are renamed before parsing rather than removed afterwards. Chromium
-// evaluates style-src against a <style> element even inside the inert document DOMParser
-// builds, so parsing real-world markup, which nearly always carries a <style>, logged
-// "Applying inline style violates ... style-src 'self'" on every strip. Removing the node
-// afterwards is too late, since the violation has already been reported. Under a custom tag
-// name the content is inert text, so no CSS is parsed. The names stay in NON_TEXT so the
-// subtree is dropped either way, including anything this misses.
-const neutralize = (html: string) => html.replace(/<(\/?)(script|style)\b/gi, '<$1x-strip-$2')
+// script and style elements are renamed, and style attributes with them, before parsing
+// rather than removed afterwards. Chromium evaluates style-src against both even inside the
+// inert document DOMParser builds, so real-world markup logged "Applying inline style
+// violates ... style-src 'self'" on every strip, once per style attribute, and an HTML mail
+// body carries hundreds. Removing them afterwards is too late, since the violation has
+// already been reported. Under a custom tag name the content is inert text, and under a
+// renamed attribute no CSS is parsed. The element names stay in NON_TEXT so the subtree is
+// dropped either way, including anything this misses.
+//
+// The attribute pass is confined to spans the HTML parser reads as a tag, because stripHtml
+// returns textContent, where the literal text "style=" is ordinary body copy that must
+// survive. Matching the name alone defuses quoted, single-quoted and unquoted values
+// identically and leaves every value byte intact.
+const TAG_SPAN = /<[a-zA-Z][^>]*>/g
+// Leading whitespace or quote pins the match to a whole attribute name, so `data-style` and
+// the already rewritten `x-strip-style` are left alone. The optional prefix covers
+// namespaced forms such as `xlink:style` in inline SVG.
+const STYLE_ATTR = /([\s"'])(?:[a-zA-Z_][\w.-]*:)?style(\s*=)/gi
+
+const neutralize = (html: string) => html.replace(/<(\/?)(script|style)\b/gi, '<$1x-strip-$2').replace(TAG_SPAN, (tag) => tag.replace(STYLE_ATTR, '$1x-strip-style$2'))
 
 /** Strip HTML to plain text. Parses into an inert document and reads only textContent. */
 export function stripHtml(html: string): string {

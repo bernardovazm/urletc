@@ -447,8 +447,15 @@ with sync_playwright() as p:
     hs_before = len(logs)
     # The script and style payloads are deliberate: textContent includes the source of
     # those elements, so a naive implementation strips this to "...hereSNEAKYCSSLEAK".
+    # The style attributes are the style-src sink: Chromium evaluates the directive against
+    # the inert document DOMParser builds, so each one logs a CSP violation unless the
+    # attribute is renamed before parsing. The third paragraph carries the literal text
+    # style="keep", which must survive, since a rewrite that is not confined to tag spans
+    # corrupts body copy.
     hs.locator('textarea').fill(
-        '<div><h1>Title</h1><p>Body <b>text</b> here.</p>'
+        '<div style="color:ATTRLEAK"><h1>Title</h1>'
+        '<p style=\'margin:0\'>Body <b>text</b> here.</p>'
+        '<p>Write style="keep" to set it.</p>'
         '<script>var SNEAKY=1</script><style>.x{color:CSSLEAK}</style></div>')
     hs.locator('button', has_text='Strip to text').click()
     page.wait_for_timeout(400)
@@ -460,11 +467,20 @@ with sync_playwright() as p:
           'SNEAKY' not in hs_out and 'CSSLEAK' not in hs_out, hs_out[:120])
     check('html-strip: output is not the untouched placeholder',
           hs_out not in ('plain text output', '(empty)'), hs_out[:60])
+    check('html-strip: style attribute values do not leak into the text',
+          'ATTRLEAK' not in hs_out and 'margin' not in hs_out, hs_out[:120])
+    check('html-strip: literal style= in body copy survives',
+          'style="keep"' in hs_out, hs_out[:120])
     # The sink error reads "This document requires 'TrustedHTML' assignment", which
     # matches neither 'trustedscript' nor 'trusted type', so the run-wide filters below
     # miss it. Match that string class at the call site too.
     hs_tt = [l for l in logs[hs_before:] if 'trustedhtml' in l.lower()]
     check('html-strip: no TrustedHTML sink violation on strip', not hs_tt, ' | '.join(hs_tt[:2])[:200])
+    # The run-wide filter below also catches this, but scoping it here names the sink that
+    # fired instead of reporting a violation from somewhere in a 2000-line run.
+    hs_csp = [l for l in logs[hs_before:] if 'content security policy' in l.lower()]
+    check('html-strip: style attributes do not reach the style-src sink', not hs_csp,
+          ' | '.join(hs_csp[:2])[:200])
 
     # --- 12. sidebar groups collapsible (sidebar starts collapsed, so open it first) ---
     page.locator('.topbar button[title*="devices & people"]').click()

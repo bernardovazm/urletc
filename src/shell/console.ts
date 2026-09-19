@@ -55,6 +55,7 @@ const HISTORY_MAX = 500 // records kept on this device
 const HISTORY_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000 // 30 days
 const HISTORY_MAX_BYTES = 256 * 1024 // serialized backstop: 500 x 4000 chars would be 2 MB
 const HISTORY_BATCH_MS = 800 // quiet time before a peer's chunks render as one card
+const HISTORY_CARD_CLASS = 'history-card' // marks a rendered store dump so deleting the store can retract it
 const MAX_HISTORY_PROMPTS = 8 // simultaneous "they asked for earlier messages" cards
 const MAX_PENDING_STREAMS = 16
 const INVITE_TIMEOUT = 90_000 // an invite nobody answers stops claiming to be pending
@@ -479,6 +480,21 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     seenIds.clear()
     await removeItem(HISTORY_KEY).catch(() => {})
     applyHistory() // providers immediately answer with nothing
+    // A rendered dump of the store outlives the store itself, and a card still listing
+    // messages that no longer exist reads as a failed delete. Torn down the same way
+    // clearFeed does it, since these cards go through the same feed machinery.
+    for (const card of [...feedInner.querySelectorAll(`.${HISTORY_CARD_CLASS}`)]) {
+      const item = card.closest('.feed-item')
+      if (!item) continue
+      try {
+        removers.get(item)?.()
+      } catch {
+        /* a card that fails to tear down must not block the rest */
+      }
+      if (revealedItem === item) revealedItem = null
+      item.remove()
+    }
+    syncJumpLatest()
   }
 
   /** What this device is willing to hand over: entries it witnessed live (never ones a
@@ -595,6 +611,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   const historyCard = (recs: HistoryRecord[], from: string): HTMLElement => {
     const items = [...recs].sort((a, b) => a.ts - b.ts)
     const { card, body } = collapsibleCard([el('strong', { text: `Earlier messages (${items.length})` }), el('span', { class: 'card-from', text: from })], false)
+    card.classList.add(HISTORY_CARD_CLASS)
     for (const r of items) {
       body.append(
         el('div', { class: 'msg' }, [

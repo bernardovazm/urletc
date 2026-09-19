@@ -82,6 +82,12 @@ def replay_card(pg):
     return pg.locator('.card', has_text='Earlier messages')
 
 
+def feed_history_cards(pg):
+    """History cards in the feed only. Scoped past `.modal`, whose Earlier messages
+    section is a different control and must not stand in for a card that is gone."""
+    return pg.locator('.feed .card', has_text='Earlier messages')
+
+
 def read_card(pg):
     """Expand the replay card and read the message bodies inside it.
 
@@ -211,6 +217,26 @@ with sync_playwright() as p:
                 check('"always" is the same switch the modal shows', dict(zip(labels, boxes)).get(code_label) is True,
                       str(dict(zip(labels, boxes))))
                 close_connect(A)
+
+        # --- deleting the store retracts what it put on screen ---
+        # Last, because it empties the store the replay checks above depend on. A holds two
+        # cards by now (one restored on load, one from "Show what is stored"), so this also
+        # covers deleting every card and not just the newest.
+        before = feed_history_cards(A).count()
+        check('A has stored history rendered in the feed before the delete', before > 0, str(before))
+        A.on('dialog', lambda d: d.accept())
+        modal = open_connect(A)
+        modal.locator('button', has_text='Delete stored history').click()
+        time.sleep(1.5)
+        check('confirming the delete removes every Earlier messages card from the feed',
+              feed_history_cards(A).count() == 0, feed(A)[:300])
+        close_connect(A)
+
+        A.reload()
+        A.wait_for_selector('.composer', timeout=30000)
+        time.sleep(4)
+        check('the deleted history stays gone after a reload', feed_history_cards(A).count() == 0,
+              feed(A)[:300])
 
     finally:
         browser.close()

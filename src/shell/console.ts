@@ -30,6 +30,7 @@ import { createContext } from './context'
 import { registry, type ToolManifest, type ToolModule } from './registry'
 import { Router } from './router'
 import { setStudio, type SourceKind, type StageLayout, type StreamMeta, type StudioController, type StudioSource } from './studio'
+import { screenShareNote, screenShareSupport } from './screen-share'
 import { button, copyText, el, toast } from './ui'
 
 type Tier = 'personal' | 'nearby' | 'code' | 'presence'
@@ -1056,19 +1057,46 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   // in-document, so you keep publishing, keep the composer and keep the roster. The
   // stage is otherwise capped at the 760px feed column and 46vh, which turns a shared
   // 4K screen into a strip on a wide display.
+  //
+  // The class and the button that names it are set together: an arriving screen share
+  // also expands the stage, and a class toggled behind the button's back leaves it
+  // offering "Expand" on an already expanded stage.
+  function setStageMax(on: boolean): void {
+    document.documentElement.classList.toggle('stage-max', on)
+    expandBtn.textContent = on ? '🔲' : '🔳'
+    const t = on ? 'Shrink the stage back into the feed' : 'Expand the stage to fill the window'
+    expandBtn.title = t
+    expandBtn.setAttribute('aria-label', t)
+  }
+  const stageMaxOn = () => document.documentElement.classList.contains('stage-max')
+  // The tile whose screen share expanded the stage, or null when the expansion is the
+  // user's own. Only the tile that turned it on may turn it off, so a spontaneous share
+  // never undoes a choice made by hand.
+  let autoMaxBy: string | null = null
   const expandBtn = button(
     '🔳',
     () => {
-      const on = document.documentElement.classList.toggle('stage-max')
-      expandBtn.textContent = on ? '🔲' : '🔳'
-      const t = on ? 'Shrink the stage back into the feed' : 'Expand the stage to fill the window'
-      expandBtn.title = t
-      expandBtn.setAttribute('aria-label', t)
+      setStageMax(!stageMaxOn())
+      autoMaxBy = null // pressing it by hand takes the state over, in both directions
     },
     'icon sm',
     'Expand the stage to fill the window',
   )
   tilesHead.insertBefore(el('span', { class: 'row tight' }, [...layoutEls.map((x) => x.el), expandBtn]), tilesCollapseBtn)
+
+  /** A screen share arriving is the one event that re-aims the stage: it pins the source
+   *  and expands the stage, but only while nothing is pinned, so a spotlight the user
+   *  chose is never stolen. Screen sharing is what the stage is mostly used for, and the
+   *  stage is capped at the feed column, so a share that lands unexpanded is a thumbnail
+   *  behind a control most people never find. The chromeless #/stage route sizes itself
+   *  and is left alone. */
+  function screenTookStage(tile: StageTile): void {
+    if (spotId) return
+    toggleSpot(tile.id)
+    if (stageView || stageMaxOn()) return
+    setStageMax(true)
+    autoMaxBy = tile.id
+  }
 
   /** Reflect source count and the active layout in the head. */
   function updateStageHead(): void {
@@ -1108,6 +1136,13 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     const i = stageTiles.indexOf(tile)
     if (i >= 0) stageTiles.splice(i, 1)
     if (tile.recUrl) URL.revokeObjectURL(tile.recUrl)
+    // Release an expansion that a screen share opened, unless another screen share still
+    // holds the stage. `autoMaxBy` is null once the control has been pressed by hand, so
+    // a share ending never undoes a state the user set.
+    if (autoMaxBy === tile.id) {
+      autoMaxBy = stageTiles.find((t) => t.kind === 'screen' && t.hasVideo)?.id ?? null
+      if (!autoMaxBy) setStageMax(false)
+    }
     if (tile.peerId) {
       const rest = (peerMedia.get(tile.peerId) ?? []).filter((x) => x !== tile.media)
       if (rest.length) peerMedia.set(tile.peerId, rest)
@@ -1235,9 +1270,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     const kind: SourceKind = m?.kind ?? (stream.getVideoTracks().length ? 'cam' : 'mic')
     const label = m?.label ?? peerName
     const tile = addStageTile({ peerId, kind, label, stream })
-    // A peer starting a screen share is the one event that should re-aim the stage,
-    // but only when nothing is pinned, so a spotlight the user chose is never stolen.
-    if (kind === 'screen' && !spotId) toggleSpot(tile.id)
+    if (kind === 'screen') screenTookStage(tile)
     // Keep peerMedia so the roster's per-peer mute/volume control still works.
     const arr = peerMedia.get(peerId) ?? []
     arr.push(tile.media)
@@ -1409,7 +1442,8 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     localStreams.set(stream, meta)
     const targets = mediaTiers()
     for (const s of targets) await s.addMedia(stream, meta)
-    addStageTile({ peerId: null, kind, label: meta.label, stream, localMuted: true })
+    const tile = addStageTile({ peerId: null, kind, label: meta.label, stream, localMuted: true })
+    if (kind === 'screen') screenTookStage(tile)
     notifyStage()
     syncMediaButtons()
     if (!targets.length) sys('Started locally. Pair a device or share a code to stream it.')
@@ -1417,8 +1451,24 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     if (kind !== 'screen' && stream.getAudioTracks().length) void maybeOfferCaptions(stream)
   }
 
+  // What this browser exposes for screen capture, shown when the screen control is used
+  // and taken away once nothing is being shared. It sits above the composer rather than in
+  // the feed because a screen share expands the stage, and an expanded stage hides the
+  // feed: a note posted there would be hidden by the action it explains. Raised on the way
+  // into the picker, not after it, so it is on screen while the browser is asking.
+  let screenNote: HTMLElement | null = null
+  function showScreenNote(): void {
+    if (screenNote) return
+    screenNote = screenShareNote()
+    composerWrap.prepend(screenNote)
+  }
+  function hideScreenNote(): void {
+    screenNote?.remove()
+    screenNote = null
+  }
   async function startMedia(mode: 'audio' | 'video' | 'screen') {
     const kind: SourceKind = mode === 'screen' ? 'screen' : mode === 'video' ? 'cam' : 'mic'
+    if (kind === 'screen') showScreenNote()
     const constraints: MediaStreamConstraints = mode === 'screen' ? {} : { audio: true, video: mode === 'video' }
     try {
       await publishLocal(kind, constraints)
@@ -1450,10 +1500,16 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   function stopMedia() {
     for (const s of [...localStreams.keys()]) unpublish(s)
     endCaptions() // sharing ended, so also free the caption worker
+    hideScreenNote()
   }
 
   // ---------- tool launcher (anchored panel: hover to open, drag to reorder) ----------
   let toolOrder: string[] = (await getItem<string[]>('tool-order')) ?? []
+  // Tools pinned to the topbar, by id, in bar order. `undefined` is the only state that
+  // seeds a default: a stored array is obeyed even when it is empty, so unpinning Studio
+  // keeps it off the bar on the next load instead of the seed handing it back.
+  const storedPins = await getItem<string[]>('tool-pins')
+  let toolPins: string[] = Array.isArray(storedPins) ? storedPins.filter((id) => typeof id === 'string') : storedPins === undefined ? ['studio'] : []
   const orderedTools = () => {
     const all = registry.list()
     const pos = (id: string) => {
@@ -1563,7 +1619,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
             closeLauncher()
             void launchTool(m)
           },
-          'ghost',
+          'ghost tool-open',
           `${m.description} (drag to reorder)`,
         )
         b.draggable = true
@@ -1591,7 +1647,22 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
         } else {
           b.addEventListener('mouseenter', scheduleGenClose)
         }
-        menu.append(b)
+        // The pin toggle is a sibling of the tool button, not a child: a button cannot
+        // nest another one, and the wrapper is what the grid lays out.
+        const pinned = toolPins.includes(m.id)
+        const pin = button(
+          pinned ? 'Unpin' : 'Pin',
+          () => {
+            toolPins = pinned ? toolPins.filter((id) => id !== m.id) : [...toolPins, m.id]
+            void setItem('tool-pins', toolPins)
+            renderPins()
+            renderItems()
+          },
+          'ghost pin-toggle',
+          pinned ? `Take ${m.name} off the topbar` : `Put ${m.name} on the topbar`,
+        )
+        pin.setAttribute('aria-pressed', String(pinned))
+        menu.append(el('div', { class: 'tool-item' }, [b, pin]))
       }
       if (!list.length) menu.append(el('div', { class: 'muted small', text: 'No tool matches.' }))
     }
@@ -1630,9 +1701,31 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     }
   }
 
+  /** Rebuild the pinned tool buttons in the topbar, ahead of Tools so they stay in the
+   *  text group. Called on every pin change, so the bar follows the launcher without a
+   *  reload. tokens.css sheds them below 560px, where the bar has no room for them and
+   *  Tools reaches the same tool. */
+  function renderPins() {
+    topbar.querySelectorAll<HTMLElement>('button.tool-pin').forEach((old) => old.remove())
+    for (const id of toolPins) {
+      const m = registry.get(id)
+      if (!m) continue // a pin left behind by a tool that is no longer registered
+      const b = button(m.name, () => void launchTool(m), 'ghost tool-pin', `${m.description ?? m.name}. Pinned to the bar; unpin it under Tools.`)
+      b.dataset.tool = m.id
+      topbar.insertBefore(b, toolsBtn)
+    }
+  }
+
   // ---------- composer ----------
   const ta = el('textarea', { rows: '1', placeholder: p2pReady ? 'Message your devices, or type / for tools' : 'Type, or / for tools' }) as HTMLTextAreaElement
+  // Collapsing drops the typing area and keeps the control row, so a long screen share can
+  // have the height without putting mic/cam/stop and Send out of reach. Manual only: a
+  // share never collapses it, because only some viewers want the space back.
+  let composerCollapsed = (await getItem<boolean>('composer-collapsed')) ?? false
   const autosize = () => {
+    // A display:none textarea reports scrollHeight 0, so running this while collapsed
+    // would leave `height: 0px` inline and expand to a box with no room to type.
+    if (composerCollapsed) return
     ta.style.height = 'auto'
     ta.style.height = `${Math.min(ta.scrollHeight, window.innerHeight * 0.38)}px`
   }
@@ -1717,6 +1810,16 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   imgInput.addEventListener('change', () => void handleAttach(imgInput.files?.[0]))
 
   const slashBtn = hoverTools(button('/', () => openTools('', slashBtn), 'icon', 'Tools (hover to open, drag to reorder)'))
+  const composerCollapseBtn = button(
+    '🔽',
+    () => {
+      composerCollapsed = !composerCollapsed
+      void setItem('composer-collapsed', composerCollapsed)
+      applyComposerCollapsed()
+    },
+    'icon composer-toggle',
+    'Collapse / expand the message box (the controls stay)',
+  )
   const composer = el('div', { class: 'composer' }, [
     ta,
     el('div', { class: 'bar' }, [
@@ -1724,16 +1827,26 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
       button('🖼', () => imgInput.click(), 'icon', 'Attach an image'),
       button('🎤', () => void startMedia('audio'), 'icon', 'Share your microphone (paired/code devices only; can live-caption you on-device)'),
       button('🎥', () => void startMedia('video'), 'icon', 'Share your camera (paired/code devices only)'),
-      button('🖥', () => void startMedia('screen'), 'icon', 'Share your screen (paired/code devices only)'),
+      button('🖥', () => void startMedia('screen'), 'icon', `Share your screen (paired/code devices only). ${screenShareSupport().line}`),
       micToggle,
       camToggle,
       button('⏹', stopMedia, 'icon', 'Stop sharing cam/mic/screen'),
       slashBtn,
       el('span', { class: 'spacer' }),
+      composerCollapseBtn,
       button('Send', send, 'primary', 'Send to every connected device (Enter)'),
     ]),
   ])
   const composerWrap = el('div', { class: 'composer-wrap' }, [composer, fileInput, imgInput])
+  function applyComposerCollapsed() {
+    composerWrap.classList.toggle('composer-collapsed', composerCollapsed)
+    composerCollapseBtn.textContent = composerCollapsed ? '🔼' : '🔽'
+    composerCollapseBtn.setAttribute('aria-expanded', String(!composerCollapsed))
+    // Re-measure on the way back out: Send clears the draft while collapsed, so the inline
+    // height left behind belongs to text that is no longer in the box.
+    autosize()
+  }
+  applyComposerCollapsed()
   syncMediaButtons() // nothing is published yet, so the mute/blank toggles start hidden
 
   // ---------- sessions ----------
@@ -2391,6 +2504,8 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     clearBtn,
     peersBtn,
   ])
+
+  renderPins()
 
   app.append(sink, el('div', { class: 'app-shell' }, [topbar, bodyEl]))
   if (stageView) document.documentElement.classList.add('stage-view') // chromeless: CSS shows only the stage

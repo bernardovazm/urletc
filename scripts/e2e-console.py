@@ -247,27 +247,27 @@ with sync_playwright() as p:
     tools_btn = page.locator('.topbar button', has_text='Tools')
     tools_btn.hover()
     page.wait_for_selector('.menu.tool-grid', timeout=3000)
-    n_tools = page.locator('.menu.tool-grid button').count()
+    n_tools = page.locator('.menu.tool-grid button.tool-open').count()
     check('launcher opens on hover', n_tools >= 15, f'{n_tools} tools')
     no_scroll = page.eval_on_selector('.menu.tool-grid', 'e => e.scrollHeight <= e.clientHeight + 1')
     check('launcher not scrollable', no_scroll)
-    first_before = page.locator('.menu.tool-grid button').first.inner_text()
+    first_before = page.locator('.menu.tool-grid button.tool-open').first.inner_text()
     page.screenshot(path=f'{SNAP}/e2e-launcher.png')
 
     # --- 6. drag-to-reorder persists ---
-    src = page.locator('.menu.tool-grid button').nth(2)
-    dst = page.locator('.menu.tool-grid button').nth(0)
+    src = page.locator('.menu.tool-grid button.tool-open').nth(2)
+    dst = page.locator('.menu.tool-grid button.tool-open').nth(0)
     moved_name = src.inner_text()
     src.drag_to(dst)
     page.wait_for_timeout(400)
-    first_after = page.locator('.menu.tool-grid button').first.inner_text()
+    first_after = page.locator('.menu.tool-grid button.tool-open').first.inner_text()
     check('drag reorders tool list', first_after == moved_name and first_after != first_before, f'{first_before!r} -> {first_after!r}')
     page.keyboard.press('Escape')
     page.mouse.click(400, 300)  # close launcher
     page.wait_for_timeout(300)
     tools_btn.hover()
     page.wait_for_selector('.menu.tool-grid', timeout=3000)
-    check('reorder persists on reopen', page.locator('.menu.tool-grid button').first.inner_text() == moved_name)
+    check('reorder persists on reopen', page.locator('.menu.tool-grid button.tool-open').first.inner_text() == moved_name)
 
     # --- 6b. Generators hover preview: values flyout beside launcher, click-to-copy ---
     page.locator('.menu.tool-grid button', has_text='Generators').hover()
@@ -853,6 +853,10 @@ with sync_playwright() as p:
         page.wait_for_selector('.tiles .stage-tile', timeout=10000)
         check('sharing camera shows a video tile', page.locator('.tiles .stage-tile').count() >= 1)
         check('tiles region now visible', page.locator('.tiles-region').is_visible())
+        # Only a screen share expands the stage. A camera doing it too would hide the feed
+        # every time anyone turned a webcam on.
+        check('a camera share leaves the stage at its usual size',
+              not page.evaluate("document.documentElement.classList.contains('stage-max')"))
         tcol = page.locator('.tiles-head button[title*="Collapse"]')
         check('tiles region has a collapse toggle', tcol.count() == 1)
         # stage controls live in the head row, next to the source count
@@ -1198,7 +1202,7 @@ with sync_playwright() as p:
     page.locator('.composer textarea').fill('/json')
     page.locator('.composer textarea').press('Enter')
     page.wait_for_selector('.menu.tool-grid', timeout=3000)
-    names = page.eval_on_selector_all('.menu.tool-grid button', 'els => els.map(e => e.textContent)')
+    names = page.eval_on_selector_all('.menu.tool-grid button.tool-open', 'els => els.map(e => e.textContent)')
     check('slash filter narrows tools', len(names) >= 1 and all('JSON' in n for n in names), str(names))
     page.mouse.click(400, 300)
 
@@ -2060,6 +2064,203 @@ with sync_playwright() as p:
     ctx_a.close()
     ctx_b.close()
 
+    # =================== a screen share takes the stage ===================
+    # The stage is capped at the feed column, so a screen share that arrives unexpanded is
+    # a thumbnail behind a control most people never find. Real peers and a real media
+    # track, because the receiver reads {kind} off the stream metadata and an unlabelled
+    # video track is treated as a camera, which must not expand anything.
+    SCREEN_CODE = 's' + os.urandom(3).hex()
+    # Only the OS picker is replaced; headless has no display to grant. Everything after
+    # it (publish, transport, metadata, the receiving stage) is the shipped path.
+    FAKE_SCREEN = """
+      navigator.mediaDevices.getDisplayMedia = async () => {
+        const c = document.createElement('canvas'); c.width = 640; c.height = 360
+        const g = c.getContext('2d')
+        setInterval(() => {
+          g.fillStyle = '#204060'; g.fillRect(0, 0, 640, 360)
+          g.fillStyle = '#ffffff'; g.fillRect((Date.now() / 20) % 600, 0, 40, 360)
+        }, 100)
+        return c.captureStream(12)
+      }
+    """
+
+    def theater(pg):
+        return pg.evaluate("document.documentElement.classList.contains('stage-max')")
+
+    sctx_a = browser.new_context()
+    sctx_a.add_init_script(FAKE_SCREEN)
+    sctx_b = browser.new_context()
+    sh_a, sh_b = sctx_a.new_page(), sctx_b.new_page()
+    for _pg in (sh_a, sh_b):
+        _pg.goto(f'{BASE}/#/join/{SCREEN_CODE}')
+        _pg.wait_for_selector('.composer', timeout=30000)
+    sh_paired = poll(lambda: 'Secure channel established' in sh_a.locator('.feed').inner_text()
+                     and 'Secure channel established' in sh_b.locator('.feed').inner_text(), 150)
+    check('the two screen-share contexts reach a secure channel', bool(sh_paired),
+          f"A: {sh_a.locator('.feed').inner_text()[-120:]!r} B: {sh_b.locator('.feed').inner_text()[-120:]!r}")
+    sh_reach = poll(lambda: 'connected' in (sh_a.locator('.topbar .badge').inner_text() or ''), 60) if sh_paired else None
+    check('the sharing device counts the peer as reachable', bool(sh_reach),
+          f"A chip={sh_a.locator('.topbar .badge').inner_text()!r}" if sh_paired else 'not paired')
+    if sh_paired and sh_reach:
+        share_btn = sh_a.locator('.composer .bar button[title^="Share your screen"]')
+        share_btn.click()
+        arrived = poll(lambda: sh_b.locator('.tiles .stage-tile').count() > 0, 90)
+        check('a peer screen share arrives as a stage tile', bool(arrived),
+              sh_b.locator('.feed').inner_text()[-160:])
+        check('sharing your own screen expands the stage', theater(sh_a))
+        check('an arriving screen share expands the receiving stage', bool(arrived) and theater(sh_b))
+        check('the arriving screen share is the spotlight', sh_b.locator('.stage-tile.spot').count() == 1)
+        # The class is set past the button, so the button has to be told; otherwise it
+        # keeps offering "Expand" on an already expanded stage.
+        check('the expand control reads as shrink once a share expanded the stage',
+              sh_b.locator('.tiles-head button[title*="Shrink the stage"]').count() == 1)
+        sh_a.locator('.composer .bar button[title*="Stop sharing"]').click()
+        ended = poll(lambda: sh_b.locator('.tiles .stage-tile').count() == 0, 60)
+        check('the tile goes when the share stops', bool(ended), sh_b.locator('.feed').inner_text()[-160:])
+        check('the receiving stage shrinks back when the share ends', bool(ended) and not theater(sh_b))
+        check('the sharing stage shrinks back too', not theater(sh_a))
+
+        # An expansion the user set by hand outlives the share: shrink (which hands the
+        # state to the user), expand again, and ending the share must leave it alone.
+        share_btn.click()
+        again = poll(lambda: sh_b.locator('.tiles .stage-tile').count() > 0, 90)
+        expanded_again = bool(again) and theater(sh_b)
+        check('a second screen share expands the stage again', expanded_again)
+        # The shrink control only exists once something expanded the stage, so the two
+        # assertions below are reported rather than clicked into a timeout that would
+        # abort every section after this one.
+        if expanded_again:
+            sh_b.locator('.tiles-head button[title*="Shrink the stage"]').click()
+            sh_b.wait_for_timeout(200)
+            check('shrinking while the share runs is obeyed', not theater(sh_b))
+            sh_b.locator('.tiles-head button[title*="Expand the stage"]').click()
+            sh_b.wait_for_timeout(200)
+            sh_a.locator('.composer .bar button[title*="Stop sharing"]').click()
+            poll(lambda: sh_b.locator('.tiles .stage-tile').count() == 0, 60)
+            check('a share ending never undoes an expansion the user set by hand', theater(sh_b))
+        else:
+            check('shrinking while the share runs is obeyed', False, 'the stage never expanded')
+            check('a share ending never undoes an expansion the user set by hand', False,
+                  'the stage never expanded')
+            if again:
+                sh_a.locator('.composer .bar button[title*="Stop sharing"]').click()
+    sctx_a.close()
+    sctx_b.close()
+
+    # ============ the screen-share note follows the browser, not the app ============
+    # Sharing a tab with its sound is what people actually want out of screen sharing, and
+    # whether the picker offers it at all is the browser's to decide. The copy is derived
+    # from getSupportedConstraints().suppressLocalAudioPlayback, the Screen Capture
+    # constraint that exists only where display audio is implemented, so both branches are
+    # driven by replacing what the browser reports. Headless Chromium reports it, so
+    # without the override the no-audio branch would never run here.
+    def constraint_report(audio):
+        return """
+          const orig = navigator.mediaDevices.getSupportedConstraints.bind(navigator.mediaDevices)
+          navigator.mediaDevices.getSupportedConstraints = () => {
+            const c = orig()
+            %s
+            return c
+          }
+        """ % ('c.suppressLocalAudioPlayback = true' if audio
+               else 'delete c.suppressLocalAudioPlayback')
+
+    def note_ctx(audio):
+        ctx = browser.new_context()
+        ctx.add_init_script(FAKE_SCREEN)
+        ctx.add_init_script(constraint_report(audio))
+        pg = ctx.new_page()
+        pg.goto(BASE)
+        pg.wait_for_selector('.composer', timeout=30000)
+        return ctx, pg
+
+    REPORTS = '() => !!navigator.mediaDevices.getSupportedConstraints().suppressLocalAudioPlayback'
+    nctx_on, npg_on = note_ctx(True)
+    nctx_off, npg_off = note_ctx(False)
+    check('the two contexts really report different display-audio support',
+          npg_on.evaluate(REPORTS) and not npg_off.evaluate(REPORTS),
+          'on=%s off=%s' % (npg_on.evaluate(REPORTS), npg_off.evaluate(REPORTS)))
+
+    SHARE_BTN = '.composer .bar button[title^="Share your screen"]'
+    NOTE = '.composer-wrap > details.note'
+    BODY = NOTE + ' .note-body'
+    check('no screen-share note sits over the composer before the control is used',
+          npg_on.locator(NOTE).count() == 0, '%d notes' % npg_on.locator(NOTE).count())
+
+    titles = {}
+    for _name, _pg in (('on', npg_on), ('off', npg_off)):
+        titles[_name] = _pg.locator(SHARE_BTN).get_attribute('title') or ''
+        _pg.locator(SHARE_BTN).click()
+        _pg.wait_for_timeout(600)
+    check('the screen control names what this browser can capture in its own title',
+          'can capture audio' in titles['on'] and 'no audio capture' in titles['off'],
+          '%r / %r' % (titles['on'], titles['off']))
+    check('using the screen control raises the note beside it',
+          npg_on.locator(NOTE).count() == 1 and npg_off.locator(NOTE).count() == 1,
+          '%d / %d' % (npg_on.locator(NOTE).count(), npg_off.locator(NOTE).count()))
+    # A screen share expands the stage, and an expanded stage hides the feed. The note has
+    # to outlive the action it explains, which is why it is not a feed card.
+    check('the note is still on screen once the share expands the stage',
+          theater(npg_on) and npg_on.locator(NOTE).is_visible(),
+          'stage-max=%s visible=%s' % (theater(npg_on), npg_on.locator(NOTE).is_visible()))
+
+    # Read through a presence check rather than straight off the locator: a regression that
+    # drops the note has to report these as failures, not time out and abort every section
+    # after this one.
+    def text_of(pg, sel):
+        return pg.locator(sel).inner_text() if pg.locator(sel).count() else ''
+
+    sum_on = text_of(npg_on, NOTE + ' > summary')
+    sum_off = text_of(npg_off, NOTE + ' > summary')
+    check('the note reports audio capture where the browser reports the constraint',
+          'can capture audio' in sum_on, repr(sum_on))
+    check('the note reports none where the browser does not report it',
+          'no audio capture' in sum_off, repr(sum_off))
+    check('the note is a capability read rather than one fixed string', sum_on != sum_off,
+          '%r == %r' % (sum_on, sum_off))
+
+    check('the note shows one line until the detail is asked for',
+          npg_on.locator(BODY).count() == 1 and not npg_on.locator(BODY).is_visible(),
+          '%d bodies' % npg_on.locator(BODY).count())
+    for _pg in (npg_on, npg_off):
+        if _pg.locator(NOTE + ' > summary').count():
+            _pg.locator(NOTE + ' > summary').click()
+            _pg.wait_for_timeout(200)
+    check('opening the note reveals the detail',
+          npg_on.locator(BODY).count() == 1 and npg_on.locator(BODY).is_visible())
+    det_on = text_of(npg_on, BODY)
+    det_off = text_of(npg_off, BODY)
+    check('the detail hands the picker, its audio box and the prompt to the browser',
+          'belong to the browser' in det_on and 'Nothing in this app changes' in det_on,
+          repr(det_on[:180]))
+    check('the detail says the per-surface audio box is only known inside the picker',
+          'decided inside the picker' in det_on and 'decided inside the picker' not in det_off,
+          repr(det_on))
+    check('the detail states what each browser supports without ranking them',
+          'Firefox and LibreWolf capture picture only' in det_off, repr(det_off[-160:]))
+
+    _had_note = npg_off.locator(NOTE).count()
+    npg_off.locator('.composer .bar button[title*="Stop sharing"]').click()
+    npg_off.wait_for_timeout(400)
+    check('the note goes when the sharing it explained stops',
+          _had_note == 1 and npg_off.locator(NOTE).count() == 0,
+          '%d before, %d after' % (_had_note, npg_off.locator(NOTE).count()))
+
+    # The Studio publish panel is the other way into the same browser picker, so it carries
+    # the same note under its own screen button.
+    _studio_id = tool_id_for('studio')
+    npg_off.locator('.topbar button.tool-pin[data-tool="%s"]' % _studio_id).click()
+    npg_off.wait_for_selector('details.card[data-tool="%s"]' % _studio_id, timeout=15000)
+    npg_off.wait_for_timeout(500)
+    _scard = 'details.card[data-tool="%s"] details.note' % _studio_id
+    check('the Studio publish panel carries the same note under its screen control',
+          npg_off.locator(_scard).count() == 1
+          and 'no audio capture' in text_of(npg_off, _scard + ' > summary'),
+          '%d notes: %r' % (npg_off.locator(_scard).count(),
+                            text_of(npg_off, _scard + ' > summary')))
+    nctx_on.close()
+    nctx_off.close()
+
     # --- touch: the per-card delete control, driven by real taps ---
     # Every assertion above drives a desktop viewport with a mouse, so a control that does
     # nothing on a phone passes them all. Revealing it wherever there is no hover is the
@@ -2142,16 +2343,208 @@ with sync_playwright() as p:
             const box = t.getBoundingClientRect();
             const kids = [...t.children].filter(k => getComputedStyle(k).display !== 'none');
             const rb = t.querySelector('button.roster-toggle');
+            const pins = [...t.querySelectorAll('button.tool-pin')];
             return { over: t.scrollWidth - t.clientWidth,
                      clipped: kids.filter(k => k.scrollWidth > k.clientWidth + 1).map(k => k.className),
                      outside: kids.filter(k => k.getBoundingClientRect().right > box.right + 0.5).map(k => k.className),
-                     roster: !!rb && getComputedStyle(rb).display !== 'none' } }""")
+                     roster: !!rb && getComputedStyle(rb).display !== 'none',
+                     pins: pins.length,
+                     pinsShown: pins.filter(b => getComputedStyle(b).display !== 'none').length } }""")
         check(f'touch: topbar at {_w}px fits with nothing clipped or pushed off',
               _bar['over'] <= 0 and not _bar['clipped'] and not _bar['outside'],
               f"overflow={_bar['over']} clipped={_bar['clipped']} outside={_bar['outside']}")
         check(f'touch: the drawer toggle survives at {_w}px', _bar['roster'])
+        # The fit above only means something while a pin is in the bar's DOM: this context
+        # is a fresh profile, so the seeded A/V pin is there and has to be shed, not absent.
+        check(f'touch: the seeded pin is in the bar at {_w}px', _bar['pins'] >= 1, str(_bar))
+        check(f'touch: pinned tools are shed at {_w}px', _bar['pinsShown'] == 0, str(_bar))
     check('touch: no page error on the touch path', not terrs, ' | '.join(terrs)[:200])
     tctx.close()
+
+    # --- pinned tools: launcher toggle, topbar button, persistence, the seeded default ---
+    # Its own context because the seed is only observable on a profile that has never
+    # written 'tool-pins', and because unpinning here would leave the width block above
+    # with no pin to measure. Closed immediately: a live context on this public IP is a
+    # nearby peer to every other one.
+    pctx = browser.new_context(viewport={'width': 1280, 'height': 800})
+    pp = pctx.new_page()
+    perrs = []
+    pp.on('pageerror', lambda e: perrs.append(str(e)))
+    pp.goto(BASE)
+    pp.wait_for_selector('.composer', timeout=30000)
+    pp.wait_for_timeout(1200)
+
+    def pin_ids():
+        return pp.eval_on_selector_all('.topbar button.tool-pin', 'els => els.map(e => e.dataset.tool)')
+
+    def pin_toggle(name):
+        # The pin control of one launcher item, addressed by the tool's visible name.
+        return pp.locator('.menu.tool-grid .tool-item',
+                          has=pp.locator('button.tool-open', has_text=name)).locator('button.pin-toggle')
+
+    def open_launcher():
+        pp.locator('.topbar button', has_text='Tools').hover()
+        pp.wait_for_selector('.menu.tool-grid', timeout=3000)
+
+    av_id = tool_id_for('studio')
+    check('pin: a profile that never wrote the key ships with the A/V tool pinned',
+          pin_ids() == [av_id], str(pin_ids()))
+    sp = pp.locator('.topbar button.tool-pin[data-tool="%s"]' % av_id)
+    check("pin: the button carries the tool's registered name and a title",
+          sp.inner_text() == 'Studio' and 'screen' in (sp.get_attribute('title') or ''),
+          '%r title=%r' % (sp.inner_text(), sp.get_attribute('title')))
+    sp.click()
+    pp.wait_for_timeout(1000)
+    check('pin: clicking the topbar button opens that tool',
+          pp.locator('details.card').last.locator('button', has_text='Publish camera').count() == 1,
+          pp.locator('details.card').last.inner_text()[:120])
+
+    # Pinning a second tool has to reach the bar on the spot, not on the next load.
+    open_launcher()
+    check('pin: an unpinned tool offers to be pinned',
+          pin_toggle('Base64').inner_text() == 'Pin'
+          and pin_toggle('Base64').get_attribute('aria-pressed') == 'false',
+          '%r' % pin_toggle('Base64').inner_text())
+    pin_toggle('Base64').click()
+    pp.wait_for_timeout(500)
+    check('pin: pinning from the launcher adds the button with no reload',
+          pin_ids() == [av_id, 'base64'], str(pin_ids()))
+    check('pin: the launcher item flips to the pinned state',
+          pin_toggle('Base64').inner_text() == 'Unpin'
+          and pin_toggle('Base64').get_attribute('aria-pressed') == 'true',
+          '%r' % pin_toggle('Base64').inner_text())
+    pp.keyboard.press('Escape')
+    pp.wait_for_timeout(300)
+    pp.locator('.topbar button.tool-pin[data-tool="base64"]').click()
+    pp.wait_for_timeout(800)
+    check('pin: the newly pinned button opens its own tool',
+          pp.locator('details.card summary', has_text='Base64').count() >= 1)
+
+    pp.reload()
+    pp.wait_for_selector('.composer', timeout=30000)
+    pp.wait_for_timeout(1200)
+    check('pin: both pins survive a reload', pin_ids() == [av_id, 'base64'], str(pin_ids()))
+
+    open_launcher()
+    pin_toggle('Base64').click()
+    pp.wait_for_timeout(500)
+    check('pin: unpinning takes the button off the bar', pin_ids() == [av_id], str(pin_ids()))
+    # The seed is a default, not a fixture: unpinning it writes an empty list, and an empty
+    # list is a choice the next load has to honour.
+    pin_toggle('Studio').click()
+    pp.wait_for_timeout(500)
+    check('pin: the seeded default unpins like any other', pin_ids() == [], str(pin_ids()))
+    pp.keyboard.press('Escape')
+    pp.reload()
+    pp.wait_for_selector('.composer', timeout=30000)
+    pp.wait_for_timeout(1200)
+    check('pin: an unpinned tool stays unpinned across a reload', pin_ids() == [], str(pin_ids()))
+    check('pin: the seeded default does not come back once unpinned',
+          pp.locator('.topbar button.tool-pin[data-tool="%s"]' % av_id).count() == 0)
+    check('pin: no page error on the pin path', not perrs, ' | '.join(perrs)[:200])
+    pctx.close()
+
+    # --- composer collapse: a manual, persisted toggle that keeps the control row ---
+    # Collapsing is deliberately not wired to sharing: it only ever moves when the toggle
+    # is clicked, so this drives the toggle and nothing else.
+    kctx = browser.new_context()
+    kpg = kctx.new_page()
+    kerrs = []
+    kpg.on('pageerror', lambda e: kerrs.append(str(e)))
+    kpg.goto(BASE)
+    kpg.wait_for_selector('.composer', timeout=30000)
+    kpg.wait_for_timeout(1200)
+
+    ktoggle = kpg.locator('.composer .bar button.composer-toggle')
+    kta = kpg.locator('.composer textarea')
+
+    def kh(sel):
+        return kpg.eval_on_selector(sel, 'e => e.getBoundingClientRect().height')
+
+    def kshut():
+        return kpg.eval_on_selector('.composer-wrap', "e => e.classList.contains('composer-collapsed')")
+
+    check('composer: the collapse toggle sits on the control row', ktoggle.count() == 1)
+    check('composer: it starts expanded and reports that state',
+          not kshut() and ktoggle.get_attribute('aria-expanded') == 'true',
+          str(ktoggle.get_attribute('aria-expanded')))
+
+    # Grow the box before measuring: a one-line composer gives back too little height to
+    # tell a real collapse apart from sub-pixel layout noise.
+    kta.click()
+    kpg.keyboard.type('draft line one')
+    for _ in range(3):
+        kpg.keyboard.press('Shift+Enter')
+        kpg.keyboard.type('another draft line')
+    kpg.wait_for_timeout(400)
+    open_ta, open_wrap, open_feed = kh('.composer textarea'), kh('.composer-wrap'), kh('.feed')
+    check('composer: typing grows the box, so autosize is live while expanded',
+          open_ta > 55, str(open_ta))
+
+    ktoggle.click()
+    kpg.wait_for_timeout(400)
+    shut_wrap, shut_feed = kh('.composer-wrap'), kh('.feed')
+    check('composer: clicking the toggle collapses it', kshut() and not kta.is_visible())
+    check('composer: the toggle flips to the expand state',
+          ktoggle.get_attribute('aria-expanded') == 'false' and ktoggle.inner_text().strip() != '',
+          str(ktoggle.get_attribute('aria-expanded')))
+    check('composer: collapsing gives up the typing area',
+          shut_wrap < open_wrap - 40, '%.1f -> %.1f' % (open_wrap, shut_wrap))
+    check('composer: the feed takes the height the composer gave up',
+          shut_feed > open_feed + 40, '%.1f -> %.1f' % (open_feed, shut_feed))
+    # The min-content floor on .composer-wrap is what stops the feed squeezing the bar off
+    # screen. Collapsing has to shrink under it by removing content, never by lifting it.
+    check('composer: the collapsed row is still floored at the control bar',
+          shut_wrap >= kh('.composer .bar'), '%.1f vs bar %.1f' % (shut_wrap, kh('.composer .bar')))
+    check('composer: Send and the share controls stay reachable while collapsed',
+          kpg.locator('.composer .bar button.primary').is_visible()
+          and kpg.locator('.composer .bar button[title^="Share your screen"]').is_visible()
+          and kpg.locator('.composer .bar button[title*="Stop sharing"]').is_visible()
+          and ktoggle.is_visible())
+
+    # send() clears the draft and re-runs autosize. A display:none textarea reports
+    # scrollHeight 0, so without the guard this real click leaves `height: 0px` inline.
+    kpg.locator('.composer .bar button.primary').click()
+    kpg.wait_for_timeout(700)
+    check('composer: Send still sends the draft while collapsed',
+          'another draft line' in kpg.locator('.feed').inner_text())
+    check('composer: autosize does not write a zero height while collapsed',
+          kpg.eval_on_selector('.composer textarea', 'e => e.style.height') not in ('0px', ''),
+          str(kpg.eval_on_selector('.composer textarea', 'e => e.style.height')))
+
+    kpg.reload()
+    kpg.wait_for_selector('.composer', timeout=30000)
+    kpg.wait_for_timeout(1200)
+    check('composer: the collapsed state survives a reload',
+          kshut() and not kpg.locator('.composer textarea').is_visible())
+    check('composer: the reloaded toggle offers to expand',
+          kpg.locator('.composer .bar button.composer-toggle').get_attribute('aria-expanded') == 'false')
+
+    kpg.locator('.composer .bar button.composer-toggle').click()
+    kpg.wait_for_timeout(400)
+    check('composer: expanding restores the typing area',
+          not kshut() and kpg.locator('.composer textarea').is_visible())
+    check('composer: the row is back to its expanded height',
+          kh('.composer-wrap') > shut_wrap + 10, '%.1f vs collapsed %.1f' % (kh('.composer-wrap'), shut_wrap))
+    kmsg = 'expanded again probe ' + os.urandom(3).hex()
+    kpg.locator('.composer textarea').click()
+    kpg.keyboard.type(kmsg)
+    kpg.keyboard.press('Enter')
+    kpg.wait_for_timeout(700)
+    check('composer: the restored textarea still sends a message',
+          kmsg in kpg.locator('.feed').inner_text(), kmsg)
+    # Autosize has to be live again, not left switched off by the collapse.
+    kpg.locator('.composer textarea').click()
+    back_one = kh('.composer textarea')
+    kpg.keyboard.type('a')
+    for _ in range(3):
+        kpg.keyboard.press('Shift+Enter')
+        kpg.keyboard.type('a')
+    kpg.wait_for_timeout(400)
+    check('composer: autosize runs again once expanded',
+          kh('.composer textarea') > back_one + 20, '%.1f -> %.1f' % (back_one, kh('.composer textarea')))
+    check('composer: no page error on the collapse path', not kerrs, ' | '.join(kerrs)[:200])
+    kctx.close()
 
     # --- on-screen keyboard: the shell insets by the occluded strip ---
     # A headless browser cannot raise a real keyboard, so this covers only our half of the
@@ -2591,16 +2984,23 @@ with sync_playwright() as p:
           "  slack: Math.round(t.clientWidth - pad - used - gap * (vis.length - 1)),"
           "  theme: [...t.querySelectorAll('button')]"
           "    .filter(b => (b.title || '').includes('black and white')).length,"
+          "  pins: t.querySelectorAll('button.tool-pin').length,"
+          "  pin: vis.some(c => c.classList.contains('tool-pin')),"
           "  brand: vis.some(c => c.classList.contains('brand')),"
           "  badge: vis.some(c => c.classList.contains('badge')),"
           "  link: vis.some(c => c.classList.contains('room-link')),"
           "  roster: vis.some(c => c.classList.contains('roster-toggle'))} }")
-    # (width, brand visible, room link visible). The status chip is only asserted where a
-    # rule hides it outright; above 470 its visibility is connection state, not layout.
-    for w, want_brand, want_link in ((320, False, False), (360, False, False), (390, False, True), (768, True, True)):
+    # (width, brand visible, room link visible, pinned tools visible). The status chip is
+    # only asserted where a rule hides it outright; above 470 its visibility is connection
+    # state, not layout. The pinned tool is the widest thing the bar can carry, so it sheds
+    # first, at the same 560 as the brand, and the slack below is measured with it present.
+    for w, want_brand, want_link, want_pin in ((320, False, False, False), (360, False, False, False),
+                                               (390, False, True, False), (768, True, True, True)):
         page.set_viewport_size({'width': w, 'height': 720})
         page.wait_for_timeout(350)
         tb = page.evaluate(TB)
+        check(f'a pinned tool is in the topbar DOM at {w}px', tb['pins'] >= 1, str(tb))
+        check(f'pinned tools shed where the sheet claims at {w}px', tb['pin'] == want_pin, str(tb))
         check(f'topbar does not overflow at {w}px', not tb['over'] and tb['slack'] >= 0, str(tb))
         check(f'topbar sheds what the sheet claims at {w}px',
               tb['brand'] == want_brand and tb['link'] == want_link

@@ -505,7 +505,10 @@ ships today.
   issues commands and never touches tracks). Publishing selects devices and resolution and
   tags each stream with `{kind,label}` via Trystero per-stream metadata, so recipients render
   a labelled multi-source stage (grid, spotlight, solo, with per-source spotlight, mute, hide,
-  fullscreen and record). A chromeless `#/stage/<code>` route renders only the stage for use
+  fullscreen and record). A screen share, incoming or local, pins itself and expands the stage
+  over the feed while nothing else is pinned, since the stage is otherwise capped at the feed
+  column; that expansion is released when the share ends, unless the expand control has been
+  pressed in between, which hands the state to the user. A chromeless `#/stage/<code>` route renders only the stage for use
   as an OBS Browser source or a second screen. It is view-only: it authenticates like any peer
   but publishes nothing, and it joins only that code room, never personal or nearby. Local
   media still honours section 5.4: trusted tiers only, never nearby. Deferred and not built:

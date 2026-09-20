@@ -21,7 +21,8 @@ Live: [urletc.vercel.app](https://urletc.vercel.app)
 - Text and files are end to end encrypted with a per-session HKDF ratchet for forward
   secrecy. Audio, video and screen use the browser's own DTLS-SRTP transport.
 - The stage has multi source grid, spotlight and solo layouts, per source fullscreen and
-  recording, plus a link usable as an OBS browser source.
+  recording, plus a link usable as an OBS browser source. A screen share takes the stage
+  over the feed on its own and gives it back when it ends.
 - A peer joining later can be sent what was already in the feed. Paired devices sync by
   default; a code room shares only when you turn it on, because a code travels to whoever
   it is forwarded to.

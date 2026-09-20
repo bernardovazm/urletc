@@ -1,5 +1,6 @@
 import { getStudio, type DeviceOption, type StageLayout } from '../../shell/studio'
 import type { ToolContext, ToolModule } from '../../shell/registry'
+import { screenShareNote } from '../../shell/screen-share'
 import { button, copyText, el, toast } from '../../shell/ui'
 
 // Studio, a VDO.ninja-style control panel for the shared A/V stage: choose which camera,
@@ -152,6 +153,9 @@ const tool: ToolModule = {
         button('🎤 Publish mic', () => void publish('mic'), 'ghost', 'Send the selected microphone'),
         button('⏹ Stop all', () => studio.unpublishAll(), 'ghost', 'Stop all of your own sources'),
       ]),
+      // Sits under the publish row because that is where the screen button is, and the
+      // panel is a vertical stack with room for a block; the composer's icon bar is not.
+      screenShareNote(),
       layoutRow,
       el('div', { class: 'muted small', text: 'Sources on the stage' }),
       list,

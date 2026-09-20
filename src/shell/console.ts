@@ -28,6 +28,7 @@ import { codeRoom, generateJoinCode, nearbyRoom, normalizeJoinCode, publicIp } f
 import { ensurePersonalSecret, pairLink, personalRoom, resetPersonalSecret } from '../p2p/personal'
 import type { ChatMessage, HistoryRecord, InviteSignal, ReceivedFile, RoomSession, RosterPeer, SessionEvents } from '../p2p/session'
 import { setTransientGuard } from '../tools/close-guard'
+import { markActivity } from './attention'
 import { createContext } from './context'
 import { registry, type ToolManifest, type ToolModule } from './registry'
 import { Router } from './router'
@@ -157,6 +158,24 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
    *  the presence tier: the online list carries no content, so composing while only
    *  presence peers are connected must still queue to the outbox. */
   const reachableCount = () => mergedPeers().filter((x) => x.peer.ready && BROADCAST_TIERS.includes(x.tier)).length
+  /** Peers already counted as having arrived, keyed by public key. A roster is re-emitted on
+   *  every rename and every ready flip, and one device reachable on two tiers holds two
+   *  peerIds, so peerId-keyed bookkeeping would report one arrival several times. The set is
+   *  replaced rather than added to, so a peer that leaves and comes back counts again. */
+  let arrivedKeys = new Set<string>()
+  /** Mark the tab for peers that were not on the previous roster. Presence is left out for
+   *  the reason it is left out of BROADCAST_TIERS: it lists every stranger running the app,
+   *  none of whom can reach this device, so counting it would report the internet rather
+   *  than the user's own room. */
+  const noteArrivals = () => {
+    const now = new Set(
+      mergedPeers()
+        .filter((x) => x.peer.ready && BROADCAST_TIERS.includes(x.tier))
+        .map((x) => x.peer.pubKeyHex),
+    )
+    for (const k of now) if (!arrivedKeys.has(k)) markActivity()
+    arrivedKeys = now
+  }
   const isPresent = (peerId: string) => mergedPeers().some((x) => x.peer.peerId === peerId)
   /** True when this peerId is a device the user dropped. Reads the raw tier rosters,
    *  because mergedPeers() has already filtered dropped devices out. */
@@ -1293,6 +1312,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     stream.addEventListener('addtrack', (e) => watchTrack(e.track))
     stream.addEventListener('removetrack', () => window.setTimeout(gone, 0))
     notifyStage()
+    markActivity() // a peer going live is the loudest thing that can happen off screen
     renderRoster()
   }
 
@@ -1860,6 +1880,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     onRoster: (list) => {
       if (!sessions.has(tier)) return // late event from a session we already left
       rosters.set(tier, list)
+      noteArrivals()
       flushPendingStreams()
       settleInvites()
       renderRoster()
@@ -1886,12 +1907,14 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
         node.append(button(`Join code ${c.code.toUpperCase()}`, join, 'ghost small', 'Use this message as a join code'))
       }
       addCard(node)
+      markActivity()
     },
     onSystem: (t) => sys(t),
     onFileReceived: (f) => {
       if (dropped.has(f.from)) return
       remember({ id: f.id, deviceId: f.from, name: senderLabel(f.from), text: f.name, ts: Date.now(), kind: 'file', size: f.size, tier })
       addCard(fileCard(f))
+      markActivity()
     },
     onHistoryRequest: (peerId) => {
       if (isDropped(peerId)) return // `dropped` is keyed by deviceId, so ask through the peerId helper

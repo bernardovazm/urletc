@@ -5,6 +5,7 @@ import { probeCrypto, type CryptoCaps } from './core/crypto'
 import { initStore, unlock } from './core/store'
 import { installTrustedTypes } from './core/trusted-types'
 import { importPersonalSecret } from './p2p/personal'
+import { initAttention } from './shell/attention'
 import { mountConsole } from './shell/console'
 import { applyTheme } from './shell/theme'
 import { button, el } from './shell/ui'
@@ -13,6 +14,7 @@ import { initCloseGuard } from './tools/close-guard'
 
 installTrustedTypes() // before anything can construct a Worker
 applyTheme() // before paint
+initAttention() // listeners for the return, before anything can mark the tab
 
 async function afterUnlock(app: HTMLElement, caps: CryptoCaps): Promise<void> {
   registerBuiltins()

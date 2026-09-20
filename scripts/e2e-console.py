@@ -105,6 +105,32 @@ def nickname_lists():
     return lists
 
 
+# Page visibility, driven from the page. Headless Chromium reports every tab as visible:
+# bring_to_front() changes nothing there and Emulation.setPageVisibilityOverride is gone
+# from the protocol, so there is no way to make the browser itself background a tab. What
+# is replaced here is exactly what the app reads (document.visibilityState) and what it
+# listens for (visibilitychange), so the shipped code path is the one exercised; the only
+# thing outside this harness is the browser's own decision to call a tab hidden.
+VISIBILITY = """
+  let hiddenNow = false
+  Object.defineProperty(Document.prototype, 'visibilityState', { configurable: true, get: () => (hiddenNow ? 'hidden' : 'visible') })
+  Object.defineProperty(Document.prototype, 'hidden', { configurable: true, get: () => hiddenNow })
+  window.__background = (on) => { hiddenNow = !!on; document.dispatchEvent(new Event('visibilitychange')) }
+"""
+
+
+def title_count(pg):
+    """Events the title is reporting, 0 when it carries no mark. Reads the count out of
+    the "(N) name" prefix, so it also asserts the mark is a prefix: a suffix would be the
+    first thing a tab strip clips."""
+    m = re.match(r'^\((\d+)\+?\) ', pg.title())
+    return int(m.group(1)) if m else 0
+
+
+def icon_href(pg):
+    return pg.evaluate("() => document.querySelector('link[rel=icon]').getAttribute('href')")
+
+
 # A real rendered-text PNG pasted as a file. A stub with only a valid PNG signature
 # fails in libpng before OCR runs, so it cannot tell a working pipeline from a dead one.
 # Shared by the proactive-OCR block and the clipboard block so both drive the same
@@ -2056,6 +2082,7 @@ with sync_playwright() as p:
 
     def join_room(label):
         c = browser.new_context()
+        c.add_init_script(VISIBILITY)
         pg = c.new_page()
         pg.goto(f'{BASE}/#/join/{FILE_CODE}')
         pg.wait_for_selector('.composer', timeout=30000)
@@ -2155,6 +2182,64 @@ with sync_playwright() as p:
                 check('the abandoned transfer names the file and how far it got',
                       drop_name in feed_text(pg_b) and 'pieces' in feed_text(pg_b),
                       feed_text(pg_b)[-250:])
+    # =============== a backgrounded tab reports what it missed ===============
+    # Rides on the pair above instead of opening its own. The scarce thing here is a real
+    # handshake between two contexts over real relays, and this needs exactly the one that
+    # is already standing.
+    if paired and reachable_a:
+        # Nearby is a second rendezvous tier every page in this run shares, since it is
+        # derived from the public IP. A stranger from an earlier block finishing its
+        # handshake with B mid-block is a real arrival and a real mark, and it would land
+        # inside the own-send control below. Off for B only, through the event the Settings
+        # toggle dispatches, so the code room is the only way anything reaches B from here.
+        pg_b.evaluate("() => window.dispatchEvent(new CustomEvent('wt:nearby', { detail: false }))")
+        pg_b.wait_for_timeout(500)
+
+        base_title = pg_b.title()
+        base_icon = icon_href(pg_b)
+        check('the tab title carries no mark while the tab is in front', title_count(pg_b) == 0, base_title)
+
+        pg_b.evaluate('() => window.__background(true)')
+        pg_a.locator('.composer textarea').fill('background one')
+        pg_a.locator('.composer textarea').press('Enter')
+        check('a peer message reaches the backgrounded tab', bool(poll(lambda: 'background one' in feed_text(pg_b), 60)),
+              feed_text(pg_b)[-160:])
+        n1 = poll(lambda: title_count(pg_b), 10) or 0
+        check('a peer message marks the title of a backgrounded tab', n1 >= 1, pg_b.title())
+        check('the mark leaves the original title intact behind the count',
+              pg_b.title().endswith(f') {base_title}'), pg_b.title())
+        check('the favicon swaps while the tab is marked', icon_href(pg_b) == '/icon-alert.svg', str(icon_href(pg_b)))
+
+        pg_a.locator('.composer textarea').fill('background two')
+        pg_a.locator('.composer textarea').press('Enter')
+        check('a second peer message reaches the backgrounded tab', bool(poll(lambda: 'background two' in feed_text(pg_b), 60)),
+              feed_text(pg_b)[-160:])
+        n2 = poll(lambda: title_count(pg_b) > n1 and title_count(pg_b), 10) or title_count(pg_b)
+        check('a second event raises the count instead of repeating one mark', n2 > n1, f'{n1} then {n2}')
+
+        # Focus is the second way back, and it has to clear on its own: a window manager can
+        # hand a tab focus without the platform ever having reported it hidden. Driven here
+        # while the page still reports hidden, so the visibility path cannot stand in for it.
+        pg_b.evaluate("() => window.dispatchEvent(new Event('focus'))")
+        check('window focus clears the mark by itself', pg_b.title() == base_title, pg_b.title())
+
+        # The negative control. Every feed item goes through one append point, the composer's
+        # own card included, so a mark hung there would count the user typing to themselves.
+        pg_b.locator('.composer textarea').fill('a message of my own')
+        pg_b.locator('.composer textarea').press('Enter')
+        check('the backgrounded tab really did send its own message',
+              bool(poll(lambda: 'a message of my own' in feed_text(pg_b), 20)), feed_text(pg_b)[-160:])
+        check('sending your own message never marks the tab', title_count(pg_b) == 0, pg_b.title())
+
+        pg_a.locator('.composer textarea').fill('background three')
+        pg_a.locator('.composer textarea').press('Enter')
+        poll(lambda: 'background three' in feed_text(pg_b), 60)
+        check('the title marks again after an earlier mark was cleared',
+              bool(poll(lambda: title_count(pg_b) >= 1, 10)), pg_b.title())
+        pg_b.evaluate('() => window.__background(false)')
+        check('coming back restores the exact title index.html shipped', pg_b.title() == base_title, pg_b.title())
+        check('coming back restores the original favicon', icon_href(pg_b) == base_icon, str(icon_href(pg_b)))
+
     ctx_a.close()
     ctx_b.close()
 
@@ -2184,10 +2269,22 @@ with sync_playwright() as p:
     sctx_a = browser.new_context()
     sctx_a.add_init_script(FAKE_SCREEN)
     sctx_b = browser.new_context()
+    sctx_b.add_init_script(VISIBILITY)
     sh_a, sh_b = sctx_a.new_page(), sctx_b.new_page()
     for _pg in (sh_a, sh_b):
         _pg.goto(f'{BASE}/#/join/{SCREEN_CODE}')
         _pg.wait_for_selector('.composer', timeout=30000)
+    # B spends this section in the background, so the handshake and the share are both
+    # things it missed. Backgrounded before anything else, and before the code room is even
+    # joined: with warm relays the handshake lands in the first couple of seconds, and a
+    # peer that arrives while the tab is in front is correctly not marked.
+    sh_base_title = sh_b.title()
+    sh_b.evaluate('() => window.__background(true)')
+    # Nearby is the other way a peer can arrive, and leaving it on makes the source of a
+    # mark ambiguous. The wait is for the listener: mountConsole registers it past an await,
+    # so it can still be missing at the moment the composer appears.
+    sh_b.wait_for_timeout(2000)
+    sh_b.evaluate("() => window.dispatchEvent(new CustomEvent('wt:nearby', { detail: false }))")
     sh_paired = poll(lambda: 'Secure channel established' in sh_a.locator('.feed').inner_text()
                      and 'Secure channel established' in sh_b.locator('.feed').inner_text(), 150)
     check('the two screen-share contexts reach a secure channel', bool(sh_paired),
@@ -2196,11 +2293,20 @@ with sync_playwright() as p:
     check('the sharing device counts the peer as reachable', bool(sh_reach),
           f"A chip={sh_a.locator('.topbar .badge').inner_text()!r}" if sh_paired else 'not paired')
     if sh_paired and sh_reach:
+        check('a peer joining marks the title of a backgrounded tab',
+              bool(poll(lambda: title_count(sh_b) >= 1, 30)), sh_b.title())
+        before_share = title_count(sh_b)
         share_btn = sh_a.locator('.composer .bar button[title^="Share your screen"]')
         share_btn.click()
         arrived = poll(lambda: sh_b.locator('.tiles .stage-tile').count() > 0, 90)
         check('a peer screen share arrives as a stage tile', bool(arrived),
               sh_b.locator('.feed').inner_text()[-160:])
+        check('a screen share starting marks the backgrounded tab too',
+              bool(arrived) and bool(poll(lambda: title_count(sh_b) > before_share, 15)),
+              f'{before_share} then {title_count(sh_b)}')
+        sh_b.evaluate('() => window.__background(false)')
+        check('the backgrounded receiver restores its title on return',
+              sh_b.title() == sh_base_title, sh_b.title())
         check('sharing your own screen expands the stage', theater(sh_a))
         check('an arriving screen share expands the receiving stage', bool(arrived) and theater(sh_b))
         check('the arriving screen share is the spotlight', sh_b.locator('.stage-tile.spot').count() == 1)

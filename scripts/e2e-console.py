@@ -897,8 +897,16 @@ with sync_playwright() as p:
     except Exception as e:
         check('sharing camera shows a video tile', False, str(e)[:160])
     page.locator('.composer .bar button[title*="Stop sharing"]').click()
-    page.wait_for_timeout(300)
-    check('stopping share hides the tiles region again', not page.locator('.tiles-region').is_visible())
+    # Poll instead of sleeping a fixed 300ms. A loaded runner still had the region on screen
+    # when the check ran, which failed a run for timing rather than for behaviour. This still
+    # fails if the region never hides, it just stops calling a slow teardown a broken one.
+    hidden = False
+    for _ in range(50):
+        if not page.locator('.tiles-region').is_visible():
+            hidden = True
+            break
+        page.wait_for_timeout(100)
+    check('stopping share hides the tiles region again', hidden)
 
     # --- 13l. device check tool: live preview + meter with fake devices ---
     page.evaluate("location.hash = '#/t/device-check'")

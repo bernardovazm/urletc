@@ -86,6 +86,25 @@ def presence_invite_offers():
     return int(m.group(1))
 
 
+def nickname_lists():
+    """The adjective and noun lists a default device name is drawn from, parsed from
+    src/core/nickname.ts.
+
+    Parsed rather than hardcoded for the same reason as tool_ids(): a second copy of the
+    lists here would drift, and these assertions would stop describing the scheme that
+    actually ships.
+    """
+    src = io.open(os.path.join(os.path.dirname(__file__), '..', 'src', 'core', 'nickname.ts'), encoding='utf-8').read()
+    lists = []
+    for const in ('ADJECTIVES', 'NOUNS'):
+        m = re.search(r'const ' + const + r' = \[(.*?)\n\]', src, re.S)
+        assert m, f'could not find {const} in src/core/nickname.ts'
+        words = re.findall(r"'([a-z]+)'", m.group(1))
+        assert len(words) >= 16, f'{const} parsed as {words}'
+        lists.append(words)
+    return lists
+
+
 # A real rendered-text PNG pasted as a file. A stub with only a valid PNG signature
 # fails in libpng before OCR runs, so it cannot tell a working pipeline from a dead one.
 # Shared by the proactive-OCR block and the clipboard block so both drive the same
@@ -588,8 +607,47 @@ with sync_playwright() as p:
     check('modal paste does not leak to the feed', page.locator('.feed-item').count() == items_before)
     nm = page.locator('.modal input[placeholder*="Device name"]')
     check('modal has device-name field', nm.count() == 1)
-    check('default name is peer-N (no "me")', re.fullmatch(r'peer-\d+', nm.input_value() or '') is not None, nm.input_value())
+    # The default name is generated, so assert the properties the rest of the app relies
+    # on rather than the one sample: the words come from the shipped lists, the avatar
+    # initial exists, the roster never truncates it, and it is never the 'peer' sentinel
+    # senderLabel() reads as "no name".
+    adjectives, nouns = nickname_lists()
+    nm_val = nm.input_value() or ''
+    parts = nm_val.split('-')
+    check('default name is adjective-noun-NN from the shipped word lists',
+          len(parts) == 3 and parts[0] in adjectives and parts[1] in nouns and re.fullmatch(r'\d{2}', parts[2]) is not None, nm_val)
+    check('default name starts with a letter, so the roster avatar has an initial',
+          re.match(r'[A-Za-z]', nm_val) is not None and all(w[:1].isalpha() for w in adjectives + nouns), nm_val)
+    check('default name is not the "peer" sentinel', nm_val != 'peer', nm_val)
+    worst = max(len(a) for a in adjectives) + max(len(n) for n in nouns) + len('--NN')
+    check('every name the scheme can mint clears the roster truncation (24) and MAX_NAME_CHARS (32)',
+          worst <= 24 and 0 < len(nm_val) <= 24, f'worst case {worst}, this one {len(nm_val)}: {nm_val}')
+    check('the name space is big enough that one room rarely collides',
+          len(adjectives) * len(nouns) * 100 >= 100000, f'{len(adjectives)} x {len(nouns)} x 100')
     check('no corny copy in modal', 'keep it secret' not in page.locator('.modal').inner_text().lower())
+    page.keyboard.press('Escape')
+    page.wait_for_timeout(200)
+
+    # --- 13d2. a device that already has a name keeps it; only a nameless one is minted ---
+    # Seeded through the app's own control because the vault is encrypted at rest: a value
+    # written straight into IndexedDB would be a blob the store cannot decrypt. The seed
+    # uses words outside both lists, so a re-mint on boot cannot reproduce it by chance.
+    SEEDED_NAME = 'stored-alias-99'
+    page.locator('.topbar button', has_text='Connect').click()
+    page.wait_for_selector('.modal', timeout=3000)
+    seed_field = page.locator('.modal input[placeholder*="Device name"]')
+    seed_field.fill(SEEDED_NAME)
+    seed_field.dispatch_event('change')
+    page.wait_for_timeout(300)
+    page.keyboard.press('Escape')
+    page.wait_for_timeout(200)
+    page.evaluate("() => navigator.clipboard.writeText(' ')")
+    page.reload()
+    page.wait_for_selector('.composer', timeout=20000)
+    page.locator('.topbar button', has_text='Connect').click()
+    page.wait_for_selector('.modal', timeout=3000)
+    kept = page.locator('.modal input[placeholder*="Device name"]').input_value() or ''
+    check('a stored device name survives a reload instead of being re-minted', kept == SEEDED_NAME, kept)
     page.keyboard.press('Escape')
     page.wait_for_timeout(200)
 

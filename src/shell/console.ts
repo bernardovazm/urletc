@@ -21,6 +21,7 @@
 import type { CryptoCaps } from '../core/crypto'
 import { detectItems, detectText, kindLabel, type Detected } from '../core/clipboard'
 import { CryptoUnsupportedError } from '../core/identity'
+import { randomNickname } from '../core/nickname'
 import { getOcrMode } from '../core/prefs'
 import { getItem, removeItem, setItem } from '../core/store'
 import { codeRoom, generateJoinCode, nearbyRoom, normalizeJoinCode, publicIp } from '../p2p/discovery'
@@ -71,10 +72,12 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   const rosters = new Map<Tier, RosterPeer[]>()
   let codeLabel = ''
   let nearbyState: 'searching' | 'on' | 'unavailable' | 'off' = p2pReady ? 'searching' : 'off'
-  // No baked-in "me": a neutral random handle by default, renameable under Connect.
+  // No baked-in "me": a random nickname by default, renameable under Connect. The stored
+  // name is read first and only a device that has none is given one, so an existing
+  // device keeps the name it has been appearing under, including an older peer-N.
   let displayName = (await getItem<string>('display-name')) ?? ''
   if (!displayName) {
-    displayName = `peer-${100 + Math.floor(Math.random() * 900)}`
+    displayName = randomNickname()
     void setItem('display-name', displayName)
   }
   let autoShare = (await getItem<boolean>('auto-share')) ?? false

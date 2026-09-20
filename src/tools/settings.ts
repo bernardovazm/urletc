@@ -155,7 +155,7 @@ const tool: ToolModule = {
         el('label', { class: 'row small' }, [
           acChk,
           el('span', {
-            text: 'Ask when closing tab. The browser shows its own generic confirmation, only after you have interacted with the page, and the wording cannot be changed.',
+            text: 'Ask when closing tab, sharing asks anyway while it runs. The browser shows its own generic confirmation, only after you have interacted with the page, and the wording cannot be changed.',
           }),
         ]),
       )

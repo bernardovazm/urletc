@@ -26,6 +26,7 @@ import { getItem, removeItem, setItem } from '../core/store'
 import { codeRoom, generateJoinCode, nearbyRoom, normalizeJoinCode, publicIp } from '../p2p/discovery'
 import { ensurePersonalSecret, pairLink, personalRoom, resetPersonalSecret } from '../p2p/personal'
 import type { ChatMessage, HistoryRecord, InviteSignal, ReceivedFile, RoomSession, RosterPeer, SessionEvents } from '../p2p/session'
+import { setTransientGuard } from '../tools/close-guard'
 import { createContext } from './context'
 import { registry, type ToolManifest, type ToolModule } from './registry'
 import { Router } from './router'
@@ -1440,6 +1441,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     const stream = kind === 'screen' ? await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true }) : await navigator.mediaDevices.getUserMedia(constraints)
     const meta: StreamMeta = { kind, label: kindLabelSelf(kind) }
     localStreams.set(stream, meta)
+    setTransientGuard(true) // a live source dies with the tab, so closing it asks first
     const targets = mediaTiers()
     for (const s of targets) await s.addMedia(stream, meta)
     const tile = addStageTile({ peerId: null, kind, label: meta.label, stream, localMuted: true })
@@ -1494,6 +1496,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     for (const sess of mediaTiers()) sess.removeMedia(stream)
     stream.getTracks().forEach((t) => t.stop())
     localStreams.delete(stream)
+    setTransientGuard(localStreams.size > 0)
     for (const t of stageTiles.filter((t) => t.peerId === null && t.stream === stream)) removeStageTile(t)
     syncMediaButtons()
   }

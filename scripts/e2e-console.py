@@ -912,6 +912,42 @@ with sync_playwright() as p:
         page.wait_for_timeout(100)
     check('stopping share hides the tiles region again', hidden)
 
+    # --- 13k3. close guard: live media arms it, independently of the stored preference ---
+    # beforeunload cannot be observed from Playwright, so close-guard.ts mirrors its
+    # arming decision on <html data-close-guard>; a real camera share drives the publish
+    # and unpublish paths under it.
+    def guard_armed():
+        return page.evaluate("document.documentElement.dataset.closeGuard") == 'on'
+
+    def set_ask_on_close(on):
+        """Flip the preference through the Settings checkbox, the only control for it."""
+        page.evaluate("location.hash = '#/t/settings'")
+        page.wait_for_selector('details.card[data-tool="settings"] input[type=checkbox]', timeout=10000)
+        page.wait_for_timeout(300)
+        box = page.locator('details.card[data-tool="settings"]').last.locator('label', has_text='Ask when closing tab').locator('input[type=checkbox]')
+        if box.is_checked() != on:
+            box.click()
+            page.wait_for_timeout(300)
+
+    set_ask_on_close(False)
+    check('close guard: off with no share and the preference off', not guard_armed())
+    page.locator('.composer .bar button[title^="Share your camera"]').click()
+    try:
+        page.wait_for_selector('.tiles .stage-tile', timeout=10000)
+        check('close guard: a live share arms it while the preference is off', guard_armed())
+        set_ask_on_close(True)
+        check('close guard: armed with the preference on while sharing', guard_armed())
+        set_ask_on_close(False)
+        check('close guard: turning the preference off mid-share keeps it armed', guard_armed())
+        set_ask_on_close(True)
+    except Exception as e:
+        check('close guard: a live share arms it while the preference is off', False, str(e)[:160])
+    page.locator('.composer .bar button[title*="Stop sharing"]').click()
+    page.wait_for_timeout(400)
+    check('close guard: stopping the share keeps it armed for the preference', guard_armed())
+    set_ask_on_close(False)  # restore the default, so later pages do not boot guarded
+    check('close guard: disarms with nothing live and the preference off', not guard_armed())
+
     # --- 13l. device check tool: live preview + meter with fake devices ---
     page.evaluate("location.hash = '#/t/device-check'")
     page.wait_for_timeout(500)

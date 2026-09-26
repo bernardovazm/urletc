@@ -1201,6 +1201,13 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
       autoMaxBy = stageTiles.find((t) => t.kind === 'screen' && t.hasVideo)?.id ?? null
       if (!autoMaxBy) setStageMax(false)
     }
+    // With no video left there is nothing to expand, and the tiles region, which the
+    // stage-max rule keeps displayed, would hold the stage column with an empty head. This
+    // also ends an expansion made by hand.
+    if (stageMaxOn() && !stageTiles.some((t) => t.hasVideo)) {
+      setStageMax(false)
+      autoMaxBy = null
+    }
     if (tile.peerId) {
       const rest = (peerMedia.get(tile.peerId) ?? []).filter((x) => x !== tile.media)
       if (rest.length) peerMedia.set(tile.peerId, rest)

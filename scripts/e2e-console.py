@@ -2358,8 +2358,9 @@ with sync_playwright() as p:
         check('the receiving stage shrinks back when the share ends', bool(ended) and not theater(sh_b))
         check('the sharing stage shrinks back too', not theater(sh_a))
 
-        # An expansion the user set by hand outlives the share: shrink (which hands the
-        # state to the user), expand again, and ending the share must leave it alone.
+        # Shrinking by hand while the share runs is obeyed. Expanding by hand again and then
+        # ending the share releases the stage anyway: with no video left, an expanded stage
+        # would be an empty head over a hidden feed.
         share_btn.click()
         again = poll(lambda: sh_b.locator('.tiles .stage-tile').count() > 0, 90)
         check('the second screen share paints frames too', bool(again) and bool(poll(lambda: sh_b.evaluate(PAINTS), 15)),
@@ -2381,10 +2382,10 @@ with sync_playwright() as p:
             sh_b.wait_for_timeout(200)
             sh_a.locator('.composer .bar button[title*="Stop sharing"]').click()
             poll(lambda: sh_b.locator('.tiles .stage-tile').count() == 0, 60)
-            check('a share ending never undoes an expansion the user set by hand', theater(sh_b))
+            check('the last video ending releases even an expansion set by hand', not theater(sh_b))
         else:
             check('shrinking while the share runs is obeyed', False, 'the stage never expanded')
-            check('a share ending never undoes an expansion the user set by hand', False,
+            check('the last video ending releases even an expansion set by hand', False,
                   'the stage never expanded')
             if again:
                 sh_a.locator('.composer .bar button[title*="Stop sharing"]').click()
@@ -2884,6 +2885,25 @@ with sync_playwright() as p:
     check('with a single spotlight', dp_b.locator('.tiles .stage-tile.spot').count() == 1)
     dctx_a.close()
     dctx_b.close()
+
+    # --- a stage expanded by hand ends with its last video ---
+    # Only an expansion a screen share opened was released, and the stage-max rule keeps
+    # the tiles region displayed, so stopping the last source left an expanded stage holding
+    # nothing but its head, with the feed hidden behind it.
+    xctx = browser.new_context()
+    xp = xctx.new_page()
+    xp.goto(f'{BASE}/#/join/x{os.urandom(3).hex()}')
+    xp.wait_for_selector('.composer', timeout=30000)
+    xp.locator('.composer .bar button[title^="Share your camera"]').click()
+    x_cam = poll(lambda: xp.locator('.tiles .stage-tile.kind-cam').count() == 1, 15)
+    check('a camera share does not expand the stage on its own', bool(x_cam) and not theater(xp))
+    xp.locator('.tiles-head button[title*="Expand the stage"]').click()
+    check('the expand control expands it', theater(xp))
+    xp.locator('.stage-tile.kind-cam button[title^="Stop sharing "]').click()
+    check('stopping the last video releases a hand-made expansion',
+          bool(poll(lambda: not theater(xp), 5)), '%d tiles' % xp.locator('.tiles .stage-tile').count())
+    check('and the empty stage goes with it', not xp.locator('.tiles-region').is_visible())
+    xctx.close()
 
     # --- touch: the per-card delete control, driven by real taps ---
     # Every assertion above drives a desktop viewport with a mouse, so a control that does

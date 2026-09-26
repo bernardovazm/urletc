@@ -399,9 +399,12 @@ export function toolStorage(toolId: string): ToolStorage {
   return {
     get: <T = unknown>(k: string) => getItem<T>(ns + k),
     set: async (k: string, v: unknown) => {
-      // Bound a tool's footprint so a `storage`-granted tool can't exhaust origin IDB.
+      // Bound a tool's footprint so a `storage`-granted tool can't exhaust origin IDB. The
+      // value being overwritten is released by this write, so it is not counted twice.
       const incoming = encoder.encode(JSON.stringify(v)).length + 28 // ~AES-GCM overhead
-      if ((await namespaceBytes(ns)) + incoming > TOOL_QUOTA_BYTES) {
+      const prev = await get<AesGcmBlob>(ns + k, dataStore)
+      const released = prev ? prev.ct.length + prev.iv.length : 0
+      if ((await namespaceBytes(ns)) - released + incoming > TOOL_QUOTA_BYTES) {
         throw new Error('tool storage quota exceeded (1 MiB)')
       }
       await setItem(ns + k, v)

@@ -23,9 +23,9 @@ const LAYOUTS: Array<{ v: StageLayout; label: string; tip: string }> = [
   { v: 'solo', label: 'Solo', tip: 'Arrange the stage: only the spotlighted source' },
 ]
 
-// Per-card onChange subscription, keyed by container. The cached module singleton is
-// shared across open Studio cards, so a shared handle would freeze one card's updates when
-// another is opened or closed.
+// Per-card teardown (onChange subscription and link timer), keyed by container. The cached
+// module singleton is shared across open Studio cards, so a shared handle would freeze one
+// card's updates when another is opened or closed.
 const subs = new WeakMap<HTMLElement, () => void>()
 
 const tool: ToolModule = {
@@ -117,17 +117,13 @@ const tool: ToolModule = {
       )
     }
 
-    const render = () => {
-      renderLayout()
-      renderSources()
-    }
-    subs.get(container)?.()
-    subs.set(container, studio.onChange(render))
-
     // ---- OBS / scene link ----
     const linkRow = el('div', { class: 'row' })
+    let shownLink: string | null | undefined
     const renderLink = () => {
       const link = studio.stageLink()
+      if (link === shownLink) return
+      shownLink = link
       linkRow.replaceChildren(
         link
           ? button(
@@ -139,6 +135,21 @@ const tool: ToolModule = {
           : el('span', { class: 'muted small', text: 'Open Connect and start or join a code room to get a shareable stage link.' }),
       )
     }
+
+    const render = () => {
+      renderLayout()
+      renderSources()
+      renderLink()
+    }
+    subs.get(container)?.()
+    const unsubscribe = studio.onChange(render)
+    // Joining or leaving a code room changes the link without a stage change, and the
+    // console signals neither, so the link is re-read each second while the card is open.
+    const linkTimer = setInterval(renderLink, 1000)
+    subs.set(container, () => {
+      unsubscribe()
+      clearInterval(linkTimer)
+    })
 
     container.append(
       el('div', { class: 'row' }, [
@@ -163,7 +174,6 @@ const tool: ToolModule = {
       el('div', { class: 'muted small', text: 'Your media goes only to paired and code peers, never to nearby devices.' }),
     )
     render()
-    renderLink()
     void refreshDevices()
   },
 

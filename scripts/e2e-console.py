@@ -1447,6 +1447,30 @@ with sync_playwright() as p:
           _tc == 'Ótimo Ângela Última Notícia (Test) 3rd', repr(_tc))
     rc.close()
 
+    # An open Studio card follows the code room: stopping it swaps the stage link for the
+    # hint, and creating a new one brings the link back with the new code in it.
+    rc, rp = rf_open(['clipboard-read', 'clipboard-write'])
+    rp.evaluate("location.hash = '#/t/studio'")
+    rst = rp.locator('details.card[data-tool="studio"]')
+    rst.locator('button', has_text='Publish camera').wait_for(timeout=10000)
+    rsl = rst.locator('button', has_text='Copy stage link')
+    check('studio: a card opened inside a code room offers the stage link', bool(rpoll(rp, lambda: rsl.count() == 1, 5)))
+    rp.locator('.topbar button', has_text='Connect').click()
+    rp.locator('.modal button', has_text='Stop code room').click()
+    rp.locator('.modal button', has_text='Create a code').wait_for(timeout=5000)
+    check('studio: stopping the code room swaps the link for the join hint',
+          bool(rpoll(rp, lambda: rsl.count() == 0 and 'start or join a code room' in rst.inner_text(), 5)), rst.inner_text()[-160:])
+    rp.locator('.modal button', has_text='Create a code').click()
+    rp.locator('.modal button', has_text='Stop code room').wait_for(timeout=10000)
+    rp.keyboard.press('Escape')
+    _code = (rpoll(rp, lambda: rp.locator('button.code-chip').inner_text().strip().lower(), 5) or '')
+    check('studio: a new code room brings the stage link back', bool(_code) and bool(rpoll(rp, lambda: rsl.count() == 1, 5)))
+    if rsl.count():
+        rsl.click()
+        _clip = rpoll(rp, lambda: rp.evaluate('navigator.clipboard.readText()'), 5) or ''
+        check('studio: the refreshed stage link points at the new code', ('#/stage/' + _code) in _clip.lower(), f'{_code!r} {_clip!r}')
+    rc.close()
+
     # --- 13n. Studio (VDO.ninja-style A/V): publish controls, labeled source, layouts, stage link ---
     page.evaluate("location.hash = '#/t/studio'")
     page.wait_for_timeout(500)

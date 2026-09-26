@@ -26,7 +26,7 @@ import { getOcrMode } from '../core/prefs'
 import { getItem, removeItem, setItem } from '../core/store'
 import { codeRoom, generateJoinCode, nearbyRoom, normalizeJoinCode, publicIp } from '../p2p/discovery'
 import { ensurePersonalSecret, pairLink, personalRoom, resetPersonalSecret } from '../p2p/personal'
-import type { ChatMessage, HistoryRecord, InviteSignal, ReceivedFile, RoomSession, RosterPeer, SessionEvents } from '../p2p/session'
+import type { ChatMessage, HistoryRecord, InviteSignal, PeerTransport, ReceivedFile, RoomSession, RosterPeer, SessionEvents, TransportState } from '../p2p/session'
 import { setTransientGuard } from '../tools/close-guard'
 import { markActivity } from './attention'
 import type { CaptionsHandle } from './captions'
@@ -61,6 +61,13 @@ const MEDIA_TIERS: Tier[] = ['personal', 'code']
  *  tier in to replaying the feed to them. joinRoomSession refuses it a second time, in the
  *  session layer, per ARCHITECTURE section 9.1. */
 const HISTORY_TIERS: Tier[] = ['personal', 'code']
+/** Tiers where a connection that never came up is reported: rooms entered by pairing or by
+ *  code. On the nearby tier an announcement left behind by a device that has since gone
+ *  looks the same as a device that cannot be reached, so reporting each one would be noise
+ *  on a busy network. A connection that authenticated and then broke is reported on every
+ *  tier in BROADCAST_TIERS. */
+const UNREACHABLE_TIERS: Tier[] = ['personal', 'code']
+const MAX_FAILURES = 8 // broken connections remembered at once
 const HISTORY_KEY = 'history:v1'
 const HISTORY_MAX = 500 // records kept on this device
 const HISTORY_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000 // 30 days
@@ -131,6 +138,20 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   // syncCodeUrl runs from the deep-link router, which dispatches long before the presence
   // bootstrap further down would have initialised it.
   let presenceWanted = false
+  // ---------- transport trouble ----------
+  // The roster says whether a peer authenticated; this says whether the connection under
+  // it is up. Keyed by tier and peerId together, so a device reachable on two tiers is
+  // never judged by the other tier's connection. Only trouble is stored: a healthy
+  // connection is the absence of an entry.
+  const transports = new Map<string, { tier: Tier; state: TransportState }>()
+  const transportKey = (tier: Tier, peerId: string) => `${tier}|${peerId}`
+  /** Connections that will not come back, keyed by identity key where the handshake got
+   *  far enough to have one and by peerId where it did not. Kept after the roster drops
+   *  the peer, because a dead connection is exactly what disappears from the roster. */
+  const failures = new Map<string, Tier>()
+  /** Whether a TURN relay is configured, read off the engine when it loads. Until then
+   *  nothing is claimed, so an unknown cause is never named as a known one. */
+  let relayConfigured = true
   const peerMedia = new Map<string, HTMLMediaElement[]>()
   const pendingStreams = new Map<string, Array<[MediaStream, unknown]>>()
   const localStreams = new Map<MediaStream, StreamMeta>() // own published streams and their metadata
@@ -160,10 +181,9 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     }
     return out
   }
-  const connectedCount = () => mergedPeers().filter((x) => x.peer.ready).length
-  /** Peers a message can actually reach. Distinct from connectedCount(), which includes
-   *  the presence tier: the online list carries no content, so composing while only
-   *  presence peers are connected must still queue to the outbox. */
+  /** Peers a message can actually reach. The presence tier is left out: the online list
+   *  carries no content, so composing while only presence peers are connected must still
+   *  queue to the outbox. */
   const reachableCount = () => mergedPeers().filter((x) => x.peer.ready && BROADCAST_TIERS.includes(x.tier)).length
   /** Peers already counted as having arrived, keyed by public key. A roster is re-emitted on
    *  every rename and every ready flip, and one device reachable on two tiers holds two
@@ -712,16 +732,58 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   // ---------- roster ----------
   const peersBox = el('div', { class: 'peers' })
   const statusChip = el('span', { class: 'badge' })
+
+  /** Longer form for the states a row cannot explain in one word. The healthy states
+   *  explain themselves and carry no tooltip. */
+  const PEER_STATE_TITLES: Record<string, string | undefined> = {
+    reconnecting: 'The connection dropped and the browser is trying to rebuild it.',
+    lost: 'The connection is gone. This device reappears here if it comes back.',
+    unreachable: 'This device was found but no connection to it could be built.',
+  }
+
+  /**
+   * The row's state word and badge class. A dropped transport and a failed one are kept
+   * apart because a dropped one usually comes back on its own, and a connection that never
+   * authenticated is kept apart from one that did, because the first never worked and the
+   * second stopped working.
+   */
+  const peerState = (p: RosterPeer, tier: Tier, pending: boolean): [string, string] => {
+    if (pending) return ['inviting', '']
+    const trouble = transports.get(transportKey(tier, p.peerId))?.state
+    if (trouble === 'disconnected') return ['reconnecting', ' warn']
+    if (trouble === 'failed') return [p.ready ? 'lost' : 'unreachable', ' danger']
+    if (p.ready && BROADCAST_TIERS.includes(tier)) return ['connected', ' ok']
+    return [p.ready ? 'visible' : 'connecting', '']
+  }
+
+  /** How many rows show `word`. The chip counts the words the rows render, so one device
+   *  on two tiers is counted once and the chip cannot contradict the roster. */
+  const rowsSaying = (word: string) => mergedPeers().filter((x) => peerState(x.peer, x.tier, false)[0] === word).length
+  /** Connections that dropped and may still come back, on the tiers whose failures the
+   *  feed reports, so the chip does not count trouble the feed never mentions. */
+  const shakyCount = () => mergedPeers().filter((x) => BROADCAST_TIERS.includes(x.tier) && peerState(x.peer, x.tier, false)[0] === 'reconnecting').length
+
   const updateStatus = () => {
     // Say something only when there is something to say. Searching/idle states
     // ("looking for devices...") add noise without information, so the chip hides.
     // Connected and visible are counted apart, because one number covering both reads as a
-    // count of connections when the online list carries no traffic.
-    const n = reachableCount()
-    const seen = connectedCount() - n
-    const label = n ? `${n} connected${seen ? `, ${seen} visible` : ''}` : seen ? `${seen} visible only` : !p2pReady ? 'tools-only' : ''
+    // count of connections when the online list carries no traffic. Failures come from
+    // `failures` rather than from rows, because a connection that never came up has no row
+    // and one that broke has left the roster.
+    const n = rowsSaying('connected')
+    const seen = rowsSaying('visible')
+    const shaky = shakyCount()
+    const failed = failures.size
+    const parts: string[] = []
+    if (n) parts.push(`${n} connected`)
+    if (seen) parts.push(n || shaky ? `${seen} visible` : `${seen} visible only`)
+    if (shaky) parts.push(`${shaky} reconnecting`)
+    if (failed) parts.push(`${failed} failed`)
+    const label = parts.length ? parts.join(', ') : !p2pReady ? 'tools-only' : ''
     statusChip.textContent = label
     statusChip.classList.toggle('hidden', !label)
+    statusChip.classList.toggle('danger', failed > 0)
+    statusChip.classList.toggle('warn', shaky > 0 && !failed)
   }
   updateStatus()
 
@@ -819,10 +881,8 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     }
     if (p.ready && p.pubKeyHex && !isVerified) ctl.append(button('🔒', () => verifyPeer(p), 'icon sm', `Verify ${who} by comparing safety numbers`))
     if (p.deviceId) ctl.append(button('🗑', () => dropPeer(p, tier), 'icon sm', `Remove ${who} from this list and stop their audio and video`))
-    // State in words rather than a colour: reachable now, visible only, or still shaking
-    // hands.
-    const reachable = p.ready && BROADCAST_TIERS.includes(tier)
-    const state = el('span', { class: `badge peer-state${reachable ? ' ok' : ''}`, text: pending ? 'inviting' : reachable ? 'connected' : p.ready ? 'visible' : 'connecting' })
+    const [word, cls] = peerState(p, tier, pending)
+    const state = el('span', { class: `badge peer-state${cls}`, text: word, title: PEER_STATE_TITLES[word] })
     // In the presence list a peer is a stranger, and `name` is whatever they typed, so
     // a stranger could otherwise copy a paired device's name and its avatar initial and
     // sit one group below it looking identical. There, lead with the short fingerprint
@@ -2124,11 +2184,52 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   applyComposerCollapsed()
   syncMediaButtons() // nothing is published yet, so the mute/blank toggles start hidden
 
+  // ---------- broken connections ----------
+  /** How a failed connection names the other end when no verified name exists: a peer that
+   *  never authenticated has no name this device has any reason to believe. */
+  const TIER_ANON: Record<Tier, string> = {
+    personal: 'one of your devices',
+    nearby: 'a device on this network',
+    code: 'a device in this room',
+    presence: 'a device',
+  }
+
+  /** Forget a connection that came back, so the chip stops counting it. A device that
+   *  reloads returns under a new peerId with the same identity key, which is why the key
+   *  is the identity key wherever the handshake got far enough to establish one. */
+  const clearFailure = (peerId: string, pubKeyHex: string) => {
+    failures.delete(peerId)
+    if (pubKeyHex) failures.delete(pubKeyHex)
+  }
+
+  /**
+   * Record a connection that will not come back, and say so once. Only one cause is ever
+   * named, and only where the code establishes it: with no TURN relay configured a peer
+   * behind symmetric or carrier-grade NAT cannot be reached at all, and that is what a
+   * connection that never authenticated looks like. Nothing else is guessed at.
+   */
+  const noteFailure = (tier: Tier, t: PeerTransport) => {
+    if (!(t.authed ? BROADCAST_TIERS : UNREACHABLE_TIERS).includes(tier)) return
+    const key = t.pubKeyHex || t.peerId
+    if (failures.has(key)) return // one report per connection, however often it is retried
+    if (failures.size >= MAX_FAILURES) {
+      const oldest = failures.keys().next().value
+      if (oldest !== undefined) failures.delete(oldest)
+    }
+    failures.set(key, tier)
+    if (t.authed) sys(`Lost the connection to ${t.name || TIER_ANON[tier]}.`)
+    else
+      sys(
+        `Could not connect to ${TIER_ANON[tier]}.${relayConfigured ? '' : ' No relay server is configured, so a device behind symmetric or carrier-grade NAT cannot be reached.'}`,
+      )
+  }
+
   // ---------- sessions ----------
   const makeEvents = (tier: Tier): SessionEvents => ({
     onRoster: (list) => {
       if (!sessions.has(tier)) return // late event from a session we already left
       rosters.set(tier, list)
+      for (const p of list) if (p.ready) clearFailure(p.peerId, p.pubKeyHex)
       noteArrivals()
       flushPendingStreams()
       settleInvites()
@@ -2178,9 +2279,24 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     onPeerStream: (peerId, stream, meta) => {
       if (MEDIA_TIERS.includes(tier)) maybeAttachStream(peerId, stream, meta)
     },
+    onPeerTransport: (t) => {
+      if (!sessions.has(tier)) return
+      const key = transportKey(tier, t.peerId)
+      // Stored only for a peer on this tier's roster, since `transports` exists to paint
+      // rows. A peer that never joined has no row and no onPeerLeave to clear its entry, and
+      // any peerId announced on a relay can produce one; `failures` carries those, bounded.
+      const listed = (rosters.get(tier) ?? []).some((p) => p.peerId === t.peerId)
+      if (t.state === 'connected' || !listed) transports.delete(key)
+      else transports.set(key, { tier, state: t.state })
+      if (t.state === 'failed') noteFailure(tier, t)
+      renderRoster()
+      updateStatus()
+    },
     onPeerLeave: (peerId) => {
+      transports.delete(transportKey(tier, peerId)) // the session reports a broken transport ahead of this
       if (!isPresent(peerId)) dropPeerMedia(peerId)
       renderRoster()
+      updateStatus()
     },
     // The presence tier's one channel. `offer` is presented and waits for a click;
     // nothing here joins a room.
@@ -2210,8 +2326,11 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     try {
       // Lazy-load the P2P engine (Trystero/zod/manifest) so it stays out of the
       // initial bundle. The UI has already painted; rooms connect a moment later.
-      const { joinRoomSession } = await import('../p2p/session')
-      const s = await joinRoomSession({
+      const engine = await import('../p2p/session')
+      // Read from the engine rather than restated here, so the one cause the failure copy
+      // names stops being named the moment a relay is configured.
+      relayConfigured = engine.hasTurnRelay
+      const s = await engine.joinRoomSession({
         ...room,
         displayName,
         relayOnly: false,
@@ -2239,6 +2358,10 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     const held = (rosters.get(tier) ?? []).map((p) => p.peerId)
     sessions.delete(tier)
     rosters.delete(tier)
+    // A tier that was left has no connections to be in trouble, and a code room is usually
+    // replaced by another, so its trouble must not outlive it in the chip.
+    for (const [k, v] of [...transports]) if (v.tier === tier) transports.delete(k)
+    for (const [k, v] of [...failures]) if (v === tier) failures.delete(k)
     if (tier === 'code') codeLabel = ''
     // Leaving a room emits no peer-leave for the peers it held, and their removed tracks
     // have no signalling path left to arrive on, so media from a peer no other media tier

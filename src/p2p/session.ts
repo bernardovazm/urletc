@@ -78,6 +78,9 @@ const STUN_SERVERS: RTCIceServer[] = [{ urls: 'stun:stun.l.google.com:19302' }, 
 // refuses rather than pretending otherwise.
 const TURN_SERVERS: RTCIceServer[] = []
 const ICE_SERVERS: RTCIceServer[] = [...STUN_SERVERS, ...TURN_SERVERS]
+/** Read by the console, whose report of an unreachable peer names the missing relay.
+ *  Derived from TURN_SERVERS so that adding an entry above drops that sentence. */
+export const hasTurnRelay = TURN_SERVERS.length > 0
 let relayHealthReported = false
 
 /** Surface degraded rendezvous once, quietly. Silent while every relay is up. */
@@ -127,6 +130,21 @@ const OUTGOING_TTL_MS = 120_000 // how long a sent file stays re-sendable for re
 const MAX_OUTGOING_FILES = 8 // sent files kept re-sendable at once
 const MAX_CODE_CHARS = 20 // inbound join code ceiling (the Connect field's own maxlength)
 const MIN_CODE_CHARS = 4 // anything shorter is treated as a mistyped code
+
+// --- Transport state ------------------------------------------------------------------
+// Trystero reports a connection that died by dropping the peer, the same event a closed
+// tab produces, so the connection under each peer is watched separately.
+const TRANSPORT_POLL = 2000 // ms between passes that attach to newly opened connections
+const MAX_TRANSPORT_TRACKED = 64 // peerIds whose last transport state is remembered
+const MAX_PEER_ID_CHARS = 64 // a peerId is announced by the peer, so it is bounded like any inbound string
+// Wait before calling a peer unreachable. Trystero's own handshake gives up after 10s, so a
+// peer that is going to join over a connection that did come up has joined by then.
+const UNREACHABLE_GRACE_MS = 12_000
+// The onJoinError message for an SDP exchange after which no connection came up. The same
+// callback also carries a room password that failed to decrypt and Trystero's handshake
+// failing on a connection that was built, and nothing but the text tells them apart. If
+// Trystero rewords it, unreachable peers go unreported rather than misattributed.
+const SDP_FAILURE = /after exchanging SDP/
 
 // --- Replayable history ---------------------------------------------------------------
 // There is no server, so "what was said before you arrived" lives on the devices that were
@@ -262,6 +280,25 @@ export interface HistoryRecord {
   size?: number
 }
 
+/**
+ * Transport state of one peer's connection, as opposed to the handshake state the roster
+ * carries. 'disconnected' usually comes back on its own and 'failed' does not, so the two
+ * stay separate words all the way to the badge.
+ */
+export type TransportState = 'connected' | 'disconnected' | 'failed'
+
+export interface PeerTransport {
+  peerId: string
+  state: TransportState
+  /** Whether the authenticated handshake had completed. A connection that never
+   *  authenticated never worked; one that had is a connection that was lost. */
+  authed: boolean
+  /** Empty until `authed`, since before that there is no verified name to attribute a
+   *  failure to. Capped on ingest like every other inbound string. */
+  name: string
+  pubKeyHex: string
+}
+
 export interface SessionEvents {
   onRoster?: (peers: RosterPeer[]) => void
   onChat?: (m: ChatMessage) => void
@@ -284,6 +321,16 @@ export interface SessionEvents {
    * the peer is told nothing until `answerHistory` is called.
    */
   onHistoryRequest?: (peerId: string) => void
+  /**
+   * The connection under one peer changed state. Carries only fields the roster already
+   * holds, so it opens no new inbound string path, and the state is one of our own three
+   * words rather than anything the library or the peer supplies.
+   *
+   * 'failed' is terminal and covers three arrivals: the connection reported failed, a peer
+   * was dropped while its transport was already in trouble (a break, not a departure), and
+   * a peer found on a relay that no connection could ever be built to.
+   */
+  onPeerTransport?: (t: PeerTransport) => void
 }
 
 export interface RoomSession {
@@ -501,6 +548,14 @@ export async function joinRoomSession(opts: {
       rtcConfig: { iceServers: ICE_SERVERS, iceTransportPolicy: opts.relayOnly ? 'relay' : 'all' },
     },
     opts.roomId,
+    {
+      // A peer found on a relay that no connection could be built to. onPeerJoin never runs
+      // for it, so this is the only place it is observable. The library's error text is
+      // not forwarded; only the peerId is kept, bounded.
+      onJoinError: ({ peerId, error }) => {
+        if (SDP_FAILURE.test(String(error))) noteUnreachable(String(peerId).slice(0, MAX_PEER_ID_CHARS))
+      },
+    },
   )
   reportRelayHealth(ev)
 
@@ -555,6 +610,125 @@ export async function joinRoomSession(opts: {
 
   const emitRoster = () => ev.onRoster?.([...peers.values()].map((p) => p.info))
 
+  // --- Transport watch ------------------------------------------------------------
+  // Trystero's pc.onconnectionstatechange, set when the connection is built, drops the peer
+  // through onPeerLeave inside the dispatch that reports 'failed', and 5s into a
+  // 'disconnected' from a timer. Listeners run in registration order (capture does not
+  // change that at the target in Chromium), so one added here runs after the peer is
+  // already gone. What it can record is the 'disconnected' that precedes a lost network,
+  // and onPeerLeave reads that record to tell a break from a departure. A connection that
+  // goes from 'connected' straight to 'failed' (a fatal DTLS alert) leaves no record and
+  // reads as a departure.
+  const transportWatched = new WeakSet<RTCPeerConnection>()
+  const transportState = new Map<string, TransportState>()
+  const unreachablePending = new Map<string, ReturnType<typeof setTimeout>>()
+  let transportTimer: ReturnType<typeof setInterval> | null = null
+
+  /** Report a change, once per peer per state. `st` is null for a peer that never reached
+   *  the roster, which is also why nothing but the peerId can be said about it. */
+  function emitTransport(peerId: string, state: TransportState, st: PeerState | null): void {
+    if (transportTimer === null) return // torn down: our own leave() closes every connection
+    if (transportState.get(peerId) === state) return
+    // A peer that never joins leaves no onPeerLeave behind to clear its entry, so the map
+    // is bounded here rather than by the room's lifecycle.
+    if (!transportState.has(peerId) && transportState.size >= MAX_TRANSPORT_TRACKED) {
+      const oldest = transportState.keys().next().value
+      if (oldest !== undefined) transportState.delete(oldest)
+    }
+    transportState.set(peerId, state)
+    ev.onPeerTransport?.(transportEvent(peerId, state, st))
+  }
+
+  /** `ready`, not `channel`: the channel exists a few awaits before the verified name and
+   *  key are written into `info`. */
+  function transportEvent(peerId: string, state: TransportState, st: PeerState | null): PeerTransport {
+    if (!st?.info.ready) return { peerId, state, authed: false, name: '', pubKeyHex: '' }
+    return { peerId, state, authed: true, name: st.info.name, pubKeyHex: st.info.pubKeyHex }
+  }
+
+  /**
+   * Report a peer an SDP exchange failed with, once UNREACHABLE_GRACE_MS has passed without
+   * it joining. Two rooms negotiating with the same device at once end with one connection
+   * that Trystero shares between them, and the attempt it discards reaches onJoinError
+   * moments before the device joins over the one it kept. A peer already here has a
+   * working connection, so a second attempt failing beside it is not reported either.
+   */
+  function noteUnreachable(peerId: string): void {
+    if (transportTimer === null || peers.has(peerId) || unreachablePending.has(peerId)) return
+    if (unreachablePending.size >= MAX_TRANSPORT_TRACKED) return
+    unreachablePending.set(
+      peerId,
+      setTimeout(() => {
+        unreachablePending.delete(peerId)
+        if (!peers.has(peerId)) emitTransport(peerId, 'failed', null)
+      }, UNREACHABLE_GRACE_MS),
+    )
+  }
+
+  function cancelUnreachable(peerId: string): void {
+    const t = unreachablePending.get(peerId)
+    if (t === undefined) return
+    clearTimeout(t)
+    unreachablePending.delete(peerId)
+  }
+
+  function readTransport(pc: RTCPeerConnection): TransportState | null {
+    const s = pc.connectionState
+    if (s === 'connected') return 'connected'
+    if (s === 'disconnected') return 'disconnected'
+    if (s === 'failed' || s === 'closed') return 'failed'
+    return null // 'new' / 'connecting': nothing has happened to report yet
+  }
+
+  /** This session's current connection to a peer, or null once Trystero has replaced or
+   *  dropped it. A replaced connection keeps firing state changes as it dies, and reading
+   *  those as the peer's state announces a failure beside a link that is working. */
+  function currentPc(peerId: string): RTCPeerConnection | null {
+    try {
+      return room.getPeers()[peerId] ?? null
+    } catch {
+      return null
+    }
+  }
+
+  /** Attach to connections opened since the last pass. getPeers() lists only peers that
+   *  finished Trystero's handshake, the same moment onPeerJoin ran, so every entry here
+   *  has a PeerState and a peer that never got that far is reported by onJoinError. */
+  function watchTransport(): void {
+    let conns: Record<string, RTCPeerConnection>
+    try {
+      conns = room.getPeers()
+    } catch {
+      return
+    }
+    for (const [peerId, pc] of Object.entries(conns)) {
+      const st = peers.get(peerId)
+      if (!st) continue // a connection this session does not track is not ours to report
+      if (!transportWatched.has(pc)) {
+        transportWatched.add(pc)
+        // addEventListener, never pc.onconnectionstatechange: that property is Trystero's
+        // and overwriting it would take its peer-leave detection with it.
+        pc.addEventListener('connectionstatechange', () => {
+          const s = readTransport(pc)
+          const now = peers.get(peerId)
+          if (s && now && currentPc(peerId) === pc) emitTransport(peerId, s, now)
+        })
+      }
+      const s = readTransport(pc)
+      if (s) emitTransport(peerId, s, st)
+    }
+  }
+
+  transportTimer = setInterval(watchTransport, TRANSPORT_POLL)
+
+  function stopTransportWatch(): void {
+    if (transportTimer !== null) clearInterval(transportTimer)
+    transportTimer = null
+    transportState.clear()
+    for (const t of unreachablePending.values()) clearTimeout(t)
+    unreachablePending.clear()
+  }
+
   async function newPeerState(peerId: string): Promise<PeerState> {
     const kp = (await crypto.subtle.generateKey({ name: 'X25519' }, false, ['deriveBits'])) as CryptoKeyPair
     const ephPubRaw = new Uint8Array(await crypto.subtle.exportKey('raw', kp.publicKey))
@@ -586,6 +760,7 @@ export async function joinRoomSession(opts: {
       const st = await newPeerState(peerId)
       peers.set(peerId, st)
       emitRoster()
+      watchTransport() // the connection already exists here; the poll is only a backstop
       // No card for the attempt. Every peer used to cost two feed cards, one for joining and
       // one for the handshake completing; only the result is reported now.
       try {
@@ -602,11 +777,16 @@ export async function joinRoomSession(opts: {
   }
 
   room.onPeerJoin = (peerId: string) => {
+    cancelUnreachable(peerId)
     void ensurePeer(peerId)
   }
 
   room.onPeerLeave = (peerId: string) => {
     const st = peers.get(peerId)
+    // Read before the entry goes: Trystero drops a peer whose transport broke exactly as
+    // it drops one that left, and this is the only thing that tells the two apart.
+    const broke = transportState.get(peerId) === 'disconnected' || transportState.get(peerId) === 'failed'
+    transportState.delete(peerId)
     peers.delete(peerId)
     // Their half-sent files can never complete, since nobody is left to ask. Report and
     // free the slot rather than holding it against MAX_INCOMING_FILES for the page's life.
@@ -617,8 +797,15 @@ export async function joinRoomSession(opts: {
     historyTaken.delete(peerId)
     mediaChain.delete(peerId)
     emitRoster()
+    // A peer dropped while its transport was already in trouble lost its connection rather
+    // than leaving, so it is reported as a failure instead of "left". Only an authenticated
+    // peer: one that had not finished the handshake had a connection that was built, which
+    // the console's report for an unauthenticated failure (never reachable) would misstate.
+    // Emitted directly because transportState no longer holds the peer, and before
+    // onPeerLeave so the app can drop its own per-peer state afterwards.
+    if (st?.info.ready && broke) ev.onPeerTransport?.(transportEvent(peerId, 'failed', st))
     ev.onPeerLeave?.(peerId)
-    if (st?.info.ready) ev.onSystem?.(`${st.info.name} left.`)
+    if (!broke && st?.info.ready) ev.onSystem?.(`${st.info.name} left.`)
   }
 
   hs.onMessage = async (data, ctx) => {
@@ -1484,6 +1671,9 @@ export async function joinRoomSession(opts: {
 
     async leave() {
       stopAdaptLoop()
+      // Before room.leave() closes every connection, so a teardown we asked for is not
+      // read back as a pile of failures.
+      stopTransportWatch()
       for (const s of activeStreams.keys()) room.removeStream(s)
       activeStreams.clear()
       mediaChain.clear()

@@ -2954,6 +2954,102 @@ with sync_playwright() as p:
     sctx_a.close()
     sctx_b.close()
 
+    # =================== a connection that fails says so ===================
+    # Three contexts in one code room over the real relays. A and B connect normally, so
+    # the 'connected' badge below comes out of a real handshake. C's WebRTC is confined to
+    # a relay while none is configured, which is the symmetric or carrier-grade NAT case
+    # the copy names and the one failure a headless run can produce faithfully: the ICE
+    # agent gathers nothing, no candidate pair can form, and Trystero's handshake with a
+    # peer it found on a relay times out. Nothing here sets a class or a word by hand.
+    #
+    # The other failure branch, a connection that was up and then broke, is not forced
+    # here: every way of stopping a peer from Playwright (closing the page, closing its
+    # RTCPeerConnection) shuts the transport down gracefully, which is a departure and is
+    # reported as one. Measured in Chromium: about 15s of consent failure reaches 'failed',
+    # and Trystero drops the peer 5s after 'disconnected', so even an abrupt end is a peer
+    # that left before it is a peer that broke.
+    FAIL_CODE = 'c' + os.urandom(3).hex()
+    RELAY_ONLY = """
+      const RealPC = window.RTCPeerConnection;
+      window.RTCPeerConnection = new Proxy(RealPC, {
+        construct(target, args) {
+          const cfg = Object.assign({}, args[0] || {});
+          cfg.iceServers = [];
+          cfg.iceTransportPolicy = 'relay';
+          return new target(cfg, ...args.slice(1));
+        },
+      });
+    """
+
+    def fail_join(ctx):
+        pg = ctx.new_page()
+        pg.goto(f'{BASE}/#/join/{FAIL_CODE}')
+        pg.wait_for_selector('.composer', timeout=30000)
+        # Nearby is a second rendezvous tier every page in this run shares, and a peer
+        # reachable on it renders under nearby rather than under the code room. The wait is
+        # for the listener: mountConsole registers it past an await, so it can still be
+        # missing at the moment the composer appears.
+        pg.wait_for_timeout(2000)
+        pg.evaluate("() => window.dispatchEvent(new CustomEvent('wt:nearby', { detail: false }))")
+        return pg
+
+    def chip_of(pg):
+        return pg.evaluate("() => { const b = document.querySelector('.topbar .badge');"
+                           " return b ? [b.textContent, b.className] : ['', ''] }")
+
+    def peer_states(pg):
+        # textContent, not inner_text: the sidebar is collapsed by default and an
+        # assertion about a word must not turn into an assertion about the drawer.
+        return pg.evaluate("() => [...document.querySelectorAll('.peers .peer')].map("
+                           "p => p.querySelector('.peer-state').textContent)")
+
+    def sys_lines(pg):
+        return pg.evaluate("() => [...document.querySelectorAll('.feed .sys')].map(s => s.textContent)")
+
+    fctx_a, fctx_b = browser.new_context(), browser.new_context()
+    fa, fb = fail_join(fctx_a), fail_join(fctx_b)
+    f_paired = poll(lambda: 'Secure channel established' in feed_text(fa)
+                    and 'Secure channel established' in feed_text(fb), 150)
+    check('failure: two contexts in one code room reach a secure channel', bool(f_paired),
+          f'A: {feed_text(fa)[-120:]!r} B: {feed_text(fb)[-120:]!r}')
+    healthy = poll(lambda: 'connected' in peer_states(fa), 60) if f_paired else None
+    check('failure: a real handshake puts the peer row on connected', bool(healthy), str(peer_states(fa)))
+
+    # Negative control: the words only appear when something is actually wrong.
+    pre_chip = chip_of(fa)
+    check('failure: a healthy room says nothing about failure',
+          'failed' not in (pre_chip[0] or '') and 'danger' not in (pre_chip[1] or '')
+          and not [w for w in peer_states(fa) if w in ('reconnecting', 'lost', 'unreachable')],
+          f'chip={pre_chip} rows={peer_states(fa)}')
+
+    fctx_c = browser.new_context()
+    fctx_c.add_init_script(RELAY_ONLY)
+    fc = fail_join(fctx_c)
+    got = poll(lambda: 'failed' in (chip_of(fa)[0] or ''), 120)
+    check('failure: a connection that cannot be built is counted on the chip instead of hiding it',
+          bool(got), f'chip={chip_of(fa)} sys={sys_lines(fa)[-2:]}')
+    chip_now = chip_of(fa)
+    check('failure: the chip keeps counting the working connection beside the failed one',
+          'connected' in (chip_now[0] or '') and 'failed' in (chip_now[0] or ''), str(chip_now))
+    check('failure: the chip carries the danger class while a connection is failed',
+          'danger' in (chip_now[1] or ''), str(chip_now))
+    said = [l for l in sys_lines(fa) if l.startswith('Could not connect to')]
+    check('failure: the feed says a connection could not be made', bool(said), str(sys_lines(fa)[-3:]))
+    # One clause, and only the cause the code can establish: TURN_SERVERS is empty.
+    check('failure: the report names the missing relay and nothing it cannot know',
+          bool(said) and 'No relay server is configured' in said[0]
+          and 'symmetric or carrier-grade NAT' in said[0], str(said[:1]))
+    check('failure: the same failure is reported once however often it is retried',
+          len(said) == 1, str(said))
+    check('failure: a failure elsewhere does not repaint a working connection',
+          'connected' in peer_states(fa), str(peer_states(fa)))
+    check('failure: the peer that could not connect reports it on its own side too',
+          bool(poll(lambda: [l for l in sys_lines(fc) if l.startswith('Could not connect to')], 90)),
+          str(sys_lines(fc)[-3:]))
+    fctx_a.close()
+    fctx_b.close()
+    fctx_c.close()
+
     # ============ sound the autoplay policy held back ============
     # Someone who opened an invite link and never clicked has no activation, and Chromium
     # refuses autoplay with sound for them, so the remote <video> stayed on a black first

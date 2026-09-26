@@ -1182,6 +1182,34 @@ with sync_playwright() as p:
           f"origin={rtop.evaluate('self.origin')!r}")
     rc.close()
 
+    # A failed traineddata download fails the OCR run and the next run retries. tesseract.js
+    # swallows that failure, so the shared worker promise used to stay pending and every
+    # later recognition in the tab hung on "Loading the OCR engine". A fresh context has no
+    # cached traineddata, so blocking the CDN fails the first load for real.
+    rc, rp = rf_open()
+    rc.route('https://tessdata.projectnaptha.com/**', lambda r: r.abort())
+    rpng = base64.b64decode(rp.evaluate('''() => {
+      const c = document.createElement('canvas'); c.width = 520; c.height = 140
+      const g = c.getContext('2d')
+      g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height)
+      g.fillStyle = '#000'; g.font = 'bold 76px Georgia, serif'; g.textBaseline = 'middle'
+      g.fillText('Hello urletc', 18, 74)
+      return c.toDataURL('image/png').split(',')[1]
+    }'''))
+    rp.evaluate("location.hash = '#/t/ocr'")
+    rocr = rp.locator('details.card[data-tool="ocr"]')
+    rocr.locator('input[type=file]').wait_for(timeout=10000)
+    rstatus = rocr.locator('div.muted').first
+    rocr.locator('input[type=file]').set_input_files(files=[{'name': 'a.png', 'mimeType': 'image/png', 'buffer': rpng}])
+    check('ocr: a blocked language download ends the run with an error',
+          bool(rpoll(rp, lambda: rstatus.inner_text().startswith('OCR failed'), 20)), rstatus.inner_text()[:120])
+    rc.unroute('https://tessdata.projectnaptha.com/**')
+    rocr.locator('input[type=file]').set_input_files(files=[{'name': 'b.png', 'mimeType': 'image/png', 'buffer': rpng}])
+    rpoll(rp, lambda: rstatus.inner_text() == 'Done.' or rstatus.inner_text().startswith('OCR failed'), 60)
+    check('ocr: the next run after a failed load retries and reads the text',
+          'hello' in rocr.locator('pre').inner_text().lower(), f'{rstatus.inner_text()[:80]!r} {rocr.locator("pre").inner_text()[:80]!r}')
+    rc.close()
+
     # --- 13n. Studio (VDO.ninja-style A/V): publish controls, labeled source, layouts, stage link ---
     page.evaluate("location.hash = '#/t/studio'")
     page.wait_for_timeout(500)

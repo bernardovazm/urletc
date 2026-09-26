@@ -54,34 +54,66 @@ export function ocrLanguages(langs: readonly string[] = navigator.languages ?? [
 }
 
 function getWorker(): ReturnType<typeof createWorker> {
-  workerPromise ??= createWorker(ocrLanguages(), OEM.LSTM_ONLY, {
-    // Points at our shim rather than the vendored worker. A worker has its own Trusted
-    // Types context, so the policy installed by the page does not cover its importScripts
-    // call.
-    workerPath: '/tesseract/worker-tt.js',
-    // Load that shim by URL instead of the library's default of fetching it and wrapping
-    // it in a blob: worker. Inside a blob worker `self.location` is the opaque blob URL, so
-    // the shim cannot resolve the sibling script it needs to import.
-    workerBlobURL: false,
-    corePath: '/tesseract',
-    langPath: 'https://tessdata.projectnaptha.com/4.0.0_fast',
-    logger: (m) => {
-      if (m.status === 'recognizing text') progressCb?.(m.progress)
-    },
-  }).then(async (w) => {
-    // Page segmentation mode moves accuracy more than any filter on the inputs this tool
-    // gets. The default AUTO (PSM 3) runs full layout analysis and scored worst of every
-    // mode measured on a browser screenshot. SPARSE_TEXT finds text wherever it sits
-    // without ordering it into a single page flow, which suits a screenshot of chrome,
-    // page, toast and button, and it was the only mode that kept the period in a small
-    // dotted hostname (SINGLE_BLOCK scores marginally higher character accuracy on that
-    // image and still drops the period). A dense body-copy fixture, the case sparse mode is
-    // supposed to handle badly, scores 1.000 under it. `user_defined_dpi` and
-    // `preserve_interword_spaces` were measured and changed no output on any fixture, so
-    // neither is set.
-    await w.setParameters({ tessedit_pageseg_mode: PSM.SPARSE_TEXT })
-    return w
+  if (workerPromise) return workerPromise
+  // A failed traineddata download (offline, a blocked CDN) rejects its job inside
+  // tesseract.js, which swallows it and never settles the promise createWorker returned, so
+  // the cached promise would hang every later recognition until a reload. errorHandler is
+  // the only signal of that failure. The Worker is only handed out once init succeeds, so it
+  // is caught as it is constructed, synchronously inside the createWorker call, to be
+  // terminated on failure rather than left holding its WASM heap.
+  let fail: (e: Error) => void = () => {}
+  const failed = new Promise<never>((_, reject) => {
+    fail = reject
   })
+  const NativeWorker = globalThis.Worker
+  let spawned: Worker | null = null
+  globalThis.Worker = class extends NativeWorker {
+    constructor(...args: ConstructorParameters<typeof Worker>) {
+      super(...args)
+      spawned = this // eslint-disable-line @typescript-eslint/no-this-alias
+    }
+  }
+  let created: ReturnType<typeof createWorker>
+  try {
+    created = createWorker(ocrLanguages(), OEM.LSTM_ONLY, {
+      // Points at our shim rather than the vendored worker. A worker has its own Trusted
+      // Types context, so the policy installed by the page does not cover its importScripts
+      // call.
+      workerPath: '/tesseract/worker-tt.js',
+      // Load that shim by URL instead of the library's default of fetching it and wrapping
+      // it in a blob: worker. Inside a blob worker `self.location` is the opaque blob URL, so
+      // the shim cannot resolve the sibling script it needs to import.
+      workerBlobURL: false,
+      corePath: '/tesseract',
+      langPath: 'https://tessdata.projectnaptha.com/4.0.0_fast',
+      logger: (m) => {
+        if (m.status === 'recognizing text') progressCb?.(m.progress)
+      },
+      errorHandler: (e: unknown) => fail(new Error(String(e))),
+    })
+  } finally {
+    globalThis.Worker = NativeWorker
+  }
+  workerPromise = Promise.race([created, failed])
+    .then(async (w) => {
+      // Page segmentation mode moves accuracy more than any filter on the inputs this tool
+      // gets. The default AUTO (PSM 3) runs full layout analysis and scored worst of every
+      // mode measured on a browser screenshot. SPARSE_TEXT finds text wherever it sits
+      // without ordering it into a single page flow, which suits a screenshot of chrome,
+      // page, toast and button, and it was the only mode that kept the period in a small
+      // dotted hostname (SINGLE_BLOCK scores marginally higher character accuracy on that
+      // image and still drops the period). A dense body-copy fixture, the case sparse mode is
+      // supposed to handle badly, scores 1.000 under it. `user_defined_dpi` and
+      // `preserve_interword_spaces` were measured and changed no output on any fixture, so
+      // neither is set.
+      await w.setParameters({ tessedit_pageseg_mode: PSM.SPARSE_TEXT })
+      return w
+    })
+    .catch((e: unknown) => {
+      ;(spawned as Worker | null)?.terminate()
+      workerPromise = null // the next recognition retries from scratch
+      throw e
+    })
   return workerPromise
 }
 
@@ -109,7 +141,8 @@ export async function recognizeImage(image: Blob | string, onProgress?: (p: numb
  *  recognition is in flight, since another card or the clipboard tool may still need it. */
 export async function disposeOcr(): Promise<void> {
   if (inFlight > 0 || !workerPromise) return
-  const w = await workerPromise
+  const w = await workerPromise.catch(() => null)
+  if (!w) return // init failed and already cleaned up after itself
   await w.terminate()
   workerPromise = null
   progressCb = null

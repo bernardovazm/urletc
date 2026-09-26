@@ -227,9 +227,13 @@ with sync_playwright() as p:
     # checkout) connects over Nearby and turns the "0 peers" queue tests into real sends.
     # Switch Nearby off through its own control. ---
     page.evaluate("location.hash = '#/t/settings'")
-    page.wait_for_timeout(800)
     stn = page.locator('details.card').last
     nbl = stn.locator('label', has_text='Nearby discovery')
+    # Settings appends its controls only after six store reads, on a chunk loaded cold here.
+    try:
+        nbl.first.wait_for(state='attached', timeout=10000)
+    except Exception:
+        pass
     nb_present = nbl.count() == 1
     check('settings: nearby toggle present', nb_present)
     if nb_present:

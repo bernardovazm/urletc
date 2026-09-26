@@ -2673,6 +2673,41 @@ with sync_playwright() as p:
     rctx_a.close()
     rctx_b.close()
 
+    # Ratchet receive path: open() now keeps keys for skipped counters and opens a late
+    # message with them. Two renames typed back to back on B are two sealed messages on the
+    # ratchet, and A's roster must end on the second name with nothing failing to decrypt.
+    # A large sealed message overtaken by a later one needs a big chat or a tampered peer
+    # and is not staged; the reorder itself is covered outside the browser.
+    RN_CODE = 'x' + os.urandom(3).hex()
+    rn_first, rn_second = f'first-{RN_CODE}', f'second-{RN_CODE}'
+    ROSTER_NAMES = "() => [...document.querySelectorAll('details.pgroup .peer .name')].map(x => x.textContent.trim())"
+    nctx_a = browser.new_context()
+    nctx_a.add_init_script(VISIBILITY)
+    nctx_b = browser.new_context()
+    nctx_b.add_init_script(VISIBILITY)
+    rn_a, rn_b = nctx_a.new_page(), nctx_b.new_page()
+    for _pg in (rn_a, rn_b):
+        _pg.goto(f'{BASE}/#/join/{RN_CODE}')
+        _pg.wait_for_selector('.composer', timeout=30000)
+        _pg.evaluate(NEARBY_OFF)
+    rn_paired = poll(lambda: 'Secure channel established' in feed_text(rn_a)
+                     and 'Secure channel established' in feed_text(rn_b), 150)
+    check('two contexts pair for the rename check', bool(rn_paired),
+          f'A: {feed_text(rn_a)[-120:]!r} B: {feed_text(rn_b)[-120:]!r}')
+    if rn_paired:
+        rn_b.locator('.topbar button.roster-toggle').click()
+        rn_field = rn_b.locator('input[aria-label="This device name"]').first
+        for _name in (rn_first, rn_second):
+            rn_field.fill(_name)
+            rn_field.press('Enter')
+        rn_seen = poll(lambda: rn_second in rn_a.evaluate(ROSTER_NAMES), 30)
+        check('two renames in a row reach the peer, ending on the second name', bool(rn_seen),
+              f'A roster: {rn_a.evaluate(ROSTER_NAMES)}')
+        check('no sealed message failed to open on the way', 'Failed to decrypt' not in feed_text(rn_a),
+              feed_text(rn_a)[-160:])
+    nctx_a.close()
+    nctx_b.close()
+
     # ============ screen sharing is one press, from the topbar or the composer ============
     # Both controls go straight to the browser's picker and publish what it returns. The
     # topbar button doubles as the stop control while a screen is live.

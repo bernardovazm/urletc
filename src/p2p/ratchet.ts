@@ -1,12 +1,14 @@
 // Per-peer symmetric HKDF ratchet over an X25519 ECDH shared secret (ARCHITECTURE
 // sections 6 and 9). Forward secrecy within a session: each message advances a chain key
 // and the previous key is discarded, so a key captured later cannot decrypt earlier
-// messages. Full Double-Ratchet / post-compromise security is the P4 upgrade.
+// messages. The exception is a bounded set of keys for counters skipped on the way to a
+// later message, held until that message arrives. Full Double-Ratchet / post-compromise
+// security is the P4 upgrade.
 
 import { aesKeyFromBytes, b64ToBytes, bytesToB64, hkdfBytes, randomBytes } from '../core/crypto'
 
 const EMPTY = new Uint8Array(0)
-const MAX_SKIP = 256 // bound out-of-order/gap key derivation (anti-DoS)
+const MAX_SKIP = 256 // bound out-of-order/gap key derivation, and the skipped keys held (anti-DoS)
 
 export type SealedMessage = { n: number; iv: string; ct: string }
 
@@ -23,6 +25,11 @@ export class SecureChannel {
   private recvChain: Uint8Array<ArrayBuffer>
   private sendCtr = 0
   private recvCtr = 0
+  // Message keys for counters skipped on the way to a later message. Trystero interleaves
+  // the frames of concurrent sends, so a large sealed message can complete after a small
+  // one sealed after it. Each key is deleted once it opens its message, so a replay still
+  // fails; the oldest is evicted past MAX_SKIP.
+  private skipped = new Map<number, Uint8Array<ArrayBuffer>>()
   // Serializes seal/open so each read-derive-write of chain state is atomic across its
   // await points. Without this, two overlapping (unawaited) calls both read the same
   // chain key, derive duplicate message keys, and permanently desync the ratchet.
@@ -68,20 +75,32 @@ export class SecureChannel {
 
   open(msg: SealedMessage): Promise<Uint8Array> {
     return this.enqueue(async () => {
-      if (msg.n < this.recvCtr) throw new Error('stale or replayed message')
+      if (msg.n < this.recvCtr) {
+        const held = this.skipped.get(msg.n)
+        if (!held) throw new Error('stale or replayed message')
+        const pt = await decryptWith(held, msg) // a failed open keeps the key for the real message
+        this.skipped.delete(msg.n)
+        return pt
+      }
       const skip = msg.n - this.recvCtr
       if (skip > MAX_SKIP) throw new Error('message gap too large')
       for (let i = 0; i < skip; i++) {
-        const { next } = await step(this.recvChain)
+        const { msgKey, next } = await step(this.recvChain)
+        this.skipped.set(this.recvCtr, msgKey)
+        if (this.skipped.size > MAX_SKIP) this.skipped.delete(this.skipped.keys().next().value as number)
         this.recvChain = next
         this.recvCtr++
       }
       const { msgKey, next } = await step(this.recvChain)
       this.recvChain = next
       this.recvCtr++
-      const key = await aesKeyFromBytes(msgKey)
-      const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64ToBytes(msg.iv) }, key, b64ToBytes(msg.ct))
-      return new Uint8Array(pt)
+      return decryptWith(msgKey, msg)
     })
   }
+}
+
+async function decryptWith(msgKey: Uint8Array<ArrayBuffer>, msg: SealedMessage): Promise<Uint8Array> {
+  const key = await aesKeyFromBytes(msgKey)
+  const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64ToBytes(msg.iv) }, key, b64ToBytes(msg.ct))
+  return new Uint8Array(pt)
 }

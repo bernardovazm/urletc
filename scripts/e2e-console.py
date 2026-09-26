@@ -2512,12 +2512,60 @@ with sync_playwright() as p:
     tctx_b.close()
 
     # ============ transfer, handshake and ratchet: regressions ============
+    # Settings' nearby toggle dispatches this. Off, so a code room is the only path between
+    # the contexts of a block and nothing reaches the other pages of this run.
+    NEARBY_OFF = "() => window.dispatchEvent(new CustomEvent('wt:nearby', { detail: false }))"
+
+    def downloaded_sha(pg, name):
+        """SHA-256 of what the file card's Download link saves, or None before it exists.
+        Clicked for real: the page CSP blocks fetch() on blob URLs, and the saved file is
+        what a person ends up with anyway."""
+        link = pg.locator(f'.feed a[download="{name}"]')
+        if not link.count():
+            return None
+        with pg.expect_download() as dl:
+            link.last.click()
+        return hashlib.sha256(io.open(dl.value.path(), 'rb').read()).hexdigest()
+
+    # Per-sender chunk gate: a chunk counts only from the peer that offered its file, since
+    # every recipient of a broadcast holds the same fileId and key. One sender and two
+    # recipients in one code room; both downloads must hash to the bytes attached, so the
+    # gate keeps co-recipients from blocking each other. A co-recipient forging chunks needs
+    # a modified client and is not staged.
+    CR_CODE = 'x' + os.urandom(3).hex()
+    cr_name = f'wt-cr-{CR_CODE}.bin'
+    cr_bytes = os.urandom(500 * 1024)
+    io.open(os.path.join(SNAP, cr_name), 'wb').write(cr_bytes)
+    cr_sha = hashlib.sha256(cr_bytes).hexdigest()
+    cr_ctxs = [browser.new_context() for _ in range(3)]
+    cr_pages = []
+    for _c in cr_ctxs:
+        _c.add_init_script(VISIBILITY)
+        _pg = _c.new_page()
+        _pg.goto(f'{BASE}/#/join/{CR_CODE}')
+        _pg.wait_for_selector('.composer', timeout=30000)
+        _pg.evaluate(NEARBY_OFF)
+        cr_pages.append(_pg)
+    cr_s, cr_r1, cr_r2 = cr_pages
+    cr_paired = poll(lambda: cr_s.locator('.peer .peer-state').all_inner_texts() == ['connected', 'connected'], 150)
+    check('one sender reaches two recipients in a code room', bool(cr_paired),
+          str(cr_s.locator('.peer .peer-state').all_inner_texts()))
+    if cr_paired:
+        cr_s.locator('.composer-wrap > input[type=file]:not([accept])').set_input_files(os.path.join(SNAP, cr_name))
+        cr_s.wait_for_selector(f'.card:has-text("{cr_name}") button:has-text("Send to devices")', timeout=20000)
+        cr_s.locator('.card', has_text=cr_name).locator('button', has_text='Send to devices').click()
+        poll(lambda: all(_pg.locator(f'.feed a[download="{cr_name}"]').count() > 0 for _pg in (cr_r1, cr_r2)), 90)
+        cr_got = [downloaded_sha(_pg, cr_name) for _pg in (cr_r1, cr_r2)]
+        check('both recipients of a broadcast file get it byte-exact', cr_got == [cr_sha, cr_sha],
+              f'got={[g and g[:12] for g in cr_got]} want={cr_sha[:12]}')
+    for _c in cr_ctxs:
+        _c.close()
+
     # Handshake reservation: onPeerJoin and the first inbound hs share one PeerState and send
     # one hs. Two contexts in one code room, nearby off so the code tier is the only path
     # between them, must reach exactly one secure channel each with one connected roster row.
     # A duplicate PeerState would print a second channel card or leave a peer stuck at '...'.
     HS_CODE = 'x' + os.urandom(3).hex()
-    NEARBY_OFF = "() => window.dispatchEvent(new CustomEvent('wt:nearby', { detail: false }))"
     hctx_a = browser.new_context()
     hctx_a.add_init_script(VISIBILITY)
     hctx_b = browser.new_context()
@@ -2556,17 +2604,6 @@ with sync_playwright() as p:
     ttl_bytes = os.urandom(700 * 1024)  # 11 chunks of 64 KiB
     io.open(ttl_path, 'wb').write(ttl_bytes)
     ttl_sha = hashlib.sha256(ttl_bytes).hexdigest()
-
-    def downloaded_sha(pg, name):
-        """SHA-256 of what the file card's Download link saves, or None before it exists.
-        Clicked for real: the page CSP blocks fetch() on blob URLs, and the saved file is
-        what a person ends up with anyway."""
-        link = pg.locator(f'.feed a[download="{name}"]')
-        if not link.count():
-            return None
-        with pg.expect_download() as dl:
-            link.last.click()
-        return hashlib.sha256(io.open(dl.value.path(), 'rb').read()).hexdigest()
 
     tctx_s = browser.new_context()
     tctx_s.add_init_script(VISIBILITY)

@@ -17,10 +17,14 @@ updates:
       # Drop this entry once typescript-eslint supports TS >= 7.1.
       - dependency-name: typescript
         versions: ['>=7.0.0']
+  # The actions share one workflow file and one CI run, so one pull request covers them all.
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    groups:
+      actions:
+        patterns: ['*']
   - package-ecosystem: pip
     directory: /
     schedule:

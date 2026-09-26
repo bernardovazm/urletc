@@ -29,6 +29,7 @@ import { ensurePersonalSecret, pairLink, personalRoom, resetPersonalSecret } fro
 import type { ChatMessage, HistoryRecord, InviteSignal, ReceivedFile, RoomSession, RosterPeer, SessionEvents } from '../p2p/session'
 import { setTransientGuard } from '../tools/close-guard'
 import { markActivity } from './attention'
+import type { CaptionsHandle } from './captions'
 import { createContext } from './context'
 import { registry, type ToolManifest, type ToolModule } from './registry'
 import { Router } from './router'
@@ -1501,7 +1502,9 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   // ---------- live captions, on-device Whisper (ARCHITECTURE section 4.3) ----------
   // Proactive: once enabled (below or in Settings ⚙) every mic/cam share is
   // transcribed locally from then on. The first share offers it exactly once.
-  let captionsStop: (() => void) | null = null
+  // The running captioner and the share it records, so stopping that share or muting the
+  // mic reaches the cloned track it holds.
+  let captions: { stream: MediaStream; handle: CaptionsHandle } | null = null
   let captionsDispose: (() => void) | null = null
   let captionsOffered = false
   let capIdle = 0
@@ -1536,8 +1539,8 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     capIdle = window.setTimeout(() => captionsEl.classList.add('hidden'), 12000)
   }
   function stopCaptions() {
-    captionsStop?.()
-    captionsStop = null
+    captions?.handle.stop()
+    captions = null
     capLines = []
     captionsEl.classList.add('hidden')
     captionsEl.classList.remove('cap-min')
@@ -1554,11 +1557,13 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     stopCaptions()
     try {
       const cap = await import('./captions')
-      captionsStop = cap.startCaptions(
+      if (!localStreams.has(stream)) return // the share ended first, or the offer outlived it
+      const handle = cap.startCaptions(
         stream,
         (line) => showCaption(line),
         (s) => showCaption(s, true),
-      ).stop
+      )
+      captions = { stream, handle }
       captionsDispose = cap.disposeCaptions
       showCaption('Live captions on. Your speech is transcribed on this device only.', true)
     } catch (e) {
@@ -1688,6 +1693,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
    *  quiet/black. Returns the new on-state. */
   function setLocalEnabled(k: 'audio' | 'video', on: boolean): void {
     for (const t of localTracksOf(k)) t.enabled = on
+    if (k === 'audio') captions?.handle.setEnabled(on)
     syncMediaButtons()
   }
 
@@ -1695,6 +1701,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   function unpublish(stream: MediaStream) {
     for (const sess of mediaTiers()) sess.removeMedia(stream)
     stream.getTracks().forEach((t) => t.stop())
+    if (captions?.stream === stream) endCaptions() // its clone would keep the mic open
     localStreams.delete(stream)
     setTransientGuard(localStreams.size > 0)
     for (const t of stageTiles.filter((t) => t.peerId === null && t.stream === stream)) removeStageTile(t)

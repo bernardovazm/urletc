@@ -15,6 +15,8 @@ let seq = 0
 
 export interface CaptionsHandle {
   stop(): void
+  /** Follow the source track's mute. A clone keeps its own `enabled`. */
+  setEnabled(on: boolean): void
 }
 
 function getWorker(): Worker {
@@ -101,10 +103,14 @@ export function startCaptions(stream: MediaStream, onLine: (text: string) => voi
   const track = stream.getAudioTracks()[0]
   if (!track) {
     onStatus('No microphone track to caption.')
-    return { stop() {} }
+    return { stop() {}, setEnabled() {} }
   }
-  // Clone so stopping captions never touches the live share (and vice versa).
-  const mic = new MediaStream([track.clone()])
+  // Clone so stopping captions never touches the live share. The reverse holds too:
+  // stopping or muting the share leaves the clone recording, so the owner of the share
+  // has to stop it and mirror its mute through this handle.
+  const clone = track.clone()
+  clone.enabled = track.enabled
+  const mic = new MediaStream([clone])
   const language = captionLanguage()
   let stopped = false
   let rec: MediaRecorder | null = null
@@ -174,6 +180,9 @@ export function startCaptions(stream: MediaStream, onLine: (text: string) => voi
         /* already gone */
       }
       mic.getTracks().forEach((t) => t.stop())
+    },
+    setEnabled(on) {
+      clone.enabled = on
     },
   }
 }

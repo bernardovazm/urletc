@@ -2949,6 +2949,45 @@ with sync_playwright() as p:
     ictx_a.close()
     ictx_b.close()
 
+    # --- captions end with the share they transcribe, and follow its mute ---
+    # Captions record a clone of the mic track, and stopping or muting the original leaves
+    # a clone untouched: after the tile's stop the mic stayed captured with no control left
+    # to release it, and a muted mic kept being transcribed. The page's clones are counted
+    # through the prototype. Model downloads are refused: the clone's state is the output
+    # here, and a download would only load the machine.
+    TRACK_CLONES = """
+      window.__clones = []
+      const realClone = MediaStreamTrack.prototype.clone
+      MediaStreamTrack.prototype.clone = function () {
+        const c = realClone.call(this)
+        window.__clones.push(c)
+        return c
+      }
+    """
+    cctx = browser.new_context()
+    cctx.add_init_script(TRACK_CLONES)
+    cctx.route(re.compile(r'huggingface\.co|hf\.co|cdn\.jsdelivr\.net'), lambda r: r.abort())
+    cp = cctx.new_page()
+    cp.goto(f'{BASE}/#/join/x{os.urandom(3).hex()}')
+    cp.wait_for_selector('.composer', timeout=30000)
+    cp.locator('.composer .bar button[title^="Share your camera"]').click()
+    c_offer = cp.locator('.sys button', has_text='Turn on live captions')
+    check('a camera share with sound offers captions', bool(poll(lambda: c_offer.count() == 1, 15)))
+    c_offer.click()
+    C_LIVE = "() => window.__clones.filter(t => t.kind === 'audio' && t.readyState === 'live')"
+    check('captions start recording a clone of the mic', bool(poll(lambda: len(cp.evaluate(C_LIVE)) == 1, 15)))
+    cp.locator('.composer .bar button[title="Mute your microphone"]').click()
+    check('muting the mic mutes what captions record',
+          cp.evaluate("() => window.__clones.filter(t => t.kind === 'audio').every(t => !t.enabled)"))
+    cp.locator('.composer .bar button[title="Unmute your microphone"]').click()
+    check('and unmuting resumes it',
+          cp.evaluate("() => window.__clones.some(t => t.kind === 'audio' && t.readyState === 'live' && t.enabled)"))
+    cp.locator('.stage-tile.kind-cam button[title^="Stop sharing "]').click()
+    check("stopping the camera from its tile releases the captions' mic",
+          bool(poll(lambda: len(cp.evaluate(C_LIVE)) == 0, 5)), '%d live clones' % len(cp.evaluate(C_LIVE)))
+    check('and takes the captions strip down', not cp.locator('.captions').is_visible())
+    cctx.close()
+
     # --- touch: the per-card delete control, driven by real taps ---
     # Every assertion above drives a desktop viewport with a mouse, so a control that does
     # nothing on a phone passes them all. Revealing it wherever there is no hover is the

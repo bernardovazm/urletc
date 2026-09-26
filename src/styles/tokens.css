@@ -617,12 +617,6 @@ details.note > .note-body {
   gap: 0.4rem;
   margin-top: 0.45rem;
 }
-/* The screen-capture note tracks the composer's column: the control it explains is in the
-   composer bar, and an expanded stage hides the feed. */
-.composer-wrap > details.note {
-  max-width: var(--maxw);
-  margin: 0 auto 0.4rem;
-}
 /* Sender attribution on a received file card. A file and a chat message are both things
    someone sent you, so this is `.msg .who` at the same size and the same muted ink, sitting
    in the card summary instead of over a bubble. It is metadata, so it holds its width while
@@ -1458,10 +1452,11 @@ iframe.ws-app-frame {
    rules only beat the base .feed / .feed-item / .composer-wrap / .captions rules by
    sitting after them.
 
-   The topbar carries eight controls plus any pinned tools, more than 320-390px can hold,
+   The topbar carries nine controls plus any pinned tools, more than 320-390px can hold,
    so it sheds them in value order, by what survives elsewhere rather than by what is least
-   used: below 560px the pinned tools go (a shortcut to a tool Tools still opens, and the
-   widest thing on the bar) and the brand goes (decorative), below 470px the status chip
+   used: below 560px the screen button and the pinned tools go (the composer holds the same
+   screen control, Tools opens every tool, and they are the widest things on the bar) and
+   the brand goes (decorative), below 470px the status chip
    goes (80px of text the roster drawer also reports), below 360px the room link goes
    (Connect holds the same action, and the address bar holds the link). The code chip, the
    clear-feed button, the roster toggle, Tools and Connect survive every step. The theme toggle lives in Settings and is off the
@@ -1474,7 +1469,8 @@ iframe.ws-app-frame {
     padding: 0 0.4rem;
     gap: 0.25rem;
   }
-  .topbar button.tool-pin {
+  .topbar button.tool-pin,
+  .topbar button.screen-share {
     display: none;
   }
   .topbar .brand {

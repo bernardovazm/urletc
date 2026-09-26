@@ -2478,13 +2478,50 @@ with sync_playwright() as p:
     tctx_a.close()
     tctx_b.close()
 
-    # ============ the screen-share note follows the browser, not the app ============
-    # Sharing a tab with its sound is what people actually want out of screen sharing, and
-    # whether the picker offers it at all is the browser's to decide. The copy is derived
-    # from getSupportedConstraints().suppressLocalAudioPlayback, the Screen Capture
-    # constraint that exists only where display audio is implemented, so both branches are
-    # driven by replacing what the browser reports. Headless Chromium reports it, so
-    # without the override the no-audio branch would never run here.
+    # ============ screen sharing is one press, from the topbar or the composer ============
+    # Both controls go straight to the browser's picker and publish what it returns. The
+    # topbar button doubles as the stop control while a screen is live.
+    sctx = browser.new_context()
+    sctx.add_init_script(FAKE_SCREEN)
+    spg = sctx.new_page()
+    serrs = []
+    spg.on('pageerror', lambda e: serrs.append(str(e)))
+    spg.goto(BASE)
+    spg.wait_for_selector('.composer', timeout=30000)
+    TOP_SCREEN = spg.locator('.topbar button.screen-share')
+    check('the topbar offers screen sharing by name',
+          TOP_SCREEN.count() == 1 and TOP_SCREEN.inner_text() == 'Share screen',
+          '%d buttons' % TOP_SCREEN.count())
+    check('the topbar no longer seeds a Studio pin',
+          spg.locator('.topbar button.tool-pin').count() == 0)
+    TOP_SCREEN.click()
+    check('one press on it shares the screen',
+          bool(poll(lambda: spg.locator('.tiles .stage-tile.kind-screen').count() == 1, 10)),
+          '%d screen tiles' % spg.locator('.tiles .stage-tile.kind-screen').count())
+    check('the same button then stops it',
+          TOP_SCREEN.inner_text() == 'Stop sharing' and TOP_SCREEN.get_attribute('aria-pressed') == 'true',
+          '%r pressed=%r' % (TOP_SCREEN.inner_text(), TOP_SCREEN.get_attribute('aria-pressed')))
+    check('sharing opens no note over the composer',
+          spg.locator('.composer-wrap details.note').count() == 0)
+    TOP_SCREEN.click()
+    check('pressing it again stops the share',
+          bool(poll(lambda: spg.locator('.tiles .stage-tile').count() == 0, 10))
+          and TOP_SCREEN.inner_text() == 'Share screen',
+          '%d tiles, %r' % (spg.locator('.tiles .stage-tile').count(), TOP_SCREEN.inner_text()))
+    spg.locator('.composer .bar button[title^="Share your screen"]').click()
+    check('the composer screen control shares in one press too',
+          bool(poll(lambda: spg.locator('.tiles .stage-tile.kind-screen').count() == 1, 10))
+          and TOP_SCREEN.inner_text() == 'Stop sharing')
+    spg.locator('.composer .bar button[title*="Stop sharing"]').click()
+    poll(lambda: spg.locator('.tiles .stage-tile').count() == 0, 10)
+    check('no page error on the screen share path', not serrs, ' | '.join(serrs)[:200])
+    sctx.close()
+
+    # ============ the Studio screen note follows the browser, not the app ============
+    # Whether the picker offers tab audio is the browser's call. The Studio panel explains
+    # it, derived from getSupportedConstraints().suppressLocalAudioPlayback, the Screen
+    # Capture constraint that exists only where display audio is implemented. Headless
+    # Chromium reports it, so both branches are driven by replacing what it reports.
     def constraint_report(audio):
         return """
           const orig = navigator.mediaDevices.getSupportedConstraints.bind(navigator.mediaDevices)
@@ -2496,13 +2533,16 @@ with sync_playwright() as p:
         """ % ('c.suppressLocalAudioPlayback = true' if audio
                else 'delete c.suppressLocalAudioPlayback')
 
+    _studio_id = tool_id_for('studio')
+
     def note_ctx(audio):
         ctx = browser.new_context()
-        ctx.add_init_script(FAKE_SCREEN)
         ctx.add_init_script(constraint_report(audio))
         pg = ctx.new_page()
         pg.goto(BASE)
         pg.wait_for_selector('.composer', timeout=30000)
+        pg.evaluate("location.hash = '#/t/%s'" % _studio_id)
+        pg.wait_for_selector('details.card[data-tool="%s"] details.note' % _studio_id, timeout=15000)
         return ctx, pg
 
     REPORTS = '() => !!navigator.mediaDevices.getSupportedConstraints().suppressLocalAudioPlayback'
@@ -2512,28 +2552,8 @@ with sync_playwright() as p:
           npg_on.evaluate(REPORTS) and not npg_off.evaluate(REPORTS),
           'on=%s off=%s' % (npg_on.evaluate(REPORTS), npg_off.evaluate(REPORTS)))
 
-    SHARE_BTN = '.composer .bar button[title^="Share your screen"]'
-    NOTE = '.composer-wrap > details.note'
+    NOTE = 'details.card[data-tool="%s"] details.note' % _studio_id
     BODY = NOTE + ' .note-body'
-    check('no screen-share note sits over the composer before the control is used',
-          npg_on.locator(NOTE).count() == 0, '%d notes' % npg_on.locator(NOTE).count())
-
-    titles = {}
-    for _name, _pg in (('on', npg_on), ('off', npg_off)):
-        titles[_name] = _pg.locator(SHARE_BTN).get_attribute('title') or ''
-        _pg.locator(SHARE_BTN).click()
-        _pg.wait_for_timeout(600)
-    check('the screen control names what this browser can capture in its own title',
-          'can capture audio' in titles['on'] and 'no audio capture' in titles['off'],
-          '%r / %r' % (titles['on'], titles['off']))
-    check('using the screen control raises the note beside it',
-          npg_on.locator(NOTE).count() == 1 and npg_off.locator(NOTE).count() == 1,
-          '%d / %d' % (npg_on.locator(NOTE).count(), npg_off.locator(NOTE).count()))
-    # A screen share expands the stage, and an expanded stage hides the feed. The note has
-    # to outlive the action it explains, which is why it is not a feed card.
-    check('the note is still on screen once the share expands the stage',
-          theater(npg_on) and npg_on.locator(NOTE).is_visible(),
-          'stage-max=%s visible=%s' % (theater(npg_on), npg_on.locator(NOTE).is_visible()))
 
     # Read through a presence check rather than straight off the locator: a regression that
     # drops the note has to report these as failures, not time out and abort every section
@@ -2549,7 +2569,6 @@ with sync_playwright() as p:
           'no audio capture' in sum_off, repr(sum_off))
     check('the note is a capability read rather than one fixed string', sum_on != sum_off,
           '%r == %r' % (sum_on, sum_off))
-
     check('the note shows one line until the detail is asked for',
           npg_on.locator(BODY).count() == 1 and not npg_on.locator(BODY).is_visible(),
           '%d bodies' % npg_on.locator(BODY).count())
@@ -2569,26 +2588,6 @@ with sync_playwright() as p:
           repr(det_on))
     check('the detail states what each browser supports without ranking them',
           'Firefox and LibreWolf capture picture only' in det_off, repr(det_off[-160:]))
-
-    _had_note = npg_off.locator(NOTE).count()
-    npg_off.locator('.composer .bar button[title*="Stop sharing"]').click()
-    npg_off.wait_for_timeout(400)
-    check('the note goes when the sharing it explained stops',
-          _had_note == 1 and npg_off.locator(NOTE).count() == 0,
-          '%d before, %d after' % (_had_note, npg_off.locator(NOTE).count()))
-
-    # The Studio publish panel is the other way into the same browser picker, so it carries
-    # the same note under its own screen button.
-    _studio_id = tool_id_for('studio')
-    npg_off.locator('.topbar button.tool-pin[data-tool="%s"]' % _studio_id).click()
-    npg_off.wait_for_selector('details.card[data-tool="%s"]' % _studio_id, timeout=15000)
-    npg_off.wait_for_timeout(500)
-    _scard = 'details.card[data-tool="%s"] details.note' % _studio_id
-    check('the Studio publish panel carries the same note under its screen control',
-          npg_off.locator(_scard).count() == 1
-          and 'no audio capture' in text_of(npg_off, _scard + ' > summary'),
-          '%d notes: %r' % (npg_off.locator(_scard).count(),
-                            text_of(npg_off, _scard + ' > summary')))
     nctx_on.close()
     nctx_off.close()
 
@@ -2674,7 +2673,7 @@ with sync_playwright() as p:
             const box = t.getBoundingClientRect();
             const kids = [...t.children].filter(k => getComputedStyle(k).display !== 'none');
             const rb = t.querySelector('button.roster-toggle');
-            const pins = [...t.querySelectorAll('button.tool-pin')];
+            const pins = [...t.querySelectorAll('button.tool-pin, button.screen-share')];
             return { over: t.scrollWidth - t.clientWidth,
                      clipped: kids.filter(k => k.scrollWidth > k.clientWidth + 1).map(k => k.className),
                      outside: kids.filter(k => k.getBoundingClientRect().right > box.right + 0.5).map(k => k.className),
@@ -2685,17 +2684,17 @@ with sync_playwright() as p:
               _bar['over'] <= 0 and not _bar['clipped'] and not _bar['outside'],
               f"overflow={_bar['over']} clipped={_bar['clipped']} outside={_bar['outside']}")
         check(f'touch: the drawer toggle survives at {_w}px', _bar['roster'])
-        # The fit above only means something while a pin is in the bar's DOM: this context
-        # is a fresh profile, so the seeded A/V pin is there and has to be shed, not absent.
-        check(f'touch: the seeded pin is in the bar at {_w}px', _bar['pins'] >= 1, str(_bar))
-        check(f'touch: pinned tools are shed at {_w}px', _bar['pinsShown'] == 0, str(_bar))
+        # The fit above only means something while a text button is in the bar's DOM: the
+        # screen button is built wherever getDisplayMedia exists, headless included, so it
+        # is there and has to be shed, not absent.
+        check(f'touch: the screen button is in the bar at {_w}px', _bar['pins'] >= 1, str(_bar))
+        check(f'touch: pinned tools and the screen button are shed at {_w}px', _bar['pinsShown'] == 0, str(_bar))
     check('touch: no page error on the touch path', not terrs, ' | '.join(terrs)[:200])
     tctx.close()
 
-    # --- pinned tools: launcher toggle, topbar button, persistence, the seeded default ---
-    # Its own context because the seed is only observable on a profile that has never
-    # written 'tool-pins', and because unpinning here would leave the width block above
-    # with no pin to measure. Closed immediately: a live context on this public IP is a
+    # --- pinned tools: launcher toggle, topbar button, persistence, the empty default ---
+    # Its own context because the default is only observable on a profile that has never
+    # written 'tool-pins'. Closed immediately: a live context on this public IP is a
     # nearby peer to every other one.
     pctx = browser.new_context(viewport={'width': 1280, 'height': 800})
     pp = pctx.new_page()
@@ -2718,8 +2717,14 @@ with sync_playwright() as p:
         pp.wait_for_selector('.menu.tool-grid', timeout=3000)
 
     av_id = tool_id_for('studio')
-    check('pin: a profile that never wrote the key ships with the A/V tool pinned',
-          pin_ids() == [av_id], str(pin_ids()))
+    check('pin: a profile that never wrote the key starts with nothing pinned',
+          pin_ids() == [], str(pin_ids()))
+    open_launcher()
+    pin_toggle('Studio').click()
+    pp.wait_for_timeout(500)
+    pp.keyboard.press('Escape')
+    pp.wait_for_timeout(300)
+    check('pin: pinning Studio from the launcher puts it on the bar', pin_ids() == [av_id], str(pin_ids()))
     sp = pp.locator('.topbar button.tool-pin[data-tool="%s"]' % av_id)
     check("pin: the button carries the tool's registered name and a title",
           sp.inner_text() == 'Studio' and 'screen' in (sp.get_attribute('title') or ''),
@@ -2760,17 +2765,15 @@ with sync_playwright() as p:
     pin_toggle('Base64').click()
     pp.wait_for_timeout(500)
     check('pin: unpinning takes the button off the bar', pin_ids() == [av_id], str(pin_ids()))
-    # The seed is a default, not a fixture: unpinning it writes an empty list, and an empty
-    # list is a choice the next load has to honour.
     pin_toggle('Studio').click()
     pp.wait_for_timeout(500)
-    check('pin: the seeded default unpins like any other', pin_ids() == [], str(pin_ids()))
+    check('pin: the last pin comes off like any other', pin_ids() == [], str(pin_ids()))
     pp.keyboard.press('Escape')
     pp.reload()
     pp.wait_for_selector('.composer', timeout=30000)
     pp.wait_for_timeout(1200)
     check('pin: an unpinned tool stays unpinned across a reload', pin_ids() == [], str(pin_ids()))
-    check('pin: the seeded default does not come back once unpinned',
+    check('pin: Studio does not come back once unpinned',
           pp.locator('.topbar button.tool-pin[data-tool="%s"]' % av_id).count() == 0)
     check('pin: no page error on the pin path', not perrs, ' | '.join(perrs)[:200])
     pctx.close()
@@ -3315,23 +3318,24 @@ with sync_playwright() as p:
           "  slack: Math.round(t.clientWidth - pad - used - gap * (vis.length - 1)),"
           "  theme: [...t.querySelectorAll('button')]"
           "    .filter(b => (b.title || '').includes('black and white')).length,"
-          "  pins: t.querySelectorAll('button.tool-pin').length,"
-          "  pin: vis.some(c => c.classList.contains('tool-pin')),"
+          "  pins: t.querySelectorAll('button.tool-pin, button.screen-share').length,"
+          "  pin: vis.some(c => c.classList.contains('tool-pin') || c.classList.contains('screen-share')),"
           "  brand: vis.some(c => c.classList.contains('brand')),"
           "  badge: vis.some(c => c.classList.contains('badge')),"
           "  link: vis.some(c => c.classList.contains('room-link')),"
           "  roster: vis.some(c => c.classList.contains('roster-toggle'))} }")
-    # (width, brand visible, room link visible, pinned tools visible). The status chip is
-    # only asserted where a rule hides it outright; above 470 its visibility is connection
-    # state, not layout. The pinned tool is the widest thing the bar can carry, so it sheds
-    # first, at the same 560 as the brand, and the slack below is measured with it present.
+    # (width, brand visible, room link visible, screen button and pins visible). The status
+    # chip is only asserted where a rule hides it outright; above 470 its visibility is
+    # connection state, not layout. The screen button is the widest thing the bar carries, so
+    # it sheds first, at the same 560 as the brand, and the slack below is measured with it
+    # present.
     for w, want_brand, want_link, want_pin in ((320, False, False, False), (360, False, False, False),
                                                (390, False, True, False), (768, True, True, True)):
         page.set_viewport_size({'width': w, 'height': 720})
         page.wait_for_timeout(350)
         tb = page.evaluate(TB)
-        check(f'a pinned tool is in the topbar DOM at {w}px', tb['pins'] >= 1, str(tb))
-        check(f'pinned tools shed where the sheet claims at {w}px', tb['pin'] == want_pin, str(tb))
+        check(f'the screen button is in the topbar DOM at {w}px', tb['pins'] >= 1, str(tb))
+        check(f'the screen button and pins shed where the sheet claims at {w}px', tb['pin'] == want_pin, str(tb))
         check(f'topbar does not overflow at {w}px', not tb['over'] and tb['slack'] >= 0, str(tb))
         check(f'topbar sheds what the sheet claims at {w}px',
               tb['brand'] == want_brand and tb['link'] == want_link

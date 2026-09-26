@@ -33,7 +33,7 @@ import { createContext } from './context'
 import { registry, type ToolManifest, type ToolModule } from './registry'
 import { Router } from './router'
 import { setStudio, type SourceKind, type StageLayout, type StreamMeta, type StudioController, type StudioSource } from './studio'
-import { screenShareNote, screenShareSupport } from './screen-share'
+import { screenShareSupport } from './screen-share'
 import { button, copyText, el, toast } from './ui'
 
 type Tier = 'personal' | 'nearby' | 'code' | 'presence'
@@ -1529,6 +1529,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     camToggle.setAttribute('aria-label', camToggle.title)
     micToggle.setAttribute('aria-pressed', String(!aOn))
     camToggle.setAttribute('aria-pressed', String(!vOn))
+    syncScreenBtn()
   }
 
   /** Publish one local source (camera / screen / mic) to the trusted tiers (personal +
@@ -1551,24 +1552,8 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     if (kind !== 'screen' && stream.getAudioTracks().length) void maybeOfferCaptions(stream)
   }
 
-  // What this browser exposes for screen capture, shown when the screen control is used
-  // and taken away once nothing is being shared. It sits above the composer rather than in
-  // the feed because a screen share expands the stage, and an expanded stage hides the
-  // feed: a note posted there would be hidden by the action it explains. Raised on the way
-  // into the picker, not after it, so it is on screen while the browser is asking.
-  let screenNote: HTMLElement | null = null
-  function showScreenNote(): void {
-    if (screenNote) return
-    screenNote = screenShareNote()
-    composerWrap.prepend(screenNote)
-  }
-  function hideScreenNote(): void {
-    screenNote?.remove()
-    screenNote = null
-  }
   async function startMedia(mode: 'audio' | 'video' | 'screen') {
     const kind: SourceKind = mode === 'screen' ? 'screen' : mode === 'video' ? 'cam' : 'mic'
-    if (kind === 'screen') showScreenNote()
     const constraints: MediaStreamConstraints = mode === 'screen' ? {} : { audio: true, video: mode === 'video' }
     try {
       await publishLocal(kind, constraints)
@@ -1581,6 +1566,28 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
    *  screen for every viewer. A screen share is stopped, not blanked. */
   const localTracksOf = (k: 'audio' | 'video') =>
     [...localStreams].filter(([, m]) => m.kind !== 'screen').flatMap(([st]) => (k === 'audio' ? st.getAudioTracks() : st.getVideoTracks()))
+  const localScreens = () => [...localStreams].filter(([, m]) => m.kind === 'screen').map(([st]) => st)
+
+  // The topbar's screen control. One press opens the browser's picker and publishes the
+  // choice; while a screen is shared the same button stops it. Built only where the browser
+  // exposes screen capture at all, which leaves it off phones.
+  const screenBtn = button(
+    'Share screen',
+    () => {
+      const live = localScreens()
+      if (live.length) for (const st of live) unpublish(st)
+      else void startMedia('screen')
+    },
+    'ghost screen-share',
+    'Share your screen with paired and code devices',
+  )
+  function syncScreenBtn(): void {
+    const on = localScreens().length > 0
+    screenBtn.textContent = on ? 'Stop sharing' : 'Share screen'
+    screenBtn.title = on ? 'Stop sharing your screen' : 'Share your screen with paired and code devices'
+    screenBtn.setAttribute('aria-pressed', String(on))
+    screenBtn.classList.toggle('on', on)
+  }
 
   /** Mute the mic / blank the camera by flipping `track.enabled`, deliberately not by
    *  stopping the track: stopping tears the source down, removes it from every session and
@@ -1604,16 +1611,14 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   function stopMedia() {
     for (const s of [...localStreams.keys()]) unpublish(s)
     endCaptions() // sharing ended, so also free the caption worker
-    hideScreenNote()
   }
 
   // ---------- tool launcher (anchored panel: hover to open, drag to reorder) ----------
   let toolOrder: string[] = (await getItem<string[]>('tool-order')) ?? []
-  // Tools pinned to the topbar, by id, in bar order. `undefined` is the only state that
-  // seeds a default: a stored array is obeyed even when it is empty, so unpinning Studio
-  // keeps it off the bar on the next load instead of the seed handing it back.
+  // Tools pinned to the topbar, by id, in bar order. Nothing is pinned by default; screen
+  // sharing, the one thing most people came to the bar for, has its own button.
   const storedPins = await getItem<string[]>('tool-pins')
-  let toolPins: string[] = Array.isArray(storedPins) ? storedPins.filter((id) => typeof id === 'string') : storedPins === undefined ? ['studio'] : []
+  let toolPins: string[] = Array.isArray(storedPins) ? storedPins.filter((id) => typeof id === 'string') : []
   const orderedTools = () => {
     const all = registry.list()
     const pos = (id: string) => {
@@ -1931,7 +1936,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
       button('🖼', () => imgInput.click(), 'icon', 'Attach an image'),
       button('🎤', () => void startMedia('audio'), 'icon', 'Share your microphone (paired/code devices only; can live-caption you on-device)'),
       button('🎥', () => void startMedia('video'), 'icon', 'Share your camera (paired/code devices only)'),
-      button('🖥', () => void startMedia('screen'), 'icon', `Share your screen (paired/code devices only). ${screenShareSupport().line}`),
+      button('🖥', () => void startMedia('screen'), 'icon', 'Share your screen (paired/code devices only)'),
       micToggle,
       camToggle,
       button('⏹', stopMedia, 'icon', 'Stop sharing cam/mic/screen'),
@@ -2605,6 +2610,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     el('span', { class: 'spacer' }),
     // Text buttons first, then every glyph button in one run. Splitting the four emoji
     // controls around Tools and Connect made two of them read as part of the text group.
+    ...(screenShareSupport().capture ? [screenBtn] : []),
     toolsBtn,
     button('Connect', () => void openConnect(), 'ghost', 'Join a code, pair devices, test mic & cam, device name'),
     shareBtn,

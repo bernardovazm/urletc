@@ -2708,6 +2708,49 @@ with sync_playwright() as p:
     nctx_a.close()
     nctx_b.close()
 
+    # One identity per device from the first boot: the personal and code tiers create the
+    # identity in parallel on a fresh install, and two creations stored two keypairs, so the
+    # one a code-room peer met could be replaced by the other after a reload. B reads A's
+    # safety number from the Verify dialog, A reloads, and B must read the same number.
+    ID_CODE = 'x' + os.urandom(3).hex()
+    ictx_a = browser.new_context()
+    ictx_a.add_init_script(VISIBILITY)
+    ictx_b = browser.new_context()
+    ictx_b.add_init_script(VISIBILITY)
+    id_a, id_b = ictx_a.new_page(), ictx_b.new_page()
+    id_b.goto(f'{BASE}/#/join/{ID_CODE}')
+    id_b.wait_for_selector('.composer', timeout=30000)
+    id_b.evaluate(NEARBY_OFF)
+    id_b.locator('.topbar button.roster-toggle').click()
+    id_a.goto(f'{BASE}/#/join/{ID_CODE}')  # a fresh install: nothing in IndexedDB yet
+    id_a.wait_for_selector('.composer', timeout=30000)
+    id_a.evaluate(NEARBY_OFF)
+
+    def safety_seen_by_b():
+        """The safety number B's Verify dialog shows for its one peer, dismissed unanswered."""
+        btn = id_b.locator('.peer button[title^="Verify "]')
+        if btn.count() != 1:
+            return None
+        seen = []
+        id_b.once('dialog', lambda d: (seen.append(d.message), d.dismiss()))
+        btn.click()
+        m = re.search(r'Safety number with .*?:\s+(.+?)\s+Compare', seen[0], re.S) if seen else None
+        return m.group(1).strip() if m else None
+
+    id_first = poll(safety_seen_by_b, 150)
+    check('a peer can read the safety number of a freshly installed device', bool(id_first), feed_text(id_b)[-120:])
+    if id_first:
+        # The reload closes A's page, so B drops that peer before meeting the reloaded one.
+        id_a.reload()
+        id_a.wait_for_selector('.composer', timeout=30000)
+        id_a.evaluate(NEARBY_OFF)
+        id_again = poll(lambda: (id_b.locator('.peer button[title^="Verify "]').count() == 1
+                                 and 'left' in feed_text(id_b) and safety_seen_by_b()), 150)
+        check('the device keeps the same safety number across its first reload', id_again == id_first,
+              f'before={id_first!r} after={id_again!r}')
+    ictx_a.close()
+    ictx_b.close()
+
     # ============ screen sharing is one press, from the topbar or the composer ============
     # Both controls go straight to the browser's picker and publish what it returns. The
     # topbar button doubles as the stop control while a screen is live.

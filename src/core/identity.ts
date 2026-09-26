@@ -28,11 +28,21 @@ export class CryptoUnsupportedError extends Error {
   }
 }
 
-let cached: DeviceIdentity | null = null
+// The in-flight promise is shared. The personal and code tiers boot in parallel and reach
+// this in the same tick on a fresh install; two separate creations would each find
+// IndexedDB empty and store their own keypair, so peers on the two tiers would see
+// different device identities and the last write would win after reload.
+let pending: Promise<DeviceIdentity> | null = null
 
-export async function loadOrCreateIdentity(): Promise<DeviceIdentity> {
-  if (cached) return cached
+export function loadOrCreateIdentity(): Promise<DeviceIdentity> {
+  pending ??= createIdentity().catch((e: unknown) => {
+    pending = null // a failure is not cached, so a later call can retry
+    throw e
+  })
+  return pending
+}
 
+async function createIdentity(): Promise<DeviceIdentity> {
   const caps = await probeCrypto()
   if (!caps.ed25519 || !caps.x25519) throw new CryptoUnsupportedError()
 
@@ -49,11 +59,10 @@ export async function loadOrCreateIdentity(): Promise<DeviceIdentity> {
   }
 
   const pubRaw = await crypto.subtle.exportKey('raw', sign.publicKey)
-  cached = {
+  return {
     sign,
     ecdh,
     publicKeyHex: toHex(pubRaw),
     deviceId: toHex(await sha256(pubRaw)),
   }
-  return cached
 }

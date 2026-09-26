@@ -70,6 +70,41 @@ const STYLE_ATTR = /([\s"'])(?:[a-zA-Z_][\w.-]*:)?style(\s*=)/gi
 
 const neutralize = (html: string) => html.replace(/<(\/?)(script|style)\b/gi, '<$1x-strip-$2').replace(TAG_SPAN, (tag) => tag.replace(STYLE_ATTR, '$1x-strip-style$2'))
 
+// textContent joins elements with nothing between them, so minified markup such as
+// "<td>Your code</td><td>483920</td>" read as "Your code483920". The inert document has no
+// layout, so innerText cannot supply the line breaks either; they are inserted as text
+// nodes before reading: a newline after each block and in place of each <br>, and a tab
+// after each table cell.
+const BLOCK =
+  'address, article, aside, blockquote, caption, dd, details, dialog, div, dl, dt, fieldset, figcaption, figure, footer, form, h1, h2, h3, h4, h5, h6, header, hgroup, hr, li, main, nav, ol, p, pre, section, summary, table, tbody, tfoot, thead, tr, ul'
+
+const isBlock = (n: Node | null) => n instanceof Element && n.matches(BLOCK)
+const blank = (n: Node) => n.nodeType === Node.TEXT_NODE && !n.textContent?.trim()
+// Whether markup that was already laid out on lines puts a line break at this edge.
+const endsLine = (n: Node | null) => n?.nodeType === Node.TEXT_NODE && /\n[ \t]*$/.test(n.textContent ?? '')
+const startsLine = (n: Node | null) => n?.nodeType === Node.TEXT_NODE && /^[ \t]*\n/.test(n.textContent ?? '')
+
+function sibling(n: Node, dir: 'previousSibling' | 'nextSibling'): Node | null {
+  let s = n[dir]
+  while (s && blank(s)) s = s[dir]
+  return s
+}
+
+function breakBlocks(body: HTMLElement): void {
+  for (const br of body.querySelectorAll('br')) br.replaceWith('\n')
+  for (const cell of body.querySelectorAll('td, th')) cell.after('\t')
+  for (const block of body.querySelectorAll(BLOCK)) {
+    // Inline text running straight into a block ("Intro<p>Para</p>") needs a break before
+    // it too. A block that follows another block already has one from that block.
+    const prev = sibling(block, 'previousSibling')
+    if (prev && !isBlock(prev) && !endsLine(block.previousSibling)) block.before('\n')
+    // The last block inside a block leaves the break to its parent, so the end of a list
+    // or a table does not add an empty line.
+    if (!sibling(block, 'nextSibling') && isBlock(block.parentElement)) continue
+    if (!startsLine(block.nextSibling)) block.after('\n')
+  }
+}
+
 /** Strip HTML to plain text. Parses into an inert document and reads only textContent. */
 export function stripHtml(html: string): string {
   const policy = htmlPolicy()
@@ -77,7 +112,11 @@ export function stripHtml(html: string): string {
   const source = policy ? policy.createHTML(raw) : raw
   const doc = new DOMParser().parseFromString(source, 'text/html')
   for (const node of doc.body.querySelectorAll(NON_TEXT)) node.remove()
-  return (doc.body.textContent ?? '').replace(/\n{3,}/g, '\n\n').trim()
+  breakBlocks(doc.body)
+  return (doc.body.textContent ?? '')
+    .replace(/[ \t]+$/gm, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
 }
 
 const tool: ToolModule = {

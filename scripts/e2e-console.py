@@ -1384,6 +1384,30 @@ with sync_playwright() as p:
           _auto.inner_text() == '{\n  "b": 1.50,\n  "id": 1234567890123456789,\n  "n": 42\n}', repr(_auto.inner_text()))
     rc.close()
 
+    # HTML to Text keeps block boundaries in minified markup. textContent puts nothing
+    # between elements, so paragraphs, list items, cells and <br> ran together, and a
+    # verification mail laid out as <td>Your code</td><td>483920</td> read "Your code483920".
+    # Pretty-printed markup, which already carries its own line breaks, must not gain blank
+    # lines from the same pass.
+    rc, rp = rf_open()
+    rp.evaluate("location.hash = '#/t/html-strip'")
+    rhs = rp.locator('details.card[data-tool="html-strip"]')
+    rhs.locator('textarea').wait_for(timeout=10000)
+    for _src, _want, _label in [
+        ('<p>Hello</p><p>World</p><ul><li>One</li><li>Two</li></ul>Line 1<br>Line 2',
+         'Hello\nWorld\nOne\nTwo\nLine 1\nLine 2', 'paragraphs, list items and <br> each start a line'),
+        ('<table><tr><td>Your code</td><td>483920</td></tr><tr><td>Expires</td><td>10 min</td></tr></table>',
+         'Your code\t483920\nExpires\t10 min', 'table cells are tab-separated and rows are lines'),
+        ('Intro<div>Block</div>tail <b>bold</b> end', 'Intro\nBlock\ntail bold end', 'inline text around a block breaks at the block only'),
+        ('<div>\n  <h1>Title</h1>\n  <p>Para one</p>\n\n  <p>Para two</p>\n</div>',
+         'Title\n  Para one\n\n  Para two', 'pretty-printed markup keeps its own line breaks'),
+    ]:
+        rhs.locator('textarea').fill(_src)
+        rhs.locator('button', has_text='Strip to text').click()
+        _got = rhs.locator('pre').inner_text()
+        check(f'html-strip: {_label}', _got == _want, repr(_got))
+    rc.close()
+
     # --- 13n. Studio (VDO.ninja-style A/V): publish controls, labeled source, layouts, stage link ---
     page.evaluate("location.hash = '#/t/studio'")
     page.wait_for_timeout(500)

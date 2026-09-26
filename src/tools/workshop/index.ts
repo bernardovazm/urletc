@@ -74,7 +74,19 @@ const tool: ToolModule = {
     const incoming: Manifest[] = []
     const out = el('pre', { class: 'muted', text: 'run output' })
 
-    const persist = () => ctx.storage.set('installed', installed)
+    // Every install and removal rewrites the whole list under one key, and the namespace
+    // quota can refuse that write. The in-memory list then goes back to what is stored, so
+    // a later successful write cannot persist a change the person was told had failed.
+    const persist = async (undo: () => void, what: string): Promise<boolean> => {
+      try {
+        await ctx.storage.set('installed', installed)
+        return true
+      } catch (e) {
+        undo()
+        toast(`${what} failed: ${(e as Error).message}`)
+        return false
+      }
+    }
 
     const install = async (m: Manifest, tier: ReturnType<typeof trustTier>) => {
       const ok = await consent({
@@ -88,6 +100,7 @@ const tool: ToolModule = {
         runLabel: 'Install',
       })
       if (!ok) return
+      const before = installed.slice()
       const i = installed.findIndex((x) => x.id === m.id)
       if (i >= 0) {
         // Enforce same-key updates (section 7). A different author key for the same id
@@ -102,8 +115,8 @@ const tool: ToolModule = {
       } else {
         installed.push(m)
       }
+      if (!(await persist(() => installed.splice(0, installed.length, ...before), 'Install'))) return
       verifiedMap.set(m.id, true) // install() inputs are verified: signed self, verified import or gossip
-      await persist()
       renderList()
       toast('Installed')
     }
@@ -238,8 +251,9 @@ const tool: ToolModule = {
               'Remove',
               () => {
                 const i = installed.findIndex((x) => x.id === m.id)
-                if (i >= 0) installed.splice(i, 1)
-                void persist().then(renderList)
+                if (i < 0) return
+                const [gone] = installed.splice(i, 1)
+                void persist(() => installed.splice(i, 0, gone), 'Remove').then((ok) => ok && renderList())
               },
               'danger',
             ),

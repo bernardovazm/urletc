@@ -1588,6 +1588,38 @@ with sync_playwright() as p:
     ha.close()
     hb.close()
 
+    # A Workshop install the tool quota refuses says so, and the refused tool does not come
+    # back with the next write. Two apps near the 512 KiB body cap together pass the 1 MiB
+    # namespace quota. Removing the first one afterwards leaves an empty list across a reload.
+    rc, rp = rf_open()
+    rp.evaluate("location.hash = '#/t/workshop'")
+    rws = rp.locator('details.card[data-tool="workshop"]')
+    rws.locator('button', has_text='Sign & install').wait_for(timeout=15000)
+    rws.locator('select[aria-label="Tool type"]').select_option('html')
+    for _name in ('Big One', 'Big Two'):
+        rws.locator('input[placeholder="Tool name"]').fill(_name)
+        rws.locator('textarea').fill('<p>' + _name[-3:] * 174758 + '</p>')
+        rws.locator('button', has_text='Sign & install').click()
+        rp.locator('.modal button', has_text='Install').click()
+        rpoll(rp, lambda: rp.locator('.toast', has_text=re.compile('Installed|failed')).count() > 0, 10)
+        if _name == 'Big One':
+            check('workshop quota: the first large app installs', rws.locator('.card', has_text='Big One').count() == 1)
+            rpoll(rp, lambda: rp.locator('.toast').count() == 0, 5)
+    check('workshop quota: an install past the quota shows why it failed',
+          rp.locator('.toast', has_text='Install failed: tool storage quota exceeded').count() == 1,
+          ' | '.join(rp.locator('.toast').all_inner_texts()))
+    check('workshop quota: the refused app is not listed', rws.locator('.card', has_text='Big Two').count() == 0)
+    _big = rws.locator('.card', has_text='Big One')
+    _big.locator('button', has_text='Remove').click()
+    rpoll(rp, lambda: _big.count() == 0, 5)
+    rp.reload()
+    rp.wait_for_selector('.composer', timeout=20000)
+    rws = rp.locator('details.card[data-tool="workshop"]')
+    rws.locator('button', has_text='Sign & install').wait_for(timeout=15000)
+    check('workshop quota: after a reload the refused app stays gone and the removed one too',
+          bool(rpoll(rp, lambda: 'Nothing installed yet.' in rws.inner_text(), 5)), rws.inner_text()[:300])
+    rc.close()
+
     # --- 13n. Studio (VDO.ninja-style A/V): publish controls, labeled source, layouts, stage link ---
     page.evaluate("location.hash = '#/t/studio'")
     page.wait_for_timeout(500)

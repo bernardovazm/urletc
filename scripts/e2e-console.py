@@ -2433,6 +2433,46 @@ with sync_playwright() as p:
     actx_b.close()
     ap_browser.close()
 
+    # ============ two live sources reach a peer that joins late ============
+    # Trystero pairs stream metadata with ontrack events first in first out, and ontrack
+    # fires per track. A peer joining while camera (audio + video) and screen were both
+    # live received both offers at once: the camera's second track took the screen's label,
+    # so the camera was shown twice and the screen never arrived.
+    TWO_CODE = 'm' + os.urandom(3).hex()
+    tctx_a = browser.new_context(permissions=['microphone', 'camera'])
+    tctx_a.add_init_script(FAKE_SCREEN)
+    two_a = tctx_a.new_page()
+    two_errs = []
+    two_a.on('console', lambda m: two_errs.append(m.text) if m.type == 'error' else None)
+    two_a.on('pageerror', lambda e: two_errs.append(str(e)))
+    two_a.goto(f'{BASE}/#/join/{TWO_CODE}')
+    two_a.wait_for_selector('.composer', timeout=30000)
+    two_a.locator('.composer .bar button[title^="Share your camera"]').click()
+    two_a.locator('.composer .bar button[title^="Share your screen"]').click()
+    check('the late-join sender has camera and screen live before anyone joins',
+          bool(poll(lambda: two_a.locator('.tiles .stage-tile').count() == 2, 15)),
+          '%d tiles' % two_a.locator('.tiles .stage-tile').count())
+    tctx_b = browser.new_context()
+    two_b = tctx_b.new_page()
+    two_b.goto(f'{BASE}/#/join/{TWO_CODE}')
+    two_b.wait_for_selector('.composer', timeout=30000)
+    TWO_TILES = ("() => [...document.querySelectorAll('.tiles .stage-tile')].map(t => ({"
+                 " kind: [...t.classList].find(c => c.startsWith('kind-')),"
+                 " stream: t.querySelector('video').srcObject && t.querySelector('video').srcObject.id,"
+                 " video: t.querySelector('video').srcObject ? t.querySelector('video').srcObject.getVideoTracks().length : 0 }))")
+    two_got = poll(lambda: len(two_b.evaluate(TWO_TILES)) >= 2, 120)
+    two_b.wait_for_timeout(1500)  # let any duplicate report land before counting
+    two = two_b.evaluate(TWO_TILES)
+    check('a late joiner receives both live sources', bool(two_got), str(two))
+    check('as exactly one camera tile and one screen tile',
+          sorted(t['kind'] for t in two) == ['kind-cam', 'kind-screen'], str(two))
+    check('carried by two different streams', len({t['stream'] for t in two}) == 2, str(two))
+    check('the sender logged no track or negotiation error',
+          not [e for e in two_errs if 'addTrack' in e or 'sender already exists' in e or 'negotiat' in e.lower()],
+          ' | '.join(two_errs)[:200])
+    tctx_a.close()
+    tctx_b.close()
+
     # ============ the screen-share note follows the browser, not the app ============
     # Sharing a tab with its sound is what people actually want out of screen sharing, and
     # whether the picker offers it at all is the browser's to decide. The copy is derived

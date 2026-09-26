@@ -543,6 +543,7 @@ export async function joinRoomSession(opts: {
     historyPending.delete(peerId)
     historyAsked.delete(peerId)
     historyTaken.delete(peerId)
+    mediaChain.delete(peerId)
     emitRoster()
     ev.onPeerLeave?.(peerId)
     if (st?.info.ready) ev.onSystem?.(`${st.info.name} left.`)
@@ -590,9 +591,7 @@ export async function joinRoomSession(opts: {
     ev.onSystem?.(`🔒 Secure channel established with ${st.info.name}.`)
     // Offer active local media only now that the peer is authenticated (also avoids
     // the join-time race where a stream lands before the handshake completes).
-    // meta is always a {kind,label} object (or undefined), a valid JSON value for Trystero.
-    for (const [stream, meta] of activeStreams) room.addStream(stream, { target: peerId, metadata: meta as Record<string, string> | undefined })
-    runAdaptTick() // the new peer's senders start on the browser default until this asserts the profile
+    for (const [stream, meta] of activeStreams) void offerMedia(peerId, stream, meta)
     // Backfill is requested here, after the peer's signature verified and its ratchet
     // exists, so the ask is authenticated and sealed like everything else.
     void askHistory(peerId, st)
@@ -965,6 +964,62 @@ export async function joinRoomSession(opts: {
     return true
   }
 
+  // --- Media offers, one stream in flight per peer ---------------------------------------
+  // Trystero pairs each stream's metadata with the next ontrack event on the receiving side,
+  // first in first out, and ontrack fires once per track. With two streams in flight to one
+  // peer (a peer joining while camera and screen are both live) the second stream's
+  // metadata was consumed by the first stream's second track: the first stream was
+  // reported twice, once under the wrong label, and the second was never reported at all.
+  // Each offer now waits until the previous one has been negotiated.
+  const mediaChain = new Map<string, Promise<void>>()
+
+  function offerMedia(peerId: string, stream: MediaStream, meta: unknown): Promise<void> {
+    const next = (mediaChain.get(peerId) ?? Promise.resolve()).then(() => sendStream(peerId, stream, meta)).catch(() => {})
+    mediaChain.set(peerId, next)
+    return next
+  }
+
+  async function sendStream(peerId: string, stream: MediaStream, meta: unknown): Promise<void> {
+    if (!activeStreams.has(stream) || !peers.get(peerId)?.channel) return // unpublished or gone while queued
+    const pc = room.getPeers()[peerId]
+    if (!pc) return
+    // A second addTrack of a carried track throws, after Trystero has already sent the
+    // metadata, which leaves an orphan entry in the receiver's queue.
+    const carried = new Set(pc.getSenders().map((x) => x.track))
+    if (stream.getTracks().every((t) => carried.has(t))) return
+    // meta is always a {kind,label} object (or undefined), a valid JSON value for Trystero.
+    await Promise.all(room.addStream(stream, { target: peerId, metadata: meta as Record<string, string> | undefined }))
+    runAdaptTick() // the new senders start on the browser default until this asserts the profile
+    await negotiated(pc, stream)
+  }
+
+  /** Resolve once every sender of `stream` has a negotiated direction, or after `ms`.
+   *  currentDirection is set only when an offer/answer exchange covering the transceiver
+   *  completes, and the receiving side reports its tracks while applying the offer that
+   *  precedes that answer, so past this point the next stream's metadata cannot overtake
+   *  them. Polled, since no event names the moment currentDirection changes. */
+  function negotiated(pc: RTCPeerConnection, stream: MediaStream, ms = 8000): Promise<void> {
+    const tracks = stream.getTracks()
+    const done = () => {
+      try {
+        return (
+          pc.connectionState === 'closed' ||
+          pc.getTransceivers().every((t) => !t.sender.track || !tracks.includes(t.sender.track) || t.currentDirection === 'sendrecv' || t.currentDirection === 'sendonly')
+        )
+      } catch {
+        return true
+      }
+    }
+    return new Promise((resolve) => {
+      const started = Date.now()
+      const tick = () => {
+        if (done() || Date.now() - started >= ms) resolve()
+        else setTimeout(tick, 100)
+      }
+      tick()
+    })
+  }
+
   room.onPeerStream = (stream, peerId, metadata) => {
     if (opts.presenceOnly) return
     ev.onPeerStream?.(peerId, stream, metadata)
@@ -1295,7 +1350,11 @@ export async function joinRoomSession(opts: {
     async addMedia(stream: MediaStream, meta?: unknown) {
       if (opts.presenceOnly) return
       activeStreams.set(stream, meta)
-      await Promise.all(room.addStream(stream, { metadata: meta as Record<string, string> | undefined }))
+      // Authenticated peers only. room.addStream() without a target reaches every peer
+      // Trystero has connected, including one still inside the handshake, and that peer
+      // then received the stream a second time from the handshake path. Not awaited: the
+      // queue can hold an offer for seconds, and the caller only needs it enqueued.
+      for (const [peerId, st] of peers) if (st.channel) void offerMedia(peerId, stream, meta)
       syncAdaptLoop()
     },
 
@@ -1309,6 +1368,7 @@ export async function joinRoomSession(opts: {
       stopAdaptLoop()
       for (const s of activeStreams.keys()) room.removeStream(s)
       activeStreams.clear()
+      mediaChain.clear()
       for (const u of receivedUrls) URL.revokeObjectURL(u)
       receivedUrls.clear()
       await room.leave()

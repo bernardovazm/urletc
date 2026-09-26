@@ -183,6 +183,9 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     arrivedKeys = now
   }
   const isPresent = (peerId: string) => mergedPeers().some((x) => x.peer.peerId === peerId)
+  /** Whether a tier that carries media still reaches this peer. Inbound media is taken only
+   *  on those tiers, so a peer left only on nearby or presence has no live stream here. */
+  const onMediaTier = (peerId: string) => MEDIA_TIERS.some((t) => (rosters.get(t) ?? []).some((p) => p.peerId === peerId))
   /** True when this peerId is a device the user dropped. Reads the raw tier rosters,
    *  because mergedPeers() has already filtered dropped devices out. */
   const isDropped = (peerId: string) => [...rosters.values()].some((list) => list.some((p) => p.peerId === peerId && dropped.has(p.deviceId)))
@@ -2182,9 +2185,14 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   async function leaveTier(tier: Tier) {
     const s = sessions.get(tier)
     if (!s) return
+    const held = (rosters.get(tier) ?? []).map((p) => p.peerId)
     sessions.delete(tier)
     rosters.delete(tier)
     if (tier === 'code') codeLabel = ''
+    // Leaving a room emits no peer-leave for the peers it held, and their removed tracks
+    // have no signalling path left to arrive on, so media from a peer no other media tier
+    // reaches would stay on the stage on its last frame.
+    for (const id of held) if (!onMediaTier(id)) dropPeerMedia(id)
     renderRoster()
     updateStatus()
     await s.leave()

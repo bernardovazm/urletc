@@ -2821,6 +2821,35 @@ with sync_playwright() as p:
     nctx_x.close()
     nctx_v.close()
 
+    # --- leaving a room takes its peers' media off the stage ---
+    # Leaving emits no peer-leave, so the tile of a peer reachable only through that room
+    # stayed expanded on its last frame. Both contexts leave the shared nearby tier first:
+    # with a second room in common, the sender's renegotiation still reaches the viewer and
+    # removes the track, which hides the missing teardown.
+    LV_CODE = 'x' + os.urandom(3).hex()
+    vctx_a = browser.new_context()
+    vctx_a.add_init_script(FAKE_SCREEN)
+    vctx_b = browser.new_context()
+    lv_a, lv_b = vctx_a.new_page(), vctx_b.new_page()
+    for _pg in (lv_a, lv_b):
+        _pg.goto(f'{BASE}/#/join/{LV_CODE}')
+        _pg.wait_for_selector('.composer', timeout=30000)
+    check('both leaving contexts drop the shared nearby tier', nearby_off(lv_a) and nearby_off(lv_b))
+    lv_reach = poll(lambda: lv_b.evaluate(CODE_PEERS) >= 1, 150)
+    check('the leaving contexts share only a code room', bool(lv_reach), lv_b.locator('.feed').inner_text()[-160:])
+    lv_a.locator('.composer .bar button[title^="Share your screen"]').click()
+    lv_got = poll(lambda: lv_b.locator('.tiles .stage-tile.kind-screen').count() == 1, 90)
+    check("the viewer's stage expands to the share", bool(lv_got) and theater(lv_b))
+    lv_b.locator('.topbar button', has_text='Connect').click()
+    lv_b.locator('.modal button', has_text='Stop code room').click()
+    lv_b.keyboard.press('Escape')
+    check('leaving the room takes its tile off the stage',
+          bool(poll(lambda: lv_b.locator('.tiles .stage-tile').count() == 0, 10)),
+          '%d tiles' % lv_b.locator('.tiles .stage-tile').count())
+    check('and gives the window back to the feed', not theater(lv_b))
+    vctx_a.close()
+    vctx_b.close()
+
     # --- touch: the per-card delete control, driven by real taps ---
     # Every assertion above drives a desktop viewport with a mouse, so a control that does
     # nothing on a phone passes them all. Revealing it wherever there is no hover is the

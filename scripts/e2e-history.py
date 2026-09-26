@@ -227,7 +227,7 @@ with sync_playwright() as p:
         A.on('dialog', lambda d: d.accept())
         modal = open_connect(A)
         modal.locator('button', has_text='Delete stored history').click()
-        time.sleep(1.5)
+        wait_for(lambda: feed_history_cards(A).count() == 0, 10, step=0.25)
         check('confirming the delete removes every Earlier messages card from the feed',
               feed_history_cards(A).count() == 0, feed(A)[:300])
         close_connect(A)

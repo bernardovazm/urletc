@@ -186,6 +186,20 @@ def cpf_valid(s):
     return True
 
 
+def clip_after(pg, want, seconds=5):
+    """The clipboard text once it equals `want` (or satisfies it, when `want` is a
+    predicate), else the last read after `seconds`. Copy handlers call writeText without
+    awaiting it, so one read straight after the click can still see the previous text."""
+    ok = want if callable(want) else (lambda t: t == want)
+    t = ''
+    for _ in range(int(seconds / 0.25)):
+        t = pg.evaluate('navigator.clipboard.readText()')
+        if ok(t):
+            return t
+        pg.wait_for_timeout(250)
+    return t
+
+
 with sync_playwright() as p:
     # Fake mic/cam so getUserMedia flows (captions offer, device check) run headless.
     browser = p.chromium.launch(headless=True, args=['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream'])
@@ -254,8 +268,7 @@ with sync_playwright() as p:
         code_text = page.locator('button.code-chip').inner_text().strip()
         check('code chip shows auto-generated code', re.fullmatch(r'[2-9A-Z]{6}', code_text) is not None, code_text)
         page.locator('button.code-chip').click()
-        page.wait_for_timeout(300)
-        clip = page.evaluate('navigator.clipboard.readText()')
+        clip = clip_after(page, lambda t: t.upper() == code_text)
         check('code chip click copies code', clip.upper() == code_text, clip)
     except Exception as e:
         check('code chip shows auto-generated code', False, str(e)[:200])
@@ -339,8 +352,7 @@ with sync_playwright() as p:
     fv = page.locator('.gen-flyout button.gen-value').first
     fval = fv.inner_text()
     fv.click()
-    page.wait_for_timeout(300)
-    check('hover-preview value click copies', page.evaluate('navigator.clipboard.readText()') == fval, fval[:24])
+    check('hover-preview value click copies', clip_after(page, fval) == fval, fval[:24])
 
     # --- 7. generators tool: instant values + one-click copy ---
     page.locator('.menu.tool-grid button', has_text='Generators').click()
@@ -376,8 +388,7 @@ with sync_playwright() as p:
     cpf_val = cpf_row.locator('button.gen-value').inner_text()
     check('CPF has valid check digits', cpf_valid(cpf_val), cpf_val)
     cpf_row.locator('button.gen-value').click()
-    page.wait_for_timeout(300)
-    check('one click copies CPF', page.evaluate('navigator.clipboard.readText()') == cpf_val)
+    check('one click copies CPF', clip_after(page, cpf_val) == cpf_val)
     cpf_row.locator('button[title^="New"]').click()
     new_val = cpf_row.locator('button.gen-value').inner_text()
     check('regenerate produces new valid CPF', new_val != cpf_val and cpf_valid(new_val), new_val)
@@ -449,7 +460,7 @@ with sync_playwright() as p:
     tu.locator('button', has_text='UPPER').click()
     page.wait_for_timeout(400)
     check('transform shows result', tu.locator('pre').inner_text() == 'HELLO WORLD')
-    check('transform auto-copies', page.evaluate('navigator.clipboard.readText()') == 'HELLO WORLD')
+    check('transform auto-copies', clip_after(page, 'HELLO WORLD') == 'HELLO WORLD')
 
     # --- 11. TTS voices UI ---
     tools_btn.hover()
@@ -505,7 +516,10 @@ with sync_playwright() as p:
     page.wait_for_selector('.menu.tool-grid', timeout=3000)
     page.locator('.menu.tool-grid button', has_text='Pong').click()
     pong = page.locator('details.card').last
-    page.wait_for_timeout(300)
+    try:
+        pong.locator('canvas.pong').wait_for(state='attached', timeout=10000)  # hidden until a match
+    except Exception:
+        pass
     check('pong has a board canvas', pong.locator('canvas.pong').count() == 1)
     lob = pong.locator('.pong-lobby')
     check('pong shows the opponent lobby', lob.count() == 1 and 'opponent' in lob.inner_text().lower(), (lob.inner_text()[:60] if lob.count() else 'no lobby'))
@@ -730,7 +744,11 @@ with sync_playwright() as p:
     page.locator('.composer textarea').click()  # composer focus must not block image paste
     cards_before = page.locator('.feed-item').count()
     page.evaluate(PASTE_IMAGE_JS)
-    page.wait_for_timeout(500)
+    try:
+        page.wait_for_function('n => document.querySelectorAll(".feed-item").length > n', arg=cards_before,
+                               timeout=10000)
+    except Exception:
+        pass
     check('image paste creates a card', page.locator('.feed-item').count() == cards_before + 1)
     # Located by content rather than by feed position. Playwright locators re-resolve on
     # every use and this feed is live, so a peer connecting mid-block appends a sys line
@@ -783,8 +801,7 @@ with sync_playwright() as p:
     page.locator('.topbar button', has_text='Connect').click()
     page.wait_for_selector('.modal', timeout=3000)
     page.locator('.modal button', has_text='Copy invite link').click()
-    page.wait_for_timeout(300)
-    invite = page.evaluate('navigator.clipboard.readText()')
+    invite = clip_after(page, lambda t: t.startswith(BASE) and f'#/join/{OWN_CODE}' in t)
     check('invite link format (#/join/<code>)', invite.startswith(BASE) and f'#/join/{OWN_CODE}' in invite, invite)
     page.keyboard.press('Escape')
     page.wait_for_timeout(200)
@@ -900,11 +917,19 @@ with sync_playwright() as p:
     offers = presence_invite_offers()
     ictx = browser.new_context()
     seen = []
-    for _ in range(offers + 1):
+    for i in range(offers + 1):
         ipg = ictx.new_page()
         ipg.goto(f'{BASE}/#/join/{PRES_CODE}?p=1')
         ipg.wait_for_selector('.composer', timeout=20000)
-        ipg.wait_for_timeout(2500)
+        # The spent offer is written down before the offer renders, so a read that beats the
+        # render still uses one up. The last pass looks for an absence, which needs a wait.
+        if i < offers:
+            try:
+                ipg.wait_for_selector('.presence-offer', timeout=15000)
+            except Exception:
+                pass
+        else:
+            ipg.wait_for_timeout(2500)
         seen.append(ipg.locator('.presence-offer').count())
         ipg.close()
     check(f'reopening an ignored ?p=1 link asks {offers} times and then stops',
@@ -941,7 +966,11 @@ with sync_playwright() as p:
     # the Whisper worker, which headless cannot run.
     check('captions have a minimize (collapse) control', page.locator('.captions button[title*="Minimize"]').count() == 1)
     check('captions have a separate off control', page.locator('.captions button[title*="Turn captions off"]').count() == 1)
-    page.locator('.composer .bar button[title*="Stop sharing"]').click()
+    # Present only if the share above started; a missing button would wait out the default
+    # timeout and abort the run before the summary.
+    _stop = page.locator('.composer .bar button[title*="Stop sharing"]')
+    if _stop.count():
+        _stop.click()
     page.wait_for_timeout(300)
 
     # --- 13k2. video tiles region is collapsible (streams keep running) ---
@@ -1001,7 +1030,9 @@ with sync_playwright() as p:
         check('expanding shows the tiles grid again', page.locator('.tiles').is_visible())
     except Exception as e:
         check('sharing camera shows a video tile', False, str(e)[:160])
-    page.locator('.composer .bar button[title*="Stop sharing"]').click()
+    _stop = page.locator('.composer .bar button[title*="Stop sharing"]')
+    if _stop.count():
+        _stop.click()
     # Poll instead of sleeping a fixed 300ms. A loaded runner still had the region on screen
     # when the check ran, which failed a run for timing rather than for behaviour. This still
     # fails if the region never hides, it just stops calling a slow teardown a broken one.
@@ -1043,7 +1074,9 @@ with sync_playwright() as p:
         set_ask_on_close(True)
     except Exception as e:
         check('close guard: a live share arms it while the preference is off', False, str(e)[:160])
-    page.locator('.composer .bar button[title*="Stop sharing"]').click()
+    _stop = page.locator('.composer .bar button[title*="Stop sharing"]')
+    if _stop.count():
+        _stop.click()
     page.wait_for_timeout(400)
     check('close guard: stopping the share keeps it armed for the preference', guard_armed())
     set_ask_on_close(False)  # restore the default, so later pages do not boot guarded
@@ -1622,8 +1655,11 @@ with sync_playwright() as p:
 
     # --- 13n. Studio (VDO.ninja-style A/V): publish controls, labeled source, layouts, stage link ---
     page.evaluate("location.hash = '#/t/studio'")
-    page.wait_for_timeout(500)
     studio = page.locator('details.card').last
+    try:
+        studio.locator('button', has_text='Publish camera').wait_for(timeout=10000)
+    except Exception:
+        pass
     check('studio renders publish controls', studio.locator('button', has_text='Publish camera').count() == 1)
     check('studio has camera + mic + res selects', studio.locator('select').count() == 3)
     check('studio has grid/focus/solo layout switch',
@@ -1649,8 +1685,7 @@ with sync_playwright() as p:
     code_now = (page.locator('button.code-chip').inner_text().strip().lower() if page.locator('button.code-chip').count() else '')
     if slink.count() and code_now:
         slink.click()
-        page.wait_for_timeout(300)
-        clip = page.evaluate('navigator.clipboard.readText()')
+        clip = clip_after(page, lambda t: ('#/stage/' + code_now) in t.lower())
         check('stage link is a #/stage/<code> URL', ('#/stage/' + code_now) in clip.lower(), clip)
     studio.locator('button', has_text='Stop all').click()
     page.wait_for_timeout(300)
@@ -1674,8 +1709,11 @@ with sync_playwright() as p:
     # so that branch asserts the status line says so instead of hanging or sitting blank.
     tm_before = len(logs)
     page.evaluate("location.hash = '#/t/tempmail'")
-    page.wait_for_timeout(600)
     tm = page.locator('details.card').last
+    try:
+        tm.locator('.tm-status').first.wait_for(timeout=10000)
+    except Exception:
+        pass
     check('tempmail card renders', 'Disposable Email' in tm.locator('summary').inner_text(),
           tm.locator('summary').inner_text()[:80])
     check('tempmail states the inbox is public and third-party run',
@@ -1698,8 +1736,7 @@ with sync_playwright() as p:
         check('tempmail renders an inbox list (empty is a real state)',
               tm.locator('.tm-list').inner_text().strip() != '')
         tm.locator('button', has_text='Copy').first.click()
-        page.wait_for_timeout(300)
-        clip_tm = page.evaluate('navigator.clipboard.readText()').strip()
+        clip_tm = clip_after(page, lambda t: t.strip() == tm_addr).strip()
         check('tempmail copies the issued address', clip_tm == tm_addr, f'{clip_tm!r} vs {tm_addr!r}')
         # Reload equivalence. A second page in the same browser context shares IndexedDB
         # but gets a fresh module instance, so an address that comes back there came out
@@ -4166,7 +4203,10 @@ with sync_playwright() as p:
           sp.inner_text() == 'Studio' and 'screen' in (sp.get_attribute('title') or ''),
           '%r title=%r' % (sp.inner_text(), sp.get_attribute('title')))
     sp.click()
-    pp.wait_for_timeout(1000)
+    try:
+        pp.locator('details.card').last.locator('button', has_text='Publish camera').wait_for(timeout=10000)
+    except Exception:
+        pass
     check('pin: clicking the topbar button opens that tool',
           pp.locator('details.card').last.locator('button', has_text='Publish camera').count() == 1,
           pp.locator('details.card').last.inner_text()[:120])
@@ -4594,7 +4634,13 @@ with sync_playwright() as p:
           gpg.evaluate('navigator.clipboard.readText()') == CLIP_TEXT)
     gpg.reload()
     gpg.wait_for_selector('.composer', timeout=30000)
-    gpg.wait_for_timeout(2500)
+    # Mount, a permission query, the read, the tool chunk and the tool's own read all come
+    # before the text is on screen.
+    try:
+        gpg.wait_for_function('t => document.querySelector(".feed").innerText.includes(t)', arg=CLIP_TEXT,
+                              timeout=20000)
+    except Exception:
+        pass
     gstate = gpg.evaluate("() => navigator.permissions.query({name: 'clipboard-read'}).then(s => s.state)")
     check('clipboard: the granted context really reports clipboard-read granted',
           gstate == 'granted', str(gstate))
@@ -4737,7 +4783,10 @@ with sync_playwright() as p:
     _scan = lcard.locator('button', has_text='Scan clipboard')
     if _scan.count():
         _scan.first.click()
-    lpg.wait_for_timeout(3500)
+    try:
+        lcard.locator('.url-check-structural').first.wait_for(timeout=20000)
+    except Exception:
+        pass
     check('clipboard: a URL on the clipboard gets the structural verdict, not just a parse',
           lcard.locator('.url-check-structural').count() >= 1,
           lcard.inner_text()[:220].replace('\n', ' / '))

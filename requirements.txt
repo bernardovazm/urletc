@@ -1,3 +1,3 @@
 # End-to-end test tooling. Not needed to build or run the app.
 # Used by scripts/e2e.sh, which runs scripts/e2e-console.py.
-playwright==1.61.0
+playwright==1.62.0

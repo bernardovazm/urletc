@@ -2696,9 +2696,15 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     unpublishAll: () => stopMedia(),
     sources() {
       const effSpot = effectiveSpot()
-      return stageTiles.map(
-        (t): StudioSource => ({ id: t.id, kind: t.kind, label: t.label, local: t.peerId === null, hasVideo: t.hasVideo, spotlighted: t.id === effSpot, recording: !!t.recorder }),
-      )
+      return stageTiles.map((t): StudioSource => ({
+        id: t.id,
+        kind: t.kind,
+        label: t.label,
+        local: t.peerId === null,
+        hasVideo: t.hasVideo,
+        spotlighted: t.id === effSpot,
+        recording: !!t.recorder,
+      }))
     },
     layout: () => stageLayout,
     setLayout(l) {

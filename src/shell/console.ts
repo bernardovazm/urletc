@@ -625,18 +625,35 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
       'ghost small',
       'Send this person the messages from before they arrived. Only them, only this once',
     )
-    const always = button(
-      'Always in code rooms',
-      () => {
-        dropHistoryPrompts(tier)
-        shareToCode = true
-        void setItem('history-share-code', shareToCode)
-        applyHistory() // installs the provider, which answers everyone still waiting
-        sys('Earlier messages will be sent to people who join by code. Change it under Connect, "Earlier messages".')
-      },
-      'ghost small',
-      'Answer everyone who joins by code from now on, including this person',
-    )
+    // "Always" turns on the switch of the tier that asked. One code-room button on every
+    // prompt answered a paired device by opening replay to anyone holding a code, and left
+    // the device that asked with nothing.
+    const always =
+      tier === 'personal'
+        ? button(
+            'Always for my devices',
+            () => {
+              dropHistoryPrompts(tier)
+              shareToDevices = true
+              void setItem('history-share-devices', shareToDevices)
+              applyHistory() // installs the provider, which answers every device still waiting
+              sys('Earlier messages will be sent to your paired devices. Change it under Connect, "Earlier messages".')
+            },
+            'ghost small',
+            'Answer every paired device that asks from now on, including this one',
+          )
+        : button(
+            'Always in code rooms',
+            () => {
+              dropHistoryPrompts(tier)
+              shareToCode = true
+              void setItem('history-share-code', shareToCode)
+              applyHistory() // installs the provider, which answers everyone still waiting
+              sys('Earlier messages will be sent to people who join by code. Change it under Connect, "Earlier messages".')
+            },
+            'ghost small',
+            'Answer everyone who joins by code from now on, including this person',
+          )
     const no = button('No', drop, 'ghost small', 'Keep them to yourself. They are told nothing')
     card.append(el('span', { text: `${who} joined and asked for the ${n} earlier message${n === 1 ? '' : 's'} stored here. ` }), send, always, no)
     historyPrompts.set(peerId, { card, tier })

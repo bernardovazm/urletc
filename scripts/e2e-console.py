@@ -3062,6 +3062,69 @@ with sync_playwright() as p:
     rctx_a.close()
     rctx_b.close()
 
+    # --- a paired device's history request is answered for paired devices ---
+    # With sending to paired devices switched off, a paired device's request raises the
+    # prompt, whose "Always" button turned on replay to code rooms instead: the device
+    # that asked got nothing and every forwarded code started receiving the room's past.
+    # The message is typed alone, so it waits in the outbox, and the page is reloaded,
+    # which drops the outbox and keeps the stored transcript: the pair then first meets
+    # the message through the replay being tested.
+    HAS_HISTORY = """() => new Promise(res => {
+      const r = indexedDB.open('wt-data')
+      r.onupgradeneeded = () => r.result.createObjectStore('kv')
+      r.onerror = () => res(false)
+      r.onsuccess = () => {
+        const db = r.result
+        if (!db.objectStoreNames.contains('kv')) { db.close(); return res(false) }
+        const q = db.transaction('kv', 'readonly').objectStore('kv').getAllKeys()
+        q.onsuccess = () => { db.close(); res(q.result.map(String).some(k => k.startsWith('history:'))) }
+        q.onerror = () => { db.close(); res(false) }
+      }
+    })"""
+    HP_CODE = 'x' + os.urandom(3).hex()
+    hctx_a = browser.new_context()
+    hctx_b = browser.new_context()
+    hp_a = hctx_a.new_page()
+    hp_a.goto(f'{BASE}/#/join/{HP_CODE}')
+    hp_a.wait_for_selector('.composer', timeout=30000)
+    check('the history context drops the shared nearby tier', nearby_off(hp_a))
+    hp_text = 'hist' + os.urandom(3).hex()
+    hp_a.locator('.composer textarea').fill(hp_text)
+    hp_a.locator('.composer textarea').press('Enter')
+    hp_a.locator('.topbar button', has_text='Connect').click()
+    hp_a.wait_for_selector('.modal input[readonly]', timeout=10000)
+    hp_a.locator('.modal label', has_text='Send them to my own paired devices').locator('input').uncheck()
+    hp_link = hp_a.locator('.modal input[readonly]').input_value()
+    hp_a.keyboard.press('Escape')
+    check('the typed message is stored', bool(poll(lambda: hp_a.evaluate(HAS_HISTORY), 10)))
+    hp_a.reload()
+    hp_a.wait_for_selector('.composer', timeout=30000)
+    hp_b = hctx_b.new_page()
+    hp_b.goto(hp_link)
+    hp_b.wait_for_selector('.composer', timeout=30000)
+    hp_ask = hp_a.locator('.sys', has_text='asked for the')
+    check("a paired device's request raises the prompt", bool(poll(lambda: hp_ask.count() == 1, 150)),
+          hp_a.locator('.feed').inner_text()[-160:])
+    hp_always = hp_ask.locator('button', has_text='Always for my devices')
+    check('its Always button is for paired devices',
+          hp_always.count() == 1 and hp_ask.locator('button', has_text='Always in code rooms').count() == 0,
+          ' | '.join(hp_ask.locator('button').all_inner_texts()) if hp_ask.count() else '')
+    if hp_always.count() == 1:
+        hp_always.click()
+        check('the device that asked receives the earlier messages',
+              bool(poll(lambda: hp_b.locator('.sys', has_text='Replayed 1 earlier message').count() == 1
+                        and hp_text in (hp_b.locator('.feed-item', has_text='replayed from').first.text_content() or ''), 60)),
+              f"A={hp_a.locator('.feed').inner_text()[-200:]!r} B={hp_b.locator('.feed').inner_text()[-300:]!r}")
+        hp_a.locator('.topbar button', has_text='Connect').click()
+        hp_a.wait_for_selector('.modal input[readonly]', timeout=10000)
+        check('sending to paired devices is now on',
+              hp_a.locator('.modal label', has_text='Send them to my own paired devices').locator('input').is_checked())
+        check('and code-room replay is still off',
+              not hp_a.locator('.modal label', has_text='Send them to people who join by code').locator('input').is_checked())
+        hp_a.keyboard.press('Escape')
+    hctx_a.close()
+    hctx_b.close()
+
     # --- touch: the per-card delete control, driven by real taps ---
     # Every assertion above drives a desktop viewport with a mouse, so a control that does
     # nothing on a phone passes them all. Revealing it wherever there is no hover is the

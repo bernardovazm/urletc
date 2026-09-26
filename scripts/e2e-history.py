@@ -244,4 +244,8 @@ with sync_playwright() as p:
 print(f'\n=== history: {len(passed)} passed, {len(failed)} failed ===')
 for f_ in failed:
     print('FAILED:', f_)
+    # Job logs need a signed-in account to read, while annotations are public through the
+    # check-runs API, so on Actions each failure is also raised as one.
+    if os.environ.get('GITHUB_ACTIONS'):
+        print('::error title=e2e-history check failed::' + f_.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A'))
 sys.exit(1 if failed else 0)

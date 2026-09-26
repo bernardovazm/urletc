@@ -1,4 +1,4 @@
-import { defineConfig } from 'vite'
+import { defineConfig, type Plugin } from 'vite'
 import { VitePWA } from 'vite-plugin-pwa'
 
 // Cross-origin isolation: enables SharedArrayBuffer / multithread WASM fast-paths.
@@ -12,10 +12,10 @@ const isolation = {
 // Static hardening headers, kept in sync with vercel.json. Preview only, like the CSP
 // below: the dev server stays at isolation only. Strict-Transport-Security is absent
 // here because vercel.json does not declare it either; Vercel adds it at the platform
-// level, and preview serves over http where the header has no meaning.
+// level, and preview serves over http where the header has no meaning. X-Frame-Options
+// is set per path by previewPathHeaders, because the sandbox guests must be framable.
 const hardening = {
   'X-Content-Type-Options': 'nosniff',
-  'X-Frame-Options': 'DENY',
   'Referrer-Policy': 'no-referrer',
 }
 
@@ -36,17 +36,51 @@ const CSP = [
   "font-src 'self'",
   "manifest-src 'self'",
   "connect-src 'self' https://api.mail.gw https://spoo.me https://raw.githubusercontent.com https://tessdata.projectnaptha.com https://huggingface.co https://*.huggingface.co https://*.hf.co https://*.xethub.hf.co https://cdn.jsdelivr.net wss://relay.snort.social wss://bucket.coracle.social wss://relay.primal.net",
-  "frame-src 'self' blob:",
+  "frame-src 'self'",
   "frame-ancestors 'none'",
   "require-trusted-types-for 'script'",
   "base-uri 'none'",
 ].join('; ')
 
+// The Workshop guests (public/sandbox/) take their own policy, as in vercel.json. They run
+// untrusted code, so inline scripts and eval are allowed and the network is not, and there
+// is no Trusted Types requirement. `sandbox allow-scripts` keeps the origin opaque even when
+// a guest is opened top-level, and frame-ancestors 'self' replaces X-Frame-Options: DENY,
+// which would stop the app from framing it.
+const SANDBOX_CSP = [
+  'sandbox allow-scripts',
+  "default-src 'none'",
+  "script-src 'unsafe-inline' 'unsafe-eval'",
+  "style-src 'unsafe-inline'",
+  'img-src data: blob:',
+  'media-src data: blob:',
+  'font-src data:',
+  "connect-src 'none'",
+  "frame-ancestors 'self'",
+  "form-action 'none'",
+  "base-uri 'none'",
+].join('; ')
+
+// preview.headers is one map for every path, so the headers that differ under /sandbox/
+// are set here, in a middleware that runs before the static server.
+const previewPathHeaders: Plugin = {
+  name: 'preview-path-headers',
+  configurePreviewServer(server) {
+    server.middlewares.use((req, res, next) => {
+      const guest = (req.url ?? '').startsWith('/sandbox/')
+      res.setHeader('Content-Security-Policy', guest ? SANDBOX_CSP : CSP)
+      if (!guest) res.setHeader('X-Frame-Options', 'DENY')
+      next()
+    })
+  },
+}
+
 export default defineConfig({
   server: { headers: isolation },
-  preview: { headers: { ...isolation, ...hardening, 'Content-Security-Policy': CSP } },
+  preview: { headers: { ...isolation, ...hardening } },
   build: { target: 'es2022', sourcemap: true },
   plugins: [
+    previewPathHeaders,
     VitePWA({
       strategies: 'injectManifest',
       srcDir: 'src',

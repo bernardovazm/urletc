@@ -1136,6 +1136,52 @@ with sync_playwright() as p:
           bool(rpoll(rp, lambda: 'card words arrive' in rcb.inner_text(), 5)), rcb.inner_text()[-160:])
     rc.close()
 
+    # Workshop script and HTML-app tiers run. A blob: guest inherited the host CSP, whose
+    # script-src refused the guest's inline bootstrap, so every script timed out after 30 s
+    # and every app rendered an empty frame. Drive both tiers to their output.
+    rc, rp = rf_open()
+    rlogs = []
+    rp.on('console', lambda m: rlogs.append(m.text))
+    rp.evaluate("location.hash = '#/t/workshop'")
+    rws = rp.locator('details.card[data-tool="workshop"]')
+    rws.locator('button', has_text='Sign & install').wait_for(timeout=15000)
+
+    def ws_install(kind, name, source=None):
+        rws.locator('select[aria-label="Tool type"]').select_option(kind)
+        rws.locator('input[placeholder="Tool name"]').fill(name)
+        if source is not None:
+            rws.locator('textarea').fill(source)
+        rws.locator('button', has_text='Sign & install').click()
+        rp.locator('.modal button', has_text='Install').click()
+        row = rws.locator('.card', has_text=name)
+        row.wait_for(timeout=10000)
+        row.locator('button', has_text=re.compile(r'^Run$')).click()
+        rp.locator('.modal button', has_text='Run once').click()
+
+    ws_install('script', 'Adder', 'host.log("adding"); return 20 + 22')
+    rout = rws.locator('pre').last
+    rpoll(rp, lambda: rout.inner_text().startswith(('Result', 'Error')), 20)
+    ws_res = rout.inner_text()
+    check('workshop: a sandboxed script returns its value and its logs', ws_res.startswith('Result: 42') and 'adding' in ws_res, ws_res[:160])
+    ws_install('html', 'Pinger')
+    rapp = rp.frame_locator('iframe.ws-app-frame').locator('button', has_text='ping room')
+    try:
+        rapp.wait_for(timeout=10000)
+        app_ok = rapp.is_visible()
+    except Exception:
+        app_ok = False
+    check('workshop: an HTML app renders its own UI in the frame', app_ok)
+    check('workshop: running both tiers logs no CSP violation',
+          not [m for m in rlogs if 'content security policy' in m.lower()], ' | '.join(rlogs)[:200])
+    # Served from the app's origin, a guest must still be opaque when opened top-level,
+    # and must not expose the capability API there.
+    rtop = rc.new_page()
+    rtop.goto(f'{BASE}/sandbox/app.html')
+    check('workshop: a guest opened top-level has an opaque origin and no host API',
+          rtop.evaluate('self.origin') == 'null' and rtop.evaluate('typeof window.host') == 'undefined',
+          f"origin={rtop.evaluate('self.origin')!r}")
+    rc.close()
+
     # --- 13n. Studio (VDO.ninja-style A/V): publish controls, labeled source, layouts, stage link ---
     page.evaluate("location.hash = '#/t/studio'")
     page.wait_for_timeout(500)

@@ -1,12 +1,15 @@
 // Host-side sandbox runner (ARCHITECTURE section 8). Untrusted script source executes in a
-// null-origin iframe (blob: plus sandbox="allow-scripts", with no allow-same-origin) whose
-// own inner CSP is `default-src 'none'; connect-src 'none'`, so the guest has no DOM loads
-// and no network to exfiltrate over. The iframe is defence-in-depth and the boundary is the
-// enumerated postMessage capability API below: the guest has zero ambient authority, every
-// capability is host-mediated, permission-gated and validated, and the iframe is destroyed
-// on a 30 s deadline. The caller must obtain consent first and NEVER autorun. Swapping the
-// guest's eval for QuickJS-WASM is the planned upgrade, for preemptive interruption and
-// interpreter isolation.
+// null-origin iframe (public/sandbox/script.html plus sandbox="allow-scripts", with no
+// allow-same-origin) whose own CSP is `default-src 'none'; connect-src 'none'`, so the guest
+// has no DOM loads and no network to exfiltrate over. The guest is a real same-origin URL
+// with its own CSP header (vercel.json, vite.config.ts): a blob: or srcdoc document inherits
+// the host policy, whose script-src and Trusted Types refuse the guest's inline bootstrap and
+// its eval. The iframe is defence-in-depth and the boundary is the enumerated postMessage
+// capability API below: the guest has zero ambient authority, every capability is
+// host-mediated, permission-gated and validated, and the iframe is destroyed on a 30 s
+// deadline. The caller must obtain consent first and NEVER autorun. Swapping the guest's
+// eval for QuickJS-WASM is the planned upgrade, for preemptive interruption and interpreter
+// isolation.
 
 export interface SandboxPermissions {
   clipboardRead: boolean
@@ -31,58 +34,19 @@ export interface SandboxResult {
   error?: string
 }
 
-// Static guest document. The untrusted source is delivered via postMessage after 'ready'
-// and never interpolated into this markup.
-const GUEST_HTML = `<!doctype html><html><head>
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval'; connect-src 'none'; style-src 'none'">
-</head><body><script>
-(function(){
-  // CSP connect-src 'none' does not govern WebRTC, so a guest could exfiltrate over
-  // ICE/STUN/TURN or DNS. Poison the WebRTC constructors before the untrusted source,
-  // delivered later via the 'exec' message, ever runs. Browser-enforced and independent
-  // of CSP.
-  try {
-    ['RTCPeerConnection','webkitRTCPeerConnection','mozRTCPeerConnection','RTCDataChannel'].forEach(function(n){
-      try { delete window[n]; } catch(e){}
-      try { Object.defineProperty(window, n, { configurable:false, get:function(){ throw new Error('network is blocked in the sandbox'); } }); } catch(e){}
-    });
-  } catch(e){}
-  var seq=0, pending={};
-  function call(method, args){ return new Promise(function(res,rej){ var id=++seq; pending[id]={res:res,rej:rej}; parent.postMessage({k:'cap', id:id, method:method, args:args}, '*'); }); }
-  var host = {
-    clipboard: { read:function(){return call('clipboard.read',[]);}, write:function(t){return call('clipboard.write',[String(t)]);} },
-    storage: { get:function(key){return call('storage.get',[String(key)]);}, set:function(key,val){return call('storage.set',[String(key),val]);} },
-    net: { fetch:function(url,init){return call('net.fetch',[String(url), init||{}]);} },
-    log: function(m){ try{ parent.postMessage({k:'log', msg:String(m)}, '*'); }catch(e){} }
-  };
-  function safe(v){ try{ return JSON.parse(JSON.stringify(v===undefined?null:v)); }catch(e){ return String(v); } }
-  window.addEventListener('message', function(e){
-    var d=e.data||{};
-    if(d.k==='exec'){
-      (async function(){
-        try{
-          var fn = new Function('host','"use strict"; return (async function(){\\n'+d.source+'\\n})();');
-          var value = await fn(host);
-          parent.postMessage({k:'done', value: safe(value)}, '*');
-        }catch(err){ parent.postMessage({k:'error', error: String(err && err.message || err)}, '*'); }
-      })();
-    } else if(d.k==='cap-result'){
-      var p=pending[d.id]; if(p){ delete pending[d.id]; if(d.ok){ p.res(d.value); } else { p.rej(new Error(d.error)); } }
-    }
-  });
-  parent.postMessage({k:'ready'}, '*');
-})();
-</script></body></html>`
+// Static guest documents. The untrusted source is delivered via postMessage after 'ready'
+// and never interpolated into their markup.
+const GUEST_SCRIPT_URL = `${import.meta.env.BASE_URL}sandbox/script.html`
+const GUEST_APP_URL = `${import.meta.env.BASE_URL}sandbox/app.html`
 
 const NET_MAX_BYTES = 2_000_000
 
 export function runInSandbox(source: string, perms: SandboxPermissions, cb: SandboxCallbacks, timeoutMs = 30000): Promise<SandboxResult> {
   return new Promise((resolve) => {
-    const url = URL.createObjectURL(new Blob([GUEST_HTML], { type: 'text/html' }))
     const iframe = document.createElement('iframe')
     iframe.className = 'hidden'
     iframe.setAttribute('sandbox', 'allow-scripts') // no allow-same-origin, so the origin is opaque
-    iframe.src = url
+    iframe.src = GUEST_SCRIPT_URL
 
     let done = false
     let started = false
@@ -92,7 +56,6 @@ export function runInSandbox(source: string, perms: SandboxPermissions, cb: Sand
       clearTimeout(timer)
       window.removeEventListener('message', onMsg)
       iframe.remove()
-      URL.revokeObjectURL(url)
       resolve(r)
     }
     const timer = setTimeout(() => finish({ ok: false, error: 'timed out (30s): sandbox destroyed' }), timeoutMs)
@@ -167,12 +130,12 @@ export async function hostFetch(url: string, init: { method?: string; body?: str
 
 // ---------------------------------------------------------------------------
 // HTML apps (Workshop `type:'html'`) use the same boundary, made visible and durable.
-// The app executes in the same null-origin blob: iframe configuration as scripts
-// (`sandbox="allow-scripts"`, inner CSP with no network, WebRTC poisoned before any
-// untrusted code) behind the same enumerated postMessage capability API, plus an opt-in
-// `room` channel the host relays over the authenticated best-effort `game` channel
-// (ARCHITECTURE section 5.4 semantics: state and scores, transport-encrypted, never
-// secrets and never the ratchet). Differences from runInSandbox, kept minimal:
+// The app executes in the same null-origin iframe configuration as scripts
+// (public/sandbox/app.html, `sandbox="allow-scripts"`, CSP with no network, WebRTC
+// poisoned before any untrusted code) behind the same enumerated postMessage capability
+// API, plus an opt-in `room` channel the host relays over the authenticated best-effort
+// `game` channel (ARCHITECTURE section 5.4 semantics: state and scores,
+// transport-encrypted, never secrets and never the ratchet). Differences from runInSandbox, kept minimal:
 //   - the iframe is visible, mounted where the caller says, and has no deadline; teardown
 //     is an explicit close() from a user gesture or tool deactivation.
 //   - styles may exist inside the guest document, whose own CSP allows style-src
@@ -198,70 +161,11 @@ export interface AppHandle {
 const ROOM_MSG_MAX = 16_384 // JSON chars; a compact map chunk fits, a bulk transfer does not
 const ROOM_MIN_INTERVAL_MS = 15 // about 66 msg/s ceiling per app
 
-const GUEST_APP_HTML = `<!doctype html><html><head>
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval'; connect-src 'none'; style-src 'unsafe-inline'; img-src data: blob:; media-src data: blob:; font-src data:">
-<script>
-(function(){
-  try {
-    ['RTCPeerConnection','webkitRTCPeerConnection','mozRTCPeerConnection','RTCDataChannel'].forEach(function(n){
-      try { delete window[n]; } catch(e){}
-      try { Object.defineProperty(window, n, { configurable:false, get:function(){ throw new Error('network is blocked in the sandbox'); } }); } catch(e){}
-    });
-  } catch(e){}
-  var seq=0, pending={}, roomHandlers=[];
-  function call(method, args){ return new Promise(function(res,rej){ var id=++seq; pending[id]={res:res,rej:rej}; parent.postMessage({k:'cap', id:id, method:method, args:args}, '*'); }); }
-  window.host = {
-    clipboard: { read:function(){return call('clipboard.read',[]);}, write:function(t){return call('clipboard.write',[String(t)]);} },
-    storage: { get:function(key){return call('storage.get',[String(key)]);}, set:function(key,val){return call('storage.set',[String(key),val]);} },
-    net: { fetch:function(url,init){return call('net.fetch',[String(url), init||{}]);} },
-    room: {
-      send:function(data){ return call('room.send',[data]); },
-      peers:function(){ return call('room.peers',[]); },
-      onMessage:function(cb){ if(typeof cb==='function') roomHandlers.push(cb); }
-    },
-    log: function(m){ try{ parent.postMessage({k:'log', msg:String(m)}, '*'); }catch(e){} }
-  };
-  window.addEventListener('error', function(e){ try{ parent.postMessage({k:'log', msg:'app error: '+e.message}, '*'); }catch(x){} });
-  function mount(html){
-    var doc = new DOMParser().parseFromString(String(html), 'text/html');
-    var codes = [];
-    var found = doc.querySelectorAll('script');
-    for (var i=0;i<found.length;i++){
-      var slot = doc.createElement('app-script-slot');
-      slot.setAttribute('data-i', String(codes.length));
-      codes.push(found[i].textContent || '');
-      found[i].parentNode.replaceChild(slot, found[i]);
-    }
-    document.title = doc.title || 'app';
-    var hs = doc.querySelectorAll('head style');
-    for (var j=0;j<hs.length;j++) document.head.appendChild(hs[j].cloneNode(true));
-    while (doc.body.firstChild) document.body.appendChild(doc.body.firstChild);
-    var placed = document.querySelectorAll('app-script-slot');
-    var byIdx = {};
-    for (var p=0;p<placed.length;p++) byIdx[placed[p].getAttribute('data-i')] = placed[p];
-    for (var c=0;c<codes.length;c++){
-      var s = document.createElement('script');
-      s.textContent = codes[c];
-      var at = byIdx[String(c)];
-      if (at) at.parentNode.replaceChild(s, at); else document.body.appendChild(s); // head scripts run last-resort at end
-    }
-  }
-  window.addEventListener('message', function(e){
-    var d=e.data||{};
-    if(d.k==='exec'){ try{ mount(d.source); }catch(err){ parent.postMessage({k:'log', msg:'mount failed: '+String(err&&err.message||err)}, '*'); } }
-    else if(d.k==='cap-result'){ var p=pending[d.id]; if(p){ delete pending[d.id]; if(d.ok){ p.res(d.value); } else { p.rej(new Error(d.error)); } } }
-    else if(d.k==='room'){ for(var i=0;i<roomHandlers.length;i++){ try{ roomHandlers[i](d.data, String(d.from||'')); }catch(e2){} } }
-  });
-  parent.postMessage({k:'ready'}, '*');
-})();
-</script></head><body></body></html>`
-
 export function runHtmlApp(source: string, perms: SandboxPermissions, cb: AppCallbacks, mountEl: HTMLElement): AppHandle {
-  const url = URL.createObjectURL(new Blob([GUEST_APP_HTML], { type: 'text/html' }))
   const iframe = document.createElement('iframe')
   iframe.className = 'ws-app-frame'
   iframe.setAttribute('sandbox', 'allow-scripts') // no allow-same-origin, so the origin is opaque
-  iframe.src = url
+  iframe.src = GUEST_APP_URL
 
   let closed = false
   let started = false
@@ -338,7 +242,6 @@ export function runHtmlApp(source: string, perms: SandboxPermissions, cb: AppCal
       closed = true
       window.removeEventListener('message', onMsg)
       iframe.remove()
-      URL.revokeObjectURL(url)
     },
   }
 }

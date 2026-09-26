@@ -2492,6 +2492,14 @@ with sync_playwright() as p:
     check('as exactly one camera tile and one screen tile',
           sorted(t['kind'] for t in two) == ['kind-cam', 'kind-screen'], str(two))
     check('carried by two different streams', len({t['stream'] for t in two}) == 2, str(two))
+    # Both contexts are behind one public IP, so they also meet in the nearby room. The
+    # sender belongs under the code room the two of them joined, which otherwise read
+    # "Waiting for someone with the code" beside a Nearby group listing that same device.
+    GROUPS = "() => [...document.querySelectorAll('.peers details.pgroup > summary')].map(s => s.textContent)"
+    two_groups = two_b.evaluate(GROUPS)
+    check('a device sharing the code is listed in the code room, not under Nearby',
+          any(g.startswith('Code ') and g.endswith('(1)') for g in two_groups)
+          and 'Waiting for someone with the code' not in two_b.locator('.peers').inner_text(), str(two_groups))
     check('the sender logged no track or negotiation error',
           not [e for e in two_errs if 'addTrack' in e or 'sender already exists' in e or 'negotiat' in e.lower()],
           ' | '.join(two_errs)[:200])

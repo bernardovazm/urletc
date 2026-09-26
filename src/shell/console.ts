@@ -37,9 +37,14 @@ import { screenShareSupport } from './screen-share'
 import { button, copyText, el, toast } from './ui'
 
 type Tier = 'personal' | 'nearby' | 'code' | 'presence'
-/** `presence` is last in this order so mergedPeers()'s first-tier-wins dedupe always renders a device
- *  you can also reach privately under its trusted tier, never as an anonymous stranger. */
+/** Sidebar group order. */
 const TIER_ORDER: Tier[] = ['personal', 'nearby', 'code', 'presence']
+/** Which tier lists a device reachable on several, first match wins in mergedPeers(). A
+ *  device sharing your code is listed in that code room rather than under nearby: two people
+ *  on one network who joined the same code otherwise saw each other under Nearby while the
+ *  code room they had both joined said it was still waiting for someone. `presence` is last,
+ *  so a device you can also reach privately is never shown as an anonymous stranger. */
+const LISTING_ORDER: Tier[] = ['personal', 'code', 'nearby', 'presence']
 /** Tiers that carry composer traffic (chat + files). `presence` answers "who is online"
  *  and nothing else, so it is excluded here as well as from MEDIA_TIERS; the session it
  *  opens is additionally `presenceOnly`, which enforces the same thing one layer down. */
@@ -143,7 +148,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   const mergedPeers = (): Array<{ tier: Tier; peer: RosterPeer }> => {
     const seen = new Set<string>()
     const out: Array<{ tier: Tier; peer: RosterPeer }> = []
-    for (const tier of TIER_ORDER) {
+    for (const tier of LISTING_ORDER) {
       for (const p of rosters.get(tier) ?? []) {
         if (seen.has(p.peerId)) continue // same device reachable via two tiers
         if (dropped.has(p.deviceId)) continue // dropped locally, see dropPeer()

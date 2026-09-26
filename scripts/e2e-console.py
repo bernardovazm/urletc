@@ -1269,6 +1269,50 @@ with sync_playwright() as p:
           bool(rpoll(rp, lambda: rp.evaluate(GUM_LIVE) == 0, 3)), f'{rp.evaluate(GUM_LIVE)} live tracks')
     rc.close()
 
+    # Both Pong players see the match end. Only the host scores, and the state carrying
+    # the winning point used to be gated on `playing`, which that point had just cleared,
+    # so the guest kept the previous score and never saw a result. Both paddles park at
+    # the top edge, where a serve from the centre can never reach them, so every rally is
+    # a point and the match finishes in seconds. Invites go by device name, because the
+    # lobby also lists nearby-tier peers from other contexts on this machine.
+    rpcode = 'x' + os.urandom(3).hex()
+    rpong = []
+    for _ in range(2):
+        _c = browser.new_context()
+        _p = _c.new_page()
+        _p.goto(f'{BASE}/#/join/{rpcode}')
+        _p.wait_for_selector('.composer', timeout=20000)
+        _p.evaluate("location.hash = '#/t/pong'")
+        rpong.append((_c, _p, _p.locator('input[aria-label="This device name"]').first.input_value(),
+                      _p.locator('details.card[data-tool="pong"]')))
+    (_ca, _pa, _na, _ka), (_cb, _pb, _nb, _kb) = rpong
+    _row = _ka.locator('.pong-lobby .row', has_text=_nb)
+    if rpoll(_pa, lambda: _row.count() == 1, 90):
+        _row.locator('button', has_text='Invite').click()
+        _inv = _kb.locator('.pong-lobby .row', has_text=f'{_na} invited you')
+        rpoll(_pb, lambda: _inv.count() == 1, 20)
+        _inv.locator('button', has_text='Accept').click()
+        for _k in (_ka, _kb):
+            _k.locator('canvas.pong').wait_for(state='visible', timeout=10000)
+            _k.locator('canvas.pong').hover(position={'x': 10, 'y': 2})
+
+        def _ended(k):
+            t = k.locator('.pong-score').inner_text()
+            return 'you win' in t or 'you lose' in t
+        rpoll(_pa, lambda: _ended(_ka) and _ended(_kb), 45)
+        _sa, _sb = _ka.locator('.pong-score').inner_text(), _kb.locator('.pong-score').inner_text()
+        check('pong: both players see the result when the match ends', _ended(_ka) and _ended(_kb), f'{_sa!r} | {_sb!r}')
+
+        def _score(t):
+            m = re.match(r'You (\d+), .* (\d+), you', t)
+            return (int(m.group(1)), int(m.group(2))) if m else None
+        check('pong: the two players agree on a final score of 7',
+              _score(_sa) is not None and _score(_sb) == _score(_sa)[::-1] and max(_score(_sa)) == 7, f'{_sa!r} | {_sb!r}')
+    else:
+        check('pong: both players see the result when the match ends', False, f'{_nb} never reached the lobby of {_na}')
+    _ca.close()
+    _cb.close()
+
     # --- 13n. Studio (VDO.ninja-style A/V): publish controls, labeled source, layouts, stage link ---
     page.evaluate("location.hash = '#/t/studio'")
     page.wait_for_timeout(500)

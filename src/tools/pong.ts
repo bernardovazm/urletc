@@ -466,7 +466,10 @@ const tool: ToolModule = {
         }
         draw()
         netAcc += dt
-        if (playing && netAcc >= 0.045) {
+        // The host keeps sending the final state after the match ends. The guest learns the
+        // match is over only from a state carrying the winning point, and the game channel
+        // is best-effort and unordered, so one packet sent as play stops could be lost.
+        if ((playing || (over && host)) && netAcc >= 0.045) {
           netAcc = 0
           if (myY !== sentY) {
             sendTo(opp, { t: 'paddle', y: myY })

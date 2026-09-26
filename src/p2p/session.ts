@@ -45,7 +45,7 @@ const APP_ID = 'urletc'
 //
 // Changing this list also requires connect-src in vercel.json and vite.config.ts, or the
 // CSP blocks the socket. scripts/e2e-console.py asserts the two agree.
-const NOSTR_RELAYS = ['wss://relay.mostr.pub', 'wss://bucket.coracle.social', 'wss://relay.primal.net']
+const NOSTR_RELAYS = ['wss://relay.snort.social', 'wss://bucket.coracle.social', 'wss://relay.primal.net']
 // A flapping relay is expected and tolerated, so it is reported once per page as a status
 // line instead of being left to the console. Module-scoped because the sockets are shared
 // across tiers, so three rooms must not produce three reports.

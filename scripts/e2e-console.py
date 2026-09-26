@@ -3,6 +3,7 @@ TTS, collapsible cards + sidebar groups, feed deletion (mouse plus real taps in 
 context), the visual-viewport keyboard inset, code chip, theme, connect modal,
 every text tool driven with real input, and the service worker precache install."""
 import base64
+import hashlib
 import io
 import json
 import os
@@ -2544,6 +2545,56 @@ with sync_playwright() as p:
               f"A={hs_a.locator('.peer .peer-state').all_inner_texts()} B={hs_b.locator('.peer .peer-state').all_inner_texts()}")
     hctx_a.close()
     hctx_b.close()
+
+    # Outgoing repair window: the send pass holds the file as `sending` and opens the TTL
+    # only after the fend. A plain attachment (the attach input, so no OCR) goes from A to
+    # B, and the bytes behind B's Download link must hash to what A attached. A transfer
+    # longer than the TTL with a lost chunk is not staged here.
+    TTL_CODE = 'x' + os.urandom(3).hex()
+    ttl_name = f'wt-ttl-{TTL_CODE}.bin'
+    ttl_path = os.path.join(SNAP, ttl_name)
+    ttl_bytes = os.urandom(700 * 1024)  # 11 chunks of 64 KiB
+    io.open(ttl_path, 'wb').write(ttl_bytes)
+    ttl_sha = hashlib.sha256(ttl_bytes).hexdigest()
+
+    def downloaded_sha(pg, name):
+        """SHA-256 of what the file card's Download link saves, or None before it exists.
+        Clicked for real: the page CSP blocks fetch() on blob URLs, and the saved file is
+        what a person ends up with anyway."""
+        link = pg.locator(f'.feed a[download="{name}"]')
+        if not link.count():
+            return None
+        with pg.expect_download() as dl:
+            link.last.click()
+        return hashlib.sha256(io.open(dl.value.path(), 'rb').read()).hexdigest()
+
+    tctx_s = browser.new_context()
+    tctx_s.add_init_script(VISIBILITY)
+    tctx_r = browser.new_context()
+    tctx_r.add_init_script(VISIBILITY)
+    ttl_s, ttl_r = tctx_s.new_page(), tctx_r.new_page()
+    for _pg in (ttl_s, ttl_r):
+        _pg.goto(f'{BASE}/#/join/{TTL_CODE}')
+        _pg.wait_for_selector('.composer', timeout=30000)
+        _pg.evaluate(NEARBY_OFF)
+    ttl_paired = poll(lambda: 'Secure channel established' in feed_text(ttl_s)
+                      and 'Secure channel established' in feed_text(ttl_r)
+                      and 'connected' in (ttl_s.locator('.topbar .badge').inner_text() or ''), 150)
+    check('sender and receiver pair for the attachment transfer', bool(ttl_paired),
+          f'S: {feed_text(ttl_s)[-120:]!r} R: {feed_text(ttl_r)[-120:]!r}')
+    if ttl_paired:
+        ttl_s.locator('.composer-wrap > input[type=file]:not([accept])').set_input_files(ttl_path)
+        ttl_s.wait_for_selector('.card button:has-text("Send to devices")', timeout=20000)
+        ttl_s.locator('.card button', has_text='Send to devices').last.click()
+        poll(lambda: ttl_r.locator(f'.feed a[download="{ttl_name}"]').count() > 0, 90)
+        got = downloaded_sha(ttl_r, ttl_name)
+        check('an attached file arrives and its download hashes to the bytes that were sent',
+              got == ttl_sha, f'got={got!r} want={ttl_sha[:12]} R: {feed_text(ttl_r)[-160:]!r}')
+        check('the attachment finished without a repair failure',
+              'did not finish' not in feed_text(ttl_r) and 'Failed to decrypt' not in feed_text(ttl_r),
+              feed_text(ttl_r)[-160:])
+    tctx_s.close()
+    tctx_r.close()
 
     # ============ screen sharing is one press, from the topbar or the composer ============
     # Both controls go straight to the browser's picker and publish what it returns. The

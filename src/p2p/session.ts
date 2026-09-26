@@ -411,6 +411,9 @@ interface Outgoing {
   file: File
   key: CryptoKey
   total: number
+  // The repair window. `sending` is true for the whole first pass, when `expires` is not yet
+  // meaningful: a transfer longer than the TTL must not read as expired while it is running.
+  sending: boolean
   expires: number
 }
 
@@ -811,7 +814,7 @@ export async function joinRoomSession(opts: {
       // A recipient is asking for pieces of a file we sent. Only a file we still hold can
       // be answered, only to the peer that asked, and only for in-range indices.
       const out = outgoing.get(String(env.fileId ?? ''))
-      if (!out || out.expires < Date.now()) return
+      if (!out || (!out.sending && out.expires < Date.now())) return
       const missing = Array.isArray(env.missing) ? env.missing.slice(0, MAX_REPAIR_CHUNKS) : []
       for (const i of missing) {
         if (!Number.isInteger(i) || i < 0 || i >= out.total) continue
@@ -821,6 +824,9 @@ export async function joinRoomSession(opts: {
           return // the peer went away mid-repair; their own watchdog closes it out
         }
       }
+      // Serving a repair keeps the file re-sendable for the next round, so a receiver that
+      // needs several rounds does not race the TTL.
+      out.expires = Date.now() + OUTGOING_TTL_MS
       const st2 = peers.get(ctx.peerId)
       if (st2?.channel) await msg.send(await st2.channel.seal(enc.encode(JSON.stringify({ t: 'fend', fileId: String(env.fileId) } satisfies Envelope))), { target: ctx.peerId })
     }
@@ -1358,10 +1364,12 @@ export async function joinRoomSession(opts: {
       // (the 'fneed' branch above). Bounded in both count and time, since this holds the
       // whole file in memory.
       if (outgoing.size >= MAX_OUTGOING_FILES) {
-        const oldest = [...outgoing.entries()].sort((a, b) => a[1].expires - b[1].expires)[0]
+        // Never evict an entry whose first pass is still running: its bytes are still needed
+        // and its slot is not idle. Among the rest, drop the one closest to expiry.
+        const oldest = [...outgoing.entries()].filter(([, o]) => !o.sending).sort((a, b) => a[1].expires - b[1].expires)[0]
         if (oldest) outgoing.delete(oldest[0])
       }
-      outgoing.set(fileId, { file, key: aesKey, total, expires: Date.now() + OUTGOING_TTL_MS })
+      outgoing.set(fileId, { file, key: aesKey, total, sending: true, expires: 0 })
 
       // Chunks are encrypted once with the per-file key and targeted at the recipients
       // only. Peers we skipped (already reached via another tier) get nothing.
@@ -1370,33 +1378,45 @@ export async function joinRoomSession(opts: {
       // reject the whole call and abandon the transfer to everyone else, as an unhandled
       // rejection. Drop the peers that are gone and carry on with the rest.
       let live = recipients.map(([peerId]) => peerId)
-      for (let i = 0; i < total && live.length; i++) {
-        const buf = new Uint8Array(await file.slice(i * CHUNK, (i + 1) * CHUNK).arrayBuffer())
-        const iv = randomBytes(12)
-        const aad = enc.encode(`${fileId}:${i}`)
-        const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: aad }, aesKey, buf))
-        const payload = { fileId, i, iv: bytesToB64(iv), ct: bytesToB64(ct) }
-        try {
-          await fdata.send(payload, { target: live })
-        } catch {
-          live = live.filter((peerId) => peers.get(peerId)?.channel)
-          if (!live.length) break
+      try {
+        for (let i = 0; i < total && live.length; i++) {
+          const buf = new Uint8Array(await file.slice(i * CHUNK, (i + 1) * CHUNK).arrayBuffer())
+          const iv = randomBytes(12)
+          const aad = enc.encode(`${fileId}:${i}`)
+          const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: aad }, aesKey, buf))
+          const payload = { fileId, i, iv: bytesToB64(iv), ct: bytesToB64(ct) }
           try {
             await fdata.send(payload, { target: live })
           } catch {
-            /* the recipient's repair round covers what this pass could not place */
+            live = live.filter((peerId) => peers.get(peerId)?.channel)
+            if (!live.length) break
+            try {
+              await fdata.send(payload, { target: live })
+            } catch {
+              /* the recipient's repair round covers what this pass could not place */
+            }
+          }
+          ev.onFileProgress?.(fileId, file.name, i + 1, total, true)
+        }
+        // Announce the end explicitly. Chunks carry no acknowledgement, so without this a
+        // receive that lost pieces has nothing to react to until its watchdog fires.
+        for (const [peerId, st] of recipients) {
+          if (!live.includes(peerId) || !st.channel) continue
+          try {
+            await msg.send(await st.channel.seal(enc.encode(JSON.stringify({ t: 'fend', fileId } satisfies Envelope))), { target: peerId })
+          } catch {
+            /* gone; nothing to tell */
           }
         }
-        ev.onFileProgress?.(fileId, file.name, i + 1, total, true)
-      }
-      // Announce the end explicitly. Chunks carry no acknowledgement, so without this a
-      // receive that lost pieces has nothing to react to until its watchdog fires.
-      for (const [peerId, st] of recipients) {
-        if (!live.includes(peerId) || !st.channel) continue
-        try {
-          await msg.send(await st.channel.seal(enc.encode(JSON.stringify({ t: 'fend', fileId } satisfies Envelope))), { target: peerId })
-        } catch {
-          /* gone; nothing to tell */
+      } finally {
+        // The window opens now, once every chunk and the fend are out, so its clock covers
+        // the repair phase rather than the send. In a finally so a pass that throws still
+        // lets the entry age out. A concurrent send never evicts a sending entry, so it is
+        // still here to finalise.
+        const held = outgoing.get(fileId)
+        if (held) {
+          held.sending = false
+          held.expires = Date.now() + OUTGOING_TTL_MS
         }
       }
       return recipients.filter(([peerId]) => live.includes(peerId)).map(([, st]) => st.info.pubKeyHex)

@@ -978,58 +978,14 @@ button.icon.on {
   color: var(--fg);
 }
 
-/* Expanded stage. The in-document counterpart to the chromeless #/stage route: the stage
-   takes the column's height and the feed moves beside it, so chat and open tools stay in
-   view during a share. Hiding the feed outright left anyone watching a share unable to see
-   a message or a tool card until the share ended. Below 900px there is no room for two
-   columns and the feed sits under the stage instead. */
+/* Expanded stage. The in-document counterpart to the chromeless #/stage route: the
+   stage takes the window while the composer and roster stay usable. */
+:root.stage-max .feed,
+:root.stage-max .captions {
+  display: none;
+}
 :root.stage-max .center {
-  grid-template-columns: minmax(0, 1fr) minmax(300px, 32%);
-  grid-template-rows: minmax(0, 1fr) auto auto;
-}
-:root.stage-max .center > .tiles-region {
-  grid-column: 1;
-  grid-row: 1 / -1;
-}
-:root.stage-max .center > .feed {
-  grid-column: 2;
-  grid-row: 1;
-  border-left: 1px solid var(--border);
-}
-:root.stage-max .center > .captions {
-  grid-column: 2;
-  grid-row: 2;
-}
-:root.stage-max .center > .composer-wrap {
-  grid-column: 2;
-  grid-row: 3;
-  border-left: 1px solid var(--border);
-}
-@media (max-width: 900px) {
-  :root.stage-max .center {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(0, 3fr) minmax(0, 2fr) auto auto;
-  }
-  :root.stage-max .center > .tiles-region,
-  :root.stage-max .center > .feed,
-  :root.stage-max .center > .captions,
-  :root.stage-max .center > .composer-wrap {
-    grid-column: 1;
-    border-left: none;
-  }
-  :root.stage-max .center > .tiles-region {
-    grid-row: 1;
-  }
-  :root.stage-max .center > .feed {
-    grid-row: 2;
-    border-top: 1px solid var(--border);
-  }
-  :root.stage-max .center > .captions {
-    grid-row: 3;
-  }
-  :root.stage-max .center > .composer-wrap {
-    grid-row: 4;
-  }
+  grid-template-rows: 1fr auto;
 }
 :root.stage-max .tiles-region {
   display: flex;

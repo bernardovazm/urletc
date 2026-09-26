@@ -947,7 +947,7 @@ with sync_playwright() as p:
         page.wait_for_selector('.tiles .stage-tile', timeout=10000)
         check('sharing camera shows a video tile', page.locator('.tiles .stage-tile').count() >= 1)
         check('tiles region now visible', page.locator('.tiles-region').is_visible())
-        # Only a screen share expands the stage. A camera doing it too would push the feed aside
+        # Only a screen share expands the stage. A camera doing it too would hide the feed
         # every time anyone turned a webcam on.
         check('a camera share leaves the stage at its usual size',
               not page.evaluate("document.documentElement.classList.contains('stage-max')"))
@@ -966,26 +966,9 @@ with sync_playwright() as p:
         check('stage has an expand-to-window toggle', exp.count() == 1)
         exp.click()
         page.wait_for_timeout(200)
-        BESIDE = ("() => { const t = document.querySelector('.tiles-region').getBoundingClientRect();"
-                  " const f = document.querySelector('.feed').getBoundingClientRect();"
-                  " const c = document.querySelector('.composer-wrap').getBoundingClientRect();"
-                  " return { tw: t.width, fw: f.width, fh: f.height,"
-                  "  beside: f.left >= t.right - 1, below: f.top >= t.bottom - 1,"
-                  "  composerWithFeed: Math.abs(c.left - f.left) < 2 } }")
-        check('expanding the stage keeps the feed beside it',
+        check('expanding the stage hides the feed',
               page.evaluate("document.documentElement.classList.contains('stage-max')")
-              and page.locator('.feed').is_visible() and page.evaluate(BESIDE)['beside']
-              and page.evaluate(BESIDE)['composerWithFeed'], str(page.evaluate(BESIDE)))
-        check('the stage still gets most of the width',
-              page.evaluate(BESIDE)['tw'] > page.evaluate(BESIDE)['fw'] * 1.5, str(page.evaluate(BESIDE)))
-        _vp = page.viewport_size
-        page.set_viewport_size({'width': 760, 'height': 800})
-        page.wait_for_timeout(250)
-        check('on a narrow window the feed sits under the expanded stage',
-              page.locator('.feed').is_visible() and page.evaluate(BESIDE)['below']
-              and page.evaluate(BESIDE)['fh'] > 80, str(page.evaluate(BESIDE)))
-        page.set_viewport_size(_vp)
-        page.wait_for_timeout(250)
+              and not page.locator('.feed').is_visible())
         page.locator('.tiles-head button[title*="Shrink the stage"]').click()
         page.wait_for_timeout(200)
         check('shrinking the stage restores the feed', page.locator('.feed').is_visible())

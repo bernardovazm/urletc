@@ -90,9 +90,11 @@ export default defineConfig({
       // registerSW() instead.
       injectRegister: false,
       injectManifest: {
-        // Precache only the app shell. Lazy tool chunks + workers are runtime-cached
-        // on first use by the SW fetch handler (sw.ts). That keeps SW install light and
-        // preserves lazy loading. Heavy self-hosted OCR core is never precached.
+        // Precache only the app shell. The entry's static imports are added at install
+        // from index.html's modulepreload list (sw.ts), since no glob can name them apart
+        // from the lazy chunks. Lazy tool chunks + workers are runtime-cached on first use
+        // by the SW fetch handler. That keeps SW install light and preserves lazy loading.
+        // Heavy self-hosted OCR core is never precached.
         //
         // Do not add manifest.webmanifest: vite-plugin-pwa injects it into the precache
         // list itself, and a duplicate URL makes Cache.addAll reject with InvalidStateError,

@@ -23,14 +23,33 @@ const CACHE = PREFIX + (hash >>> 0).toString(36)
 const ASSETS = manifest.map((e) => e.url)
 const indexEntry = manifest.find((e) => e.url.endsWith('index.html'))
 const INDEX_URL = indexEntry ? indexEntry.url : 'index.html'
+// A module script sends Origin even to its own origin, while addAll sends none, so under
+// a host that answers Vary: Origin (vite preview does) a precached chunk never matched the
+// page's request and the offline start failed on the entry script. Nothing served here
+// differs by Origin.
+const MATCH: CacheQueryOptions = { ignoreVary: true }
+
+// The entry chunk's static imports carry hashed names the manifest glob cannot tell apart
+// from the lazy tool chunks, and on a first visit they load before this worker exists, so
+// the runtime cache never sees them either. Missing, they fail the module graph offline
+// before main.ts runs and leave a blank page. index.html names each one as a
+// modulepreload, so install reads them from the copy it has just cached.
+async function precache(): Promise<void> {
+  const cache = await caches.open(CACHE)
+  await cache.addAll(ASSETS)
+  const html = (await (await cache.match(INDEX_URL))?.text()) ?? ''
+  const deps = new Set<string>()
+  for (const [tag] of html.matchAll(/<link\b[^>]*>/g)) {
+    const href = /\bhref="([^"]+)"/.exec(tag)?.[1]
+    if (href && /\brel="modulepreload"/.test(tag)) deps.add(href)
+  }
+  const missing: string[] = []
+  for (const d of deps) if (!(await cache.match(d, MATCH))) missing.push(d)
+  await cache.addAll(missing)
+}
 
 self.addEventListener('install', (event) => {
-  event.waitUntil(
-    caches
-      .open(CACHE)
-      .then((c) => c.addAll(ASSETS))
-      .then(() => self.skipWaiting()),
-  )
+  event.waitUntil(precache().then(() => self.skipWaiting()))
 })
 
 self.addEventListener('activate', (event) => {
@@ -90,7 +109,7 @@ async function remember(req: Request, res: Response): Promise<void> {
 }
 
 async function cacheFirst(req: Request): Promise<Response> {
-  const cached = await caches.match(req)
+  const cached = await caches.match(req, MATCH)
   if (cached) return cached
   const res = await fetch(req)
   void remember(req, res.clone()).catch(() => {}) // a full quota costs the copy, not the response
@@ -103,7 +122,7 @@ async function networkFirst(req: Request): Promise<Response> {
     void remember(req, res.clone()).catch(() => {})
     return res
   } catch (e) {
-    const cached = await caches.match(req)
+    const cached = await caches.match(req, MATCH)
     if (cached) return cached
     throw e
   }

@@ -5073,6 +5073,40 @@ with sync_playwright() as p:
           st_pg.locator('details.card').last.inner_text()[:160].replace('\n', ' / '))
     st_ctx.close()
 
+    # --- service worker: one online visit is enough to start offline ---
+    # The entry chunk's static imports load before the worker exists on a first visit, and
+    # the precache glob held only the entry itself, so an offline start failed the module
+    # graph before main.ts ran and the page stayed blank. The entry's own imports are read
+    # off the built file, so the check follows whatever the build splits out.
+    of_ctx = browser.new_context()
+    of_pg = of_ctx.new_page()
+    of_pg.goto(f'{BASE}/#/join/x{os.urandom(3).hex()}')
+    of_pg.wait_for_selector('.composer', timeout=30000)
+    of_pg.wait_for_function('() => !!navigator.serviceWorker.controller', timeout=20000)
+    of_deps = of_pg.evaluate(r"""async () => {
+      const js = await (await fetch(document.querySelector('script[type=module][src]').src)).text()
+      const deps = [...new Set([...js.matchAll(/from\s*"\.\/([^"]+\.js)"/g)].map((m) => '/assets/' + m[1]))]
+      const cached = []
+      for (const n of await caches.keys()) {
+        for (const r of await (await caches.open(n)).keys()) cached.push(new URL(r.url).pathname)
+      }
+      return { deps, missing: deps.filter((d) => !cached.includes(d)) }
+    }""")
+    check('offline: the entry chunk has static imports to check', len(of_deps['deps']) > 0, str(of_deps))
+    check('offline: every static import of the entry is in the worker cache', of_deps['missing'] == [],
+          str(of_deps['missing']))
+    of_ctx.set_offline(True)
+    of_pg.evaluate('window.__ofAlive = 1')
+    try:
+        of_pg.goto(f'{BASE}/?e2e-offline={os.urandom(3).hex()}', timeout=20000)
+        of_pg.wait_for_selector('.composer', timeout=20000)
+        _of_up = of_pg.evaluate('window.__ofAlive') is None
+    except Exception:
+        _of_up = False
+    check('offline: a fresh load with no network still opens the console', _of_up)
+    of_ctx.set_offline(False)
+    of_ctx.close()
+
     # --- service worker registers and its precache install does not reject ---
     # sw.js is a third execution context, and an unhandled rejection inside it reaches
     # neither page.on('console') nor page.on('pageerror'). That is how

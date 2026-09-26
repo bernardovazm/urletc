@@ -1210,6 +1210,65 @@ with sync_playwright() as p:
           'hello' in rocr.locator('pre').inner_text().lower(), f'{rstatus.inner_text()[:80]!r} {rocr.locator("pre").inner_text()[:80]!r}')
     rc.close()
 
+    # A getUserMedia that resolves after a newer Start, a Stop or the card closing is
+    # stopped, so the camera light goes off. The init script holds each stream back for
+    # half a second, standing in for a permission prompt, and keeps every stream it hands
+    # out so the test can count live tracks the page itself can no longer reach.
+    SLOW_GUM = """
+      window.__gum = []
+      const md = navigator.mediaDevices
+      const orig = md.getUserMedia.bind(md)
+      md.getUserMedia = async (c) => {
+        const s = await orig(c)
+        window.__gum.push(s)
+        await new Promise((r) => setTimeout(r, 500))
+        return s
+      }
+    """
+    GUM_LIVE = "() => window.__gum.flatMap((s) => s.getTracks()).filter((t) => t.readyState === 'live').length"
+    rc, rp = rf_open(['microphone', 'camera'])
+    rc.add_init_script(SLOW_GUM)
+    rp.reload()
+    rp.wait_for_selector('.composer', timeout=20000)
+    rp.evaluate("location.hash = '#/t/device-check'")
+    rdc = rp.locator('details.card[data-tool="device-check"]')
+    rstart = rdc.locator('button', has_text='Start test')
+    rstart.wait_for(timeout=10000)
+    rstart.click()
+    rstart.click()
+    rpoll(rp, lambda: 'Live.' in rdc.inner_text() and rp.evaluate('window.__gum.length') >= 2, 10)
+    rpoll(rp, lambda: rp.evaluate(GUM_LIVE) <= 2, 3)
+    check('device check: two quick Starts leave one stream live', rp.evaluate(GUM_LIVE) == 2,
+          f"{rp.evaluate('window.__gum.length')} streams, {rp.evaluate(GUM_LIVE)} live tracks")
+    rdc.locator('button', has_text='Stop').click()
+    check('device check: Stop after two quick Starts ends every track',
+          bool(rpoll(rp, lambda: rp.evaluate(GUM_LIVE) == 0, 3)), f'{rp.evaluate(GUM_LIVE)} live tracks')
+    rdc.locator('button', has_text='Start test').click()
+    rwrap = rp.locator('.feed-item', has=rdc)
+    rwrap.hover()
+    rwrap.locator('button.del').click()
+    rwrap.locator('button.del').click()
+    rpoll(rp, lambda: rp.evaluate('window.__gum.length') >= 3, 5)
+    check('device check: closing the card during the prompt stops the late stream',
+          bool(rpoll(rp, lambda: rp.evaluate(GUM_LIVE) == 0, 3)), f'{rp.evaluate(GUM_LIVE)} live tracks')
+    # Speech to text records from the mic the same way: a second click while the prompt
+    # is up must not start a second recorder that nothing can stop.
+    rp.evaluate("location.hash = '#/t/stt'")
+    rstt = rp.locator('details.card[data-tool="stt"]')
+    rrec = rstt.locator('button', has_text='Record')
+    rrec.wait_for(timeout=10000)
+    rn0 = rp.evaluate('window.__gum.length')
+    rrec.click()
+    rrec.click()
+    rstop = rstt.locator('button', has_text='Stop & transcribe')
+    rstop.wait_for(timeout=5000)
+    check('stt: a double click on Record opens the mic once', rp.evaluate('window.__gum.length') - rn0 == 1,
+          f"{rp.evaluate('window.__gum.length') - rn0} getUserMedia calls")
+    rstop.click()
+    check('stt: stopping the recording ends the mic track',
+          bool(rpoll(rp, lambda: rp.evaluate(GUM_LIVE) == 0, 3)), f'{rp.evaluate(GUM_LIVE)} live tracks')
+    rc.close()
+
     # --- 13n. Studio (VDO.ninja-style A/V): publish controls, labeled source, layouts, stage link ---
     page.evaluate("location.hash = '#/t/studio'")
     page.wait_for_timeout(500)

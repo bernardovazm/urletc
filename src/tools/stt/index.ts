@@ -132,14 +132,23 @@ const tool: ToolModule = {
     // --- Private mic recording, transcribed by Whisper ---
     let recorder: MediaRecorder | null = null
     let chunks: Blob[] = []
+    // Set while the mic permission prompt is up. A second click then would start a second
+    // recorder whose stream nothing could stop, and a card closed meanwhile has no Stop.
+    let arming = false
     const recBtn = button('🔴 Record', () => void toggleRecord(), 'ghost', 'Record the mic, transcribe on-device')
     async function toggleRecord() {
       if (recorder && recorder.state === 'recording') {
         recorder.stop()
         return
       }
+      if (arming) return
+      arming = true
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+        if (torn) {
+          stream.getTracks().forEach((t) => t.stop())
+          return
+        }
         chunks = []
         recorder = new MediaRecorder(stream)
         recorder.ondataavailable = (ev) => {
@@ -156,6 +165,8 @@ const tool: ToolModule = {
         recBtn.textContent = '⏹ Stop & transcribe'
       } catch {
         toast('Microphone blocked')
+      } finally {
+        arming = false
       }
     }
 

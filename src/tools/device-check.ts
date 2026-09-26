@@ -18,6 +18,10 @@ const tool: ToolModule = {
     let recorder: MediaRecorder | null = null
     let recInterval = 0
     let lastUrl = ''
+    // Bumped by every stopAll, so a start() whose getUserMedia resolves after a newer
+    // start, a Stop or the card closing can tell, and stops the stream it was handed.
+    // Without it that stream stays live with no control left that reaches it.
+    let gen = 0
 
     const video = el('video', { class: 'preview mirror', autoplay: '', playsinline: '' }) as HTMLVideoElement
     video.muted = true
@@ -45,6 +49,7 @@ const tool: ToolModule = {
     }
 
     const stopAll = () => {
+      gen++
       cancelAnimationFrame(raf)
       if (recInterval) {
         window.clearInterval(recInterval)
@@ -74,21 +79,31 @@ const tool: ToolModule = {
 
     const start = async () => {
       stopAll()
+      const my = gen
       status.textContent = 'Requesting camera and microphone...'
       const audio: MediaStreamConstraints['audio'] = micSel.value ? { deviceId: { exact: micSel.value } } : true
       const videoC: MediaStreamConstraints['video'] = camSel.value ? { deviceId: { exact: camSel.value } } : true
+      let got: MediaStream
+      let micOnly = false
       try {
-        stream = await navigator.mediaDevices.getUserMedia({ audio, video: videoC })
+        got = await navigator.mediaDevices.getUserMedia({ audio, video: videoC })
       } catch {
         try {
-          stream = await navigator.mediaDevices.getUserMedia({ audio })
-          toast('Camera unavailable. Testing the mic only')
+          got = await navigator.mediaDevices.getUserMedia({ audio })
+          micOnly = true
         } catch {
-          status.textContent = 'Microphone/camera denied or unavailable. Check the browser permission prompt.'
+          if (my === gen) status.textContent = 'Microphone/camera denied or unavailable. Check the browser permission prompt.'
           return
         }
       }
+      if (my !== gen) {
+        got.getTracks().forEach((t) => t.stop())
+        return
+      }
+      stream = got
+      if (micOnly) toast('Camera unavailable. Testing the mic only')
       await fillDevices() // device labels only appear after permission
+      if (my !== gen) return // stopAll ran meanwhile and already stopped this stream
       const vt = stream.getVideoTracks()[0]
       const at = stream.getAudioTracks()[0]
       if (vt) {

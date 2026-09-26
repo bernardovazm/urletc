@@ -41,7 +41,9 @@ if [ "${E2E_NO_SERVER:-0}" != "1" ]; then
     echo "> E2E_SKIP_BUILD=1, using the existing dist/"
     [ -f dist/index.html ] || { echo "no dist/index.html to test"; exit 1; }
   else
-    npm run build
+    # A namespace of this run's own, so its contexts never meet real tabs or another run
+    # behind the same public IP (see APP_ID in src/p2p/session.ts).
+    VITE_RENDEZVOUS_NS="${VITE_RENDEZVOUS_NS:-e2e$(od -An -N4 -tx4 /dev/urandom | tr -d ' ')}" npm run build
   fi
   echo "> starting preview on :$PORT"
   npm run preview -- --port "$PORT" --strictPort >/tmp/urletc-e2e-preview.log 2>&1 &

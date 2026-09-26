@@ -28,7 +28,12 @@ import { SecureChannel, type SealedMessage } from './ratchet'
 
 // Trystero namespace. Every room id derives from it, so changing this value moves the
 // whole app to a fresh namespace and older clients can no longer see newer ones.
-const APP_ID = 'urletc'
+//
+// A test build appends VITE_RENDEZVOUS_NS. Headless contexts share the nearby room with
+// every real tab behind the same public IP, so a local suite run otherwise delivered its
+// test messages and files into the real tabs on that network, and two suites running at
+// once filled each other's feeds. Release builds leave it unset.
+const APP_ID = import.meta.env.VITE_RENDEZVOUS_NS ? `urletc-${import.meta.env.VITE_RENDEZVOUS_NS}` : 'urletc'
 // Rendezvous relays, chosen by measuring announce fan-out rather than reachability. A
 // relay can accept a subscription and answer EOSE fast while refusing every announce,
 // which leaves discovery dead: strfry.shock.network answered EOSE in 527ms and still

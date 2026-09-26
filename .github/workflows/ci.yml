@@ -47,7 +47,11 @@ jobs:
       - name: Format check
         run: npm run format:check
 
+      # The e2e step runs against this build, so it gets a rendezvous namespace of its own:
+      # concurrent runs on one runner host would otherwise pair through the nearby room.
       - name: Build
+        env:
+          VITE_RENDEZVOUS_NS: e2e${{ github.run_id }}
         run: npm run build
 
       - uses: actions/setup-python@v7

@@ -2636,6 +2636,43 @@ with sync_playwright() as p:
     pctx_s.close()
     pctx_r.close()
 
+    # Rejoin during a leave: Trystero returns the same room object for a roomId until its
+    # leave has finished (a leave frame, then 99 ms), so turning the online list off and on
+    # in one go used to attach the new session to a room that then destroyed its peers and
+    # stopped announcing. Both devices must see each other again afterwards. Nearby is off
+    # on both, since a device reachable there is listed under Nearby instead of Online now.
+    PRESENCE_ROW = ("n => { const g = [...document.querySelectorAll('details.pgroup')]"
+                    ".find(d => (d.querySelector('summary')?.textContent || '').startsWith('Online now'));"
+                    " const r = g && [...g.querySelectorAll('.peer')].find(x => (x.querySelector('.claimed')?.textContent || '').trim() === n);"
+                    " return r ? r.querySelector('.peer-state').textContent : null }")
+    rctx_a = browser.new_context()
+    rctx_a.add_init_script(VISIBILITY)
+    rctx_b = browser.new_context()
+    rctx_b.add_init_script(VISIBILITY)
+    rj_a, rj_b = rctx_a.new_page(), rctx_b.new_page()
+    for _pg in (rj_a, rj_b):
+        _pg.goto(f'{BASE}/')
+        _pg.wait_for_selector('.composer', timeout=30000)
+        _pg.evaluate(NEARBY_OFF)
+        _pg.locator('.topbar button.roster-toggle').click()  # the sidebar, and its switch, start collapsed
+        presence_box(_pg).check()
+    name_a = rj_a.locator('input[aria-label="This device name"]').first.input_value()
+    name_b = rj_b.locator('input[aria-label="This device name"]').first.input_value()
+    rj_met = poll(lambda: rj_a.evaluate(PRESENCE_ROW, name_b) == 'visible'
+                  and rj_b.evaluate(PRESENCE_ROW, name_a) == 'visible', 150)
+    check('two devices on the online list see each other', bool(rj_met),
+          f'A sees {rj_a.evaluate(PRESENCE_ROW, name_b)!r}, B sees {rj_b.evaluate(PRESENCE_ROW, name_a)!r}')
+    if rj_met:
+        # Off and on in one task: two real clicks on the switch, well inside the leave.
+        presence_box(rj_a).evaluate('el => { el.click(); el.click() }')
+        check('the online-list switch is back on after the flip', presence_box(rj_a).is_checked())
+        rj_back = poll(lambda: rj_a.evaluate(PRESENCE_ROW, name_b) == 'visible'
+                       and rj_b.evaluate(PRESENCE_ROW, name_a) == 'visible', 60)
+        check('after an off-and-on flip both devices list each other again, none stuck connecting', bool(rj_back),
+              f'A sees {rj_a.evaluate(PRESENCE_ROW, name_b)!r}, B sees {rj_b.evaluate(PRESENCE_ROW, name_a)!r}')
+    rctx_a.close()
+    rctx_b.close()
+
     # ============ screen sharing is one press, from the topbar or the composer ============
     # Both controls go straight to the browser's picker and publish what it returns. The
     # topbar button doubles as the stop control while a screen is live.

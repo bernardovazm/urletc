@@ -364,6 +364,12 @@ export function getActiveSession(): RoomSession | null {
   return active
 }
 
+// Leaves still in flight, by roomId. Trystero's joinRoom returns the existing room object
+// for a roomId until that room's leave has run to the end (a leave frame to every peer,
+// then 99 ms), so a join in that window attached to a room about to destroy its peers and
+// stop announcing. A join waits here for the leave of its roomId to finish.
+const leavingRooms = new Map<string, Promise<void>>()
+
 // Every joined session across tiers (personal/nearby/code). Lets a P2P tool (e.g. Pong)
 // enumerate all reachable peers, not just the primary one.
 const liveSessions = new Set<RoomSession>()
@@ -474,6 +480,9 @@ export async function joinRoomSession(opts: {
   const roomSalt = enc.encode(opts.roomId)
   const idPubRaw = new Uint8Array(await crypto.subtle.exportKey('raw', id.sign.publicKey))
 
+  // Re-read after every wait: a second leave of this roomId can start while the first is
+  // awaited. No await sits between the last check and joinRoom().
+  for (let pending = leavingRooms.get(opts.roomId); pending; pending = leavingRooms.get(opts.roomId)) await pending
   const room: Room = joinRoom(
     {
       // One app id per room, so every room gets its own RTCPeerConnection. Trystero shares a
@@ -515,7 +524,6 @@ export async function joinRoomSession(opts: {
     if (closedFiles.size > MAX_CLOSED_FILES) closedFiles.delete(closedFiles.values().next().value as string)
   }
   const activeStreams = new Map<MediaStream, unknown>() // stream to its metadata, kept for re-send on handshake
-  const receivedUrls = new Set<string>()
 
   const hs = room.makeAction<HsPayload>('hs')
   const msg = room.makeAction<SealedMessage>('msg')
@@ -729,7 +737,6 @@ export async function joinRoomSession(opts: {
         incoming.delete(fileId)
         closeFile(pendKey(inc.peerId, fileId))
         const url = URL.createObjectURL(blob)
-        receivedUrls.add(url)
         ev.onFileReceived?.({ id: inc.id, name: inc.name, ftype: inc.ftype, url, size: inc.size, from: inc.from })
       }
     } catch {
@@ -1482,7 +1489,18 @@ export async function joinRoomSession(opts: {
       mediaChain.clear()
       // A URL passed to onFileReceived belongs to the receiver, whose file card outlives
       // the room and revokes it when the card is removed.
-      await room.leave()
+      // Registered before the first await, so a join of this roomId issued right after
+      // leave() is called already sees it.
+      const leaving = room.leave()
+      const settled = leaving.then(
+        () => undefined,
+        () => undefined,
+      )
+      leavingRooms.set(opts.roomId, settled)
+      void settled.then(() => {
+        if (leavingRooms.get(opts.roomId) === settled) leavingRooms.delete(opts.roomId)
+      })
+      await leaving
       peers.clear()
       for (const inc of incoming.values()) if (inc.timer) clearTimeout(inc.timer)
       incoming.clear()

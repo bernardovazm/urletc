@@ -59,10 +59,10 @@ function reloadIfIdle(): boolean {
   return true
 }
 
-let updatePending = false
-function updateWhenIdle(): void {
-  if (updatePending || reloadIfIdle()) return
-  updatePending = true
+let noticeShown = false
+function showUpdateNotice(): void {
+  if (noticeShown) return
+  noticeShown = true
   document
     .getElementById('toasts')
     ?.append(
@@ -71,9 +71,23 @@ function updateWhenIdle(): void {
         button('Reload', () => location.reload(), 'small'),
       ]),
     )
+}
+
+let updatePending = false
+function updateWhenIdle(): void {
+  if (updatePending || reloadIfIdle()) return
+  updatePending = true
+  showUpdateNotice()
   document.addEventListener('visibilitychange', () => void reloadIfIdle())
   window.setInterval(() => void reloadIfIdle(), 5000)
 }
+
+// A lazy chunk this tab has not loaded yet is gone from the server once a newer build is
+// deployed, and Vite reports the failed import here. Only the notice is shown: an offline
+// tab lands here too, and a reload there would not help.
+window.addEventListener('vite:preloadError', () => {
+  if (navigator.onLine) showUpdateNotice()
+})
 
 function renderUnlock(app: HTMLElement, caps: CryptoCaps): void {
   app.replaceChildren()

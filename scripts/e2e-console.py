@@ -4997,6 +4997,82 @@ with sync_playwright() as p:
     check('update: no page error on the update path', not up_errs, ' | '.join(up_errs)[:200])
     up_ctx.close()
 
+    # --- service worker: the runtime cache follows the build ---
+    # One constant cache name meant nothing was ever evicted or revalidated: public/ files
+    # kept their first copy forever, the SPA fallback served for a chunk a deploy removed
+    # was stored under the .js URL, and activate deleted every other cache on the origin,
+    # the downloaded Whisper model included. 'wt-precache-v1' is the name every earlier
+    # build used, so seeding it stands in for the cache a returning visitor still has.
+    def rc_eval(pg, js, arg=None):
+        try:
+            return pg.evaluate(js, arg)
+        except Exception:
+            return None  # the page reloaded onto the update mid-call
+    rc_ctx = browser.new_context()
+    rc_pg = rc_ctx.new_page()
+    rc_pg.goto(f'{BASE}/#/join/x{os.urandom(3).hex()}')
+    rc_pg.wait_for_selector('.composer', timeout=30000)
+    rc_pg.wait_for_function('() => !!navigator.serviceWorker.controller', timeout=20000)
+    rc_cur = rc_pg.evaluate("""async () => {
+      for (const n of await caches.keys()) if (await (await caches.open(n)).match('/index.html')) return n
+      return null
+    }""")
+    check('cache: the precache is in a cache named after the build',
+          bool(rc_cur) and rc_cur.startswith('wt-precache-') and rc_cur != 'wt-precache-v1', str(rc_cur))
+    rc_pg.evaluate("""async (cur) => {
+      await (await caches.open('wt-precache-v1')).put('/e2e-old-build', new Response('old'))
+      await (await caches.open('transformers-cache')).put('/e2e-model', new Response('model'))
+      await (await caches.open(cur)).put('/tesseract/worker-tt.js',
+        new Response('// stale', { headers: { 'content-type': 'text/javascript' } }))
+    }""", rc_cur or 'wt-precache-v1')
+    rc_body = rc_pg.evaluate("() => fetch('/tesseract/worker-tt.js').then((r) => r.text())")
+    check('cache: a public/ file comes from the network, not a stale cached copy',
+          rc_body != '// stale' and len(rc_body) > 100, rc_body[:80])
+    rc_gone = f'/assets/gone-{os.urandom(4).hex()}.js'
+    rc_ct = rc_pg.evaluate("(u) => fetch(u).then((r) => r.headers.get('content-type'))", rc_gone)
+    check('cache: a chunk the server no longer has comes back as the HTML fallback', 'text/html' in (rc_ct or ''),
+          str(rc_ct))
+    # The store is fire-and-forget, so a later request that is stored marks the point by
+    # which the earlier one would have been.
+    rc_mark = f'/icon.svg?e2e={os.urandom(3).hex()}'
+    rc_pg.evaluate('(u) => fetch(u).then((r) => r.text())', rc_mark)
+    check('cache: a later public/ response is stored',
+          bool(poll(lambda: rc_pg.evaluate('(u) => caches.match(u).then((r) => !!r)', rc_mark), 5)))
+    check('cache: that HTML is never stored under the .js URL',
+          rc_pg.evaluate('(u) => caches.match(u).then((r) => !r)', rc_gone))
+    rc_ctx.set_offline(True)
+    rc_off = rc_eval(rc_pg, "() => fetch('/tesseract/worker-tt.js').then((r) => r.text()).catch((e) => 'ERR ' + e)")
+    rc_ctx.set_offline(False)
+    check('cache: offline, the public/ file still answers from the fresh copy',
+          bool(rc_off) and not rc_off.startswith('ERR') and rc_off != '// stale', str(rc_off)[:80])
+    rc_pg.evaluate("() => navigator.serviceWorker.register('/sw.js?e2e=' + Math.random().toString(36).slice(2))")
+
+    def rc_pruned():
+        k = rc_eval(rc_pg, '() => caches.keys()')
+        return k if k is not None and 'wt-precache-v1' not in k else None
+    rc_keys = poll(rc_pruned, 20) or rc_eval(rc_pg, '() => caches.keys()')
+    check('cache: the next worker to activate drops the previous build cache',
+          rc_keys is not None and 'wt-precache-v1' not in rc_keys, str(rc_keys))
+    check('cache: it keeps the downloaded speech model', rc_keys is not None and 'transformers-cache' in rc_keys,
+          str(rc_keys))
+    check('cache: it keeps the current build cache', rc_keys is not None and rc_cur in rc_keys, str(rc_keys))
+    rc_ctx.close()
+
+    # A tab left open across a deploy asks for a chunk the new deployment no longer has and
+    # gets index.html back. Workers are blocked here so the route answers the request the
+    # way Vercel's rewrite does.
+    st_ctx = browser.new_context(service_workers='block')
+    st_pg = st_ctx.new_page()
+    st_pg.route('**/assets/studio-*.js',
+                lambda r: r.fulfill(status=200, content_type='text/html', body='<!doctype html><title>urletc</title>'))
+    st_pg.goto(f'{BASE}/#/join/x{os.urandom(3).hex()}')
+    st_pg.wait_for_selector('.composer', timeout=30000)
+    st_pg.evaluate(f"location.hash = '#/t/{tool_id_for('studio')}'")
+    st_note = poll(lambda: st_pg.locator('.toast.update-ready').count() == 1, 15)
+    check('cache: a tool whose chunk is gone after a deploy offers the update', bool(st_note),
+          st_pg.locator('details.card').last.inner_text()[:160].replace('\n', ' / '))
+    st_ctx.close()
+
     # --- service worker registers and its precache install does not reject ---
     # sw.js is a third execution context, and an unhandled rejection inside it reaches
     # neither page.on('console') nor page.on('pageerror'). That is how

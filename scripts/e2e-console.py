@@ -25,6 +25,11 @@ def check(name, cond, extra=''):
 # stray tab on the same network, join the same room; the "0 peers" assertions then see
 # real peers and fail intermittently. Section 2b closes the other half of that hole.
 OWN_CODE = 'e2e' + os.urandom(3).hex()
+# The code typed into the composer in 13j: 8 characters with a digit, so the composer
+# auto-joins it. Random for the same reason as OWN_CODE. CI runs each push to main in
+# parallel, and with a fixed literal every concurrent run met in one room, where one run's
+# camera arrived as a tile in another run's page.
+TYPED_CODE = 'q7' + os.urandom(3).hex()
 
 
 def tool_ids():
@@ -900,12 +905,12 @@ with sync_playwright() as p:
     # placeholder stayed short, rather than pinning any particular wording.
     ph = page.locator('.composer textarea').get_attribute('placeholder') or ''
     check('placeholder names the field without a lecture', 0 < len(ph) <= 48 and 'join code' not in ph, ph)
-    page.locator('.composer textarea').fill('q7x2k9')
+    page.locator('.composer textarea').fill(TYPED_CODE)
     page.locator('.composer textarea').press('Enter')
     try:
         page.wait_for_function(
-            "() => (document.querySelector('button.code-chip')?.textContent || '').trim() === 'Q7X2K9'",
-            timeout=20000)
+            "c => (document.querySelector('button.code-chip')?.textContent || '').trim() === c",
+            arg=TYPED_CODE.upper(), timeout=20000)
         check('typed join code connects', True)
     except Exception:
         check('typed join code connects', False, page.locator('button.code-chip').inner_text())

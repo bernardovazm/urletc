@@ -99,8 +99,12 @@ const tool: ToolModule = {
       }
     }
 
+    // A paste aimed at a text field (the composer, another tool's textarea, the Connect
+    // modal) belongs to that field. The listener is document-wide and this card opens by
+    // itself whenever clipboard-read is granted, so cancelling every paste would stop
+    // Ctrl/Cmd+V from working anywhere in the app while the card is open.
     const onPaste = (e: ClipboardEvent) => {
-      if (!e.clipboardData) return
+      if (!e.clipboardData || isTextField(document.activeElement)) return
       e.preventDefault()
       void handlePaste(e.clipboardData).then(render)
     }
@@ -146,6 +150,14 @@ const tool: ToolModule = {
     for (const fn of cleanups.get(container) ?? []) fn()
     cleanups.delete(container)
   },
+}
+
+/** Whether a focused element takes typed text. Checkboxes and buttons take focus too, and
+ *  a paste made while one of those is focused has nowhere else to go, so they do not count. */
+function isTextField(n: Element | null): boolean {
+  if (n instanceof HTMLTextAreaElement) return true
+  if (n instanceof HTMLInputElement) return !/^(checkbox|radio|button|submit|reset|range|color|file|image|hidden)$/.test(n.type)
+  return n instanceof HTMLElement && n.isContentEditable
 }
 
 async function handlePaste(dt: DataTransfer): Promise<Detected[]> {

@@ -1096,6 +1096,46 @@ with sync_playwright() as p:
     st2.locator('select.ocr-select').select_option('copy')  # restore the default for reruns
     page.wait_for_timeout(200)
 
+    # ============ tools driven with real inputs: regressions ============
+    # poll() is defined further down, beside the file-transfer contexts, so this section
+    # carries a copy bound to the page it waits on.
+    def rpoll(pg, fn, seconds, step=0.25):
+        for _ in range(int(seconds / step)):
+            v = fn()
+            if v:
+                return v
+            pg.wait_for_timeout(int(step * 1000))
+        return None
+
+    def rf_open(perms=()):
+        """A fresh context in a code room of its own, so no other run's peer joins it."""
+        c = browser.new_context(permissions=list(perms))
+        pg = c.new_page()
+        pg.goto(f'{BASE}/#/join/x{os.urandom(3).hex()}')
+        pg.wait_for_selector('.composer', timeout=20000)
+        return c, pg
+
+    # An open Clipboard card leaves a paste aimed at a text field to that field, and still
+    # takes one made with nothing editable focused. Its listener is document-wide and the
+    # card opens by itself once clipboard-read is granted.
+    rc, rp = rf_open(['clipboard-read', 'clipboard-write'])
+    rp.evaluate("location.hash = '#/t/clipboard'")
+    rcb = rp.locator('details.card[data-tool="clipboard"]').last
+    rcb.locator('button', has_text='Scan clipboard').wait_for(timeout=10000)
+    rp.evaluate("navigator.clipboard.writeText('plain words to paste')")
+    rta = rp.locator('.composer textarea')
+    rta.click()
+    rp.keyboard.press('Control+V')
+    check('clipboard card open: Ctrl+V into the composer inserts the text',
+          bool(rpoll(rp, lambda: rta.input_value() == 'plain words to paste', 5)), repr(rta.input_value()))
+    rta.fill('')
+    rp.evaluate('document.activeElement.blur()')
+    rp.evaluate("navigator.clipboard.writeText('card words arrive')")
+    rp.keyboard.press('Control+V')
+    check('clipboard card open: a paste with no field focused lands in the card',
+          bool(rpoll(rp, lambda: 'card words arrive' in rcb.inner_text(), 5)), rcb.inner_text()[-160:])
+    rc.close()
+
     # --- 13n. Studio (VDO.ninja-style A/V): publish controls, labeled source, layouts, stage link ---
     page.evaluate("location.hash = '#/t/studio'")
     page.wait_for_timeout(500)

@@ -463,7 +463,15 @@ export async function joinRoomSession(opts: {
 
   const room: Room = joinRoom(
     {
-      appId: APP_ID,
+      // One app id per room, so every room gets its own RTCPeerConnection. Trystero shares a
+      // single connection per (app id, peer) across all rooms of that app id and routes its
+      // renegotiation through one of them, dropping the offer or answer when the peer is not
+      // active in that room. Two devices in a code room that also met in another room
+      // (nearby on one network, or both on the online list) shared one connection, and a
+      // screen share could leave the sender waiting on an answer that never came: a tile
+      // with no frames for that viewer while the rest of the room watched. The shared
+      // connection also delivered one room's tracks to every room it served.
+      appId: `${APP_ID}/${opts.roomId}`,
       password: opts.password,
       relayConfig: { urls: NOSTR_RELAYS },
       // iceServers, not turnConfig, so this replaces Trystero's four default STUN

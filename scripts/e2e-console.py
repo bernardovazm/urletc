@@ -2289,6 +2289,12 @@ with sync_playwright() as p:
     def theater(pg):
         return pg.evaluate("document.documentElement.classList.contains('stage-max')")
 
+    # The newest screen tile has decoded video: its playhead has moved.
+    PAINTS = ("() => { const v = [...document.querySelectorAll('.tiles .stage-tile.kind-screen video')].pop();"
+              " return !!v && v.currentTime > 0.5 }")
+    PAINTS_DIAG = ("() => [...document.querySelectorAll('.tiles video.tile')].map(v => ({ t: v.currentTime,"
+                   " paused: v.paused, tracks: v.srcObject ? v.srcObject.getTracks().map(k => k.kind + (k.muted ? '/muted' : '')) : [] }))")
+
     sctx_a = browser.new_context()
     sctx_a.add_init_script(FAKE_SCREEN)
     sctx_b = browser.new_context()
@@ -2324,6 +2330,11 @@ with sync_playwright() as p:
         arrived = poll(lambda: sh_b.locator('.tiles .stage-tile').count() > 0, 90)
         check('a peer screen share arrives as a stage tile', bool(arrived),
               sh_b.locator('.feed').inner_text()[-160:])
+        # A tile is not a picture. These two devices met in the nearby room and the code room,
+        # and B then left nearby, which is the sequence where a connection shared across rooms
+        # lost the answer to the share: the tile appeared and never painted a frame.
+        check('the arriving screen share paints frames', bool(arrived) and bool(poll(lambda: sh_b.evaluate(PAINTS), 15)),
+              str(sh_b.evaluate(PAINTS_DIAG)))
         check('a screen share starting marks the backgrounded tab too',
               bool(arrived) and bool(poll(lambda: title_count(sh_b) > before_share, 15)),
               f'{before_share} then {title_count(sh_b)}')
@@ -2358,6 +2369,8 @@ with sync_playwright() as p:
         # state to the user), expand again, and ending the share must leave it alone.
         share_btn.click()
         again = poll(lambda: sh_b.locator('.tiles .stage-tile').count() > 0, 90)
+        check('the second screen share paints frames too', bool(again) and bool(poll(lambda: sh_b.evaluate(PAINTS), 15)),
+              str(sh_b.evaluate(PAINTS_DIAG)))
         expanded_again = bool(again) and theater(sh_b)
         check('a second screen share expands the stage again', expanded_again)
         # The collapse above outlived the first share, so this share would expand a stage

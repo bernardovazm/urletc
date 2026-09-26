@@ -2850,6 +2850,41 @@ with sync_playwright() as p:
     vctx_a.close()
     vctx_b.close()
 
+    # --- a paired device in the same code room shows each source once ---
+    # A paired device is reached on both media tiers and publishes to both, and the one
+    # peer connection it shares with the viewer delivers the stream to both rooms. Each
+    # arrival made a tile, so a screen showed twice and a mic played twice.
+    DUP_CODE = 'x' + os.urandom(3).hex()
+    dctx_a = browser.new_context()
+    dctx_a.add_init_script(FAKE_SCREEN)
+    dctx_b = browser.new_context()
+    dp_a, dp_b = dctx_a.new_page(), dctx_b.new_page()
+    dp_a.goto(f'{BASE}/#/join/{DUP_CODE}')
+    dp_a.wait_for_selector('.composer', timeout=30000)
+    dp_a.locator('.topbar button', has_text='Connect').click()
+    dp_a.wait_for_selector('.modal input[readonly]', timeout=10000)
+    dp_link = dp_a.locator('.modal input[readonly]').input_value()
+    dp_a.keyboard.press('Escape')
+    dp_b.goto(dp_link)
+    dp_b.wait_for_selector('.composer', timeout=30000)
+    dp_b.goto(f'{BASE}/#/join/{DUP_CODE}')
+    dp_b.wait_for_selector('.composer', timeout=30000)
+    DP_MINE = ("() => { const g = [...document.querySelectorAll('.sidebar .pgroup')]"
+               ".find(x => x.querySelector('summary').textContent.startsWith('My devices'));"
+               " return g ? g.querySelectorAll('.peer').length : 0 }")
+    dp_paired = poll(lambda: dp_b.evaluate(DP_MINE) >= 1, 150)
+    check('the pair link puts the second context on My devices', bool(dp_paired),
+          dp_b.locator('.sidebar').inner_text()[:200])
+    check('while it also holds the shared code room', dp_b.locator('button.code-chip').inner_text().strip() == DUP_CODE.upper())
+    dp_a.locator('.composer .bar button[title^="Share your screen"]').click()
+    dp_got = poll(lambda: dp_b.locator('.tiles .stage-tile').count() >= 1, 90)
+    check('the paired viewer receives the share', bool(dp_got))
+    check('as a single tile', bool(dp_got) and not poll(lambda: dp_b.locator('.tiles .stage-tile').count() >= 2, 10),
+          '%d tiles' % dp_b.locator('.tiles .stage-tile').count())
+    check('with a single spotlight', dp_b.locator('.tiles .stage-tile.spot').count() == 1)
+    dctx_a.close()
+    dctx_b.close()
+
     # --- touch: the per-card delete control, driven by real taps ---
     # Every assertion above drives a desktop viewport with a mouse, so a control that does
     # nothing on a phone passes them all. Revealing it wherever there is no hover is the

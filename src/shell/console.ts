@@ -1432,6 +1432,9 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   }
 
   function attachPeerStream(peerId: string, stream: MediaStream, meta?: unknown) {
+    // A device reachable on two media tiers publishes to both, and Trystero hands the one
+    // shared peer connection's stream to every room, so it arrives once per tier.
+    if (stageTiles.some((t) => t.id === `${peerId}:${stream.id}`)) return
     const m = asMeta(meta)
     const kind: SourceKind = m?.kind ?? (stream.getVideoTracks().length ? 'cam' : 'mic')
     const tile = addStageTile({ peerId, kind, label: sourceLabel(peerId, kind), stream })

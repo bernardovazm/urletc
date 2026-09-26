@@ -200,6 +200,36 @@ const MULTI_SUFFIX = new Set([
   'com.vn',
 ])
 
+// Platforms that hand every customer a subdomain of one shared domain, from the private
+// section of the public suffix list. Each subdomain is a separate site, so a feed listing
+// one customer's page says nothing about the others. Deliberately short, like MULTI_SUFFIX:
+// the platforms phishing feeds list most.
+const SHARED_HOSTING = new Set([
+  'vercel.app',
+  'pages.dev',
+  'workers.dev',
+  'r2.dev',
+  'github.io',
+  'gitlab.io',
+  'netlify.app',
+  'blogspot.com',
+  'web.app',
+  'firebaseapp.com',
+  'appspot.com',
+  'herokuapp.com',
+  'amazonaws.com',
+  'cloudfront.net',
+  'azurewebsites.net',
+  'onrender.com',
+  'fly.dev',
+  'replit.app',
+  'glitch.me',
+  'surge.sh',
+  'webflow.io',
+  'wixsite.com',
+  'weebly.com',
+])
+
 const SHORTENERS = new Set([
   'bit.ly',
   't.co',
@@ -859,8 +889,13 @@ function matchIn(id: string, norm: string, host: string, domain: string): MatchK
   const idx = indexes.get(id)
   if (!idx) return null
   if (idx.urls.has(norm)) return 'url'
+  // Every link on a shortener shares its hostname, so a listed short link says nothing
+  // about another one. Only the exact URL counts there.
+  if (SHORTENERS.has(domain)) return null
   if (idx.hosts.has(host)) return 'host'
-  if (idx.domains.has(domain)) return 'domain'
+  // A shared platform is in the domain index because of one customer's subdomain, so a
+  // domain match there would flag every other customer.
+  if (idx.domains.has(domain) && !SHARED_HOSTING.has(domain)) return 'domain'
   return null
 }
 

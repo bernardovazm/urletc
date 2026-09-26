@@ -1313,6 +1313,34 @@ with sync_playwright() as p:
     _ca.close()
     _cb.close()
 
+    # URL Check: one phishing page on a shared host or one short link in a feed does not
+    # flag every other link there. The registrable domain of any *.vercel.app host is
+    # vercel.app, so a single listed page used to mark every Vercel site, this app's own
+    # included, as a related listing. The feed is stubbed so the listed entries are known.
+    rc, rp = rf_open()
+    rc.route('https://raw.githubusercontent.com/openphish/public_feed/main/feed.txt',
+             lambda r: r.fulfill(status=200, body='https://phish-page.vercel.app/login\nhttps://tinyurl.com/abc123\nhttps://login.evil-example.com/x\n',
+                                 headers={'Access-Control-Allow-Origin': '*', 'Content-Type': 'text/plain'}))
+    rp.evaluate("location.hash = '#/t/url-check'")
+    ruc = rp.locator('details.card[data-tool="url-check"] .card-body')
+    ruc.locator('input.full').wait_for(timeout=10000)
+
+    def uc_feed(url):
+        ruc.locator('input.full').fill(url)
+        ruc.locator('button', has_text='Check').first.click()
+        rpoll(rp, lambda: ruc.locator('.url-check-feedresult').count() == 1, 15)
+        return ruc.locator('.url-check-feedresult').inner_text() if ruc.locator('.url-check-feedresult').count() else '(no feed result)'
+    for _url, _want, _label in [
+        ('https://someone-else.vercel.app/', 'Not on OpenPhish', 'another site on a listed shared host is not a listing'),
+        ('https://phish-page.vercel.app/other', 'this hostname is listed', 'the listed host on a shared platform still matches'),
+        ('https://tinyurl.com/zzz999', 'Not on OpenPhish', 'another short link on a listed shortener is not a listing'),
+        ('https://tinyurl.com/abc123', 'this exact URL is listed', 'the listed short link itself still matches'),
+        ('https://sub.evil-example.com/', 'the registrable domain is listed', 'a sibling of a listed ordinary domain still matches'),
+    ]:
+        _got = uc_feed(_url)
+        check(f'url-check feeds: {_label}', _want in _got, f'{_url}: {_got[:120]!r}')
+    rc.close()
+
     # --- 13n. Studio (VDO.ninja-style A/V): publish controls, labeled source, layouts, stage link ---
     page.evaluate("location.hash = '#/t/studio'")
     page.wait_for_timeout(500)

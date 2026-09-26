@@ -236,9 +236,10 @@ async function buildActions(d: Detected, body: HTMLElement, ctx: ToolContext): P
     case 'json': {
       let formatted = d.text ?? ''
       try {
-        formatted = JSON.stringify(JSON.parse(d.text ?? ''), null, 2)
+        const { parseJson } = await import('../json-lossless')
+        formatted = JSON.stringify(parseJson(d.text ?? ''), null, 2)
       } catch {
-        /* leave as-is */
+        /* leave as-is, including when reformatting would change a number */
       }
       const out = el('pre', { text: formatted })
       body.append(out, el('div', { class: 'row' }, [copyButton(() => out.textContent ?? '', ctx.clipboard.write)]))

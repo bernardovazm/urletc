@@ -6,6 +6,7 @@
 // That is why declarative tools get a lower consent barrier.
 
 import { z } from '../core/zod'
+import { isRawJson, parseJson } from '../tools/json-lossless'
 
 export const StepSchema = z.discriminatedUnion('op', [
   z.object({ op: z.literal('json.parse') }),
@@ -32,7 +33,7 @@ function asString(v: unknown): string {
 
 function sortKeys(v: unknown, recursive: boolean): unknown {
   if (Array.isArray(v)) return recursive ? v.map((x) => sortKeys(x, true)) : v
-  if (v && typeof v === 'object') {
+  if (v && typeof v === 'object' && !isRawJson(v)) {
     const obj = v as Record<string, unknown>
     const out: Record<string, unknown> = {}
     for (const k of Object.keys(obj).sort()) out[k] = recursive ? sortKeys(obj[k], true) : obj[k]
@@ -73,7 +74,7 @@ export async function runAutomation(steps: Step[], input: string): Promise<strin
   for (const step of steps) {
     switch (step.op) {
       case 'json.parse':
-        value = JSON.parse(asString(value))
+        value = parseJson(asString(value))
         break
       case 'json.stringify':
         value = JSON.stringify(value, null, step.indent)

@@ -1,5 +1,6 @@
 import type { ToolContext, ToolModule } from '../shell/registry'
 import { button, copyButton, el, toast } from '../shell/ui'
+import { JsonPrecisionError, parseJson } from './json-lossless'
 
 const tool: ToolModule = {
   activate(container: HTMLElement, ctx: ToolContext) {
@@ -8,12 +9,12 @@ const tool: ToolModule = {
 
     const run = (indent: number) => {
       try {
-        const parsed: unknown = JSON.parse(input.value)
+        const parsed = parseJson(input.value)
         out.classList.remove('muted')
         out.textContent = JSON.stringify(parsed, null, indent)
       } catch (e) {
         out.classList.remove('muted')
-        out.textContent = `Invalid JSON: ${(e as Error).message}`
+        out.textContent = e instanceof JsonPrecisionError ? `Not reformatted: ${e.message}` : `Invalid JSON: ${(e as Error).message}`
       }
     }
 

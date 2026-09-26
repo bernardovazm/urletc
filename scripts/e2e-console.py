@@ -1119,6 +1119,8 @@ with sync_playwright() as p:
     # takes one made with nothing editable focused. Its listener is document-wide and the
     # card opens by itself once clipboard-read is granted.
     rc, rp = rf_open(['clipboard-read', 'clipboard-write'])
+    # The console opens a Clipboard card by itself when the clipboard already holds
+    # something, so the card this deep link opens is the last one, not the only one.
     rp.evaluate("location.hash = '#/t/clipboard'")
     rcb = rp.locator('details.card[data-tool="clipboard"]').last
     rcb.locator('button', has_text='Scan clipboard').wait_for(timeout=10000)
@@ -1339,6 +1341,47 @@ with sync_playwright() as p:
     ]:
         _got = uc_feed(_url)
         check(f'url-check feeds: {_label}', _want in _got, f'{_url}: {_got[:120]!r}')
+    rc.close()
+
+    # Reformatting JSON keeps every number as written. A round trip through JSON.parse
+    # turned 1234567890123456789 into 1234567890123456800, output that still looks valid
+    # and gets copied. Driven through the formatter, the Clipboard card's JSON view and
+    # the Workshop's default JSON Sorter automation, which parses, sorts keys and prints.
+    RJSON = '{"n": 42, "id": 1234567890123456789, "b": 1.50}'
+    rc, rp = rf_open(['clipboard-read', 'clipboard-write'])
+    rp.evaluate("location.hash = '#/t/json-format'")
+    rjf = rp.locator('details.card[data-tool="json-format"]')
+    rjf.locator('textarea').fill(RJSON)
+    rjf.locator('button', has_text='Format').click()
+    _fmt = rjf.locator('pre').inner_text()
+    check('json-format: Format keeps an integer above 2^53 and a decimal as written',
+          '"id": 1234567890123456789' in _fmt and '"b": 1.50' in _fmt, repr(_fmt))
+    rjf.locator('button', has_text='Minify').click()
+    _min = rjf.locator('pre').inner_text()
+    check('json-format: Minify keeps them too', _min == '{"n":42,"id":1234567890123456789,"b":1.50}', repr(_min))
+    rp.evaluate("location.hash = '#/t/clipboard'")
+    rcb = rp.locator('details.card[data-tool="clipboard"]').last
+    rcb.locator('button', has_text='Scan clipboard').wait_for(timeout=10000)
+    rp.evaluate(f'navigator.clipboard.writeText({RJSON!r})')
+    rp.evaluate('document.activeElement.blur()')
+    rp.keyboard.press('Control+V')
+    rpoll(rp, lambda: '1234567890123456' in rcb.inner_text(), 5)
+    check('clipboard card: the JSON view keeps an integer above 2^53',
+          '"id": 1234567890123456789' in rcb.inner_text(), rcb.inner_text()[-160:])
+    rp.evaluate("location.hash = '#/t/workshop'")
+    rws = rp.locator('details.card[data-tool="workshop"]')
+    rws.locator('button', has_text='Sign & install').wait_for(timeout=15000)
+    rws.locator('button', has_text='Sign & install').click()
+    rp.locator('.modal button', has_text='Install').click()
+    _row = rws.locator('.card', has_text='JSON Sorter')
+    _row.wait_for(timeout=10000)
+    rp.evaluate(f'navigator.clipboard.writeText({RJSON!r})')
+    _row.locator('button', has_text=re.compile(r'^Run$')).click()
+    rp.locator('.modal button', has_text='Run once').click()
+    _auto = rws.locator('pre').last
+    rpoll(rp, lambda: _auto.inner_text().startswith('{'), 5)
+    check('workshop automation: sorting keys keeps an integer above 2^53',
+          _auto.inner_text() == '{\n  "b": 1.50,\n  "id": 1234567890123456789,\n  "n": 42\n}', repr(_auto.inner_text()))
     rc.close()
 
     # --- 13n. Studio (VDO.ninja-style A/V): publish controls, labeled source, layouts, stage link ---

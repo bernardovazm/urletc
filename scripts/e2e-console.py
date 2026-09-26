@@ -3033,6 +3033,35 @@ with sync_playwright() as p:
     fctx_a.close()
     fctx_b.close()
 
+    # --- a double click on New random code leaves the device in the room it shows ---
+    # A second switch issued while the first was still leaving joined its own room, and
+    # the first then adopted that session under its own code, so the chip named a room the
+    # device was not in and whoever used it never arrived. Both contexts leave nearby, so
+    # the joiner can only be met through the code room.
+    RC_START = 'x' + os.urandom(3).hex()
+    rctx_a = browser.new_context()
+    rctx_b = browser.new_context()
+    rc_a = rctx_a.new_page()
+    rc_a.goto(f'{BASE}/#/join/{RC_START}')
+    rc_a.wait_for_selector('.composer', timeout=30000)
+    check('the switching context drops the shared nearby tier', nearby_off(rc_a))
+    rc_chip = lambda: rc_a.locator('button.code-chip').inner_text().strip().lower()
+    poll(lambda: rc_chip() == RC_START, 20)
+    rc_a.locator('.topbar button', has_text='Connect').click()
+    rc_a.locator('.modal button', has_text='New random code').dblclick()
+    rc_settled = poll(lambda: rc_chip() not in ('', RC_START) and rc_a.locator('.modal .code-big').inner_text().strip().lower() == rc_chip(), 20)
+    rc_a.keyboard.press('Escape')
+    rc_code = rc_chip()
+    check('the chip settles on a new code', bool(rc_settled), rc_code)
+    rc_b = rctx_b.new_page()
+    rc_b.goto(f'{BASE}/#/join/{rc_code}')
+    rc_b.wait_for_selector('.composer', timeout=30000)
+    check('the joiner drops the shared nearby tier', nearby_off(rc_b))
+    check('someone who uses the code the chip shows reaches the device',
+          bool(poll(lambda: rc_a.evaluate(CODE_PEERS) >= 1, 150)), rc_a.locator('.sidebar').inner_text()[:200])
+    rctx_a.close()
+    rctx_b.close()
+
     # --- touch: the per-card delete control, driven by real taps ---
     # Every assertion above drives a desktop viewport with a mouse, so a control that does
     # nothing on a phone passes them all. Revealing it wherever there is no hover is the

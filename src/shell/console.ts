@@ -2241,8 +2241,19 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
 
   /** Switch the code room: null = just leave; a code = leave current + join that one.
    *  The active code is persisted so it survives a reload: same code next visit,
-   *  whether it was auto-generated, self-chosen, or one you joined. */
-  async function setCode(code: string | null): Promise<boolean> {
+   *  whether it was auto-generated, self-chosen, or one you joined.
+   *
+   *  Switches run one at a time. A second one issued while the first was still leaving
+   *  (a double click, a repeating Enter) found the tier empty and joined its own room;
+   *  the first then took that session as its own, so the chip named one room while the
+   *  device sat in another, or both stayed joined with the live media joinTier adds. */
+  let codeSwitch: Promise<unknown> = Promise.resolve()
+  function setCode(code: string | null): Promise<boolean> {
+    const run = codeSwitch.then(() => switchCode(code))
+    codeSwitch = run.catch(() => {})
+    return run
+  }
+  async function switchCode(code: string | null): Promise<boolean> {
     await leaveTier('code')
     if (code) {
       codeLabel = code

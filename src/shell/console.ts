@@ -659,8 +659,8 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     () => {
       const c = !tilesRegion.classList.contains('tiles-collapsed')
       setTilesCollapsed(c)
-      // An expanded stage hides the feed, so collapsing the tiles inside it left a window
-      // with neither the stage nor the feed on it. Collapsing hands the room back.
+      // An expanded stage keeps its column with its tiles collapsed, which left that column
+      // empty. Collapsing hands the room back to the feed.
       if (c && stageMaxOn()) {
         setStageMax(false)
         autoMaxBy = null

@@ -657,15 +657,27 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   const tilesCollapseBtn = button(
     '🔽',
     () => {
-      const c = tilesRegion.classList.toggle('tiles-collapsed')
-      tilesCollapseBtn.textContent = c ? '🔼' : '🔽'
+      const c = !tilesRegion.classList.contains('tiles-collapsed')
+      setTilesCollapsed(c)
+      // An expanded stage hides the feed, so collapsing the tiles inside it left a window
+      // with neither the stage nor the feed on it. Collapsing hands the room back.
+      if (c && stageMaxOn()) {
+        setStageMax(false)
+        autoMaxBy = null
+      }
     },
     'icon sm',
     'Collapse / expand the video tiles (streams keep running)',
   )
+  function setTilesCollapsed(on: boolean): void {
+    tilesRegion.classList.toggle('tiles-collapsed', on)
+    tilesCollapseBtn.textContent = on ? '🔼' : '🔽'
+    tilesCollapseBtn.setAttribute('aria-expanded', String(!on))
+  }
   const stageCount = el('span', { class: 'muted small', text: 'Streams' })
   const tilesHead = el('div', { class: 'tiles-head' }, [stageCount, el('span', { class: 'spacer' }), tilesCollapseBtn])
   const tilesRegion = el('div', { class: 'tiles-region' }, [tilesHead, tiles])
+  setTilesCollapsed(false)
 
   // ---------- roster ----------
   const peersBox = el('div', { class: 'peers' })
@@ -1086,6 +1098,10 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   // offering "Expand" on an already expanded stage.
   function setStageMax(on: boolean): void {
     document.documentElement.classList.toggle('stage-max', on)
+    // The collapsed state outlives the tiles: it stays on the region after a share ends, so
+    // the next share expanded a stage whose tiles were still hidden and the viewer got an
+    // empty window while everyone else watched the screen.
+    if (on) setTilesCollapsed(false)
     expandBtn.textContent = on ? '🔲' : '🔳'
     const t = on ? 'Shrink the stage back into the feed' : 'Expand the stage to fill the window'
     expandBtn.title = t

@@ -2319,6 +2319,12 @@ with sync_playwright() as p:
         # keeps offering "Expand" on an already expanded stage.
         check('the expand control reads as shrink once a share expanded the stage',
               sh_b.locator('.tiles-head button[title*="Shrink the stage"]').count() == 1)
+        # Collapsing the tiles of an expanded stage used to leave it expanded over hidden
+        # tiles with the feed hidden too: an empty window.
+        sh_b.locator('.tiles-head button[title*="Collapse"]').click()
+        check('collapsing an expanded stage gives the window back to the feed',
+              bool(poll(lambda: not theater(sh_b) and sh_b.locator('.feed').is_visible(), 5)),
+              'stage-max=%s feed=%s' % (theater(sh_b), sh_b.locator('.feed').is_visible()))
         sh_a.locator('.composer .bar button[title*="Stop sharing"]').click()
         ended = poll(lambda: sh_b.locator('.tiles .stage-tile').count() == 0, 60)
         check('the tile goes when the share stops', bool(ended), sh_b.locator('.feed').inner_text()[-160:])
@@ -2331,6 +2337,10 @@ with sync_playwright() as p:
         again = poll(lambda: sh_b.locator('.tiles .stage-tile').count() > 0, 90)
         expanded_again = bool(again) and theater(sh_b)
         check('a second screen share expands the stage again', expanded_again)
+        # The collapse above outlived the first share, so this share would expand a stage
+        # with its tiles still hidden: blank for this viewer alone.
+        check('a share arriving after a collapse shows its tile',
+              bool(again) and sh_b.locator('.tiles .stage-tile').first.is_visible())
         # The shrink control only exists once something expanded the stage, so the two
         # assertions below are reported rather than clicked into a timeout that would
         # abort every section after this one.

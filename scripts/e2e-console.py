@@ -2775,6 +2775,52 @@ with sync_playwright() as p:
     kctx_a.close()
     kctx_b.close()
 
+    # --- a stranger on the nearby tier cannot take over the stage ---
+    # No stock client publishes into nearby, so the sender here is a modified client: the
+    # stock page with its nearby session captured as it is stored and handed a screen
+    # directly. The viewer counts the tracks its peer connections receive, which shows the
+    # stream really arrives, and has to refuse to put it on the stage.
+    GRAB_NEARBY = """
+      const realSet = Map.prototype.set
+      Map.prototype.set = function (k, v) {
+        if (k === 'nearby' && v && typeof v.addMedia === 'function') window.__nearby = v
+        return realSet.call(this, k, v)
+      }
+    """
+    COUNT_TRACKS = """
+      window.__tracks = 0
+      const RealPC = window.RTCPeerConnection
+      window.RTCPeerConnection = new Proxy(RealPC, {
+        construct(target, args) {
+          const pc = new target(...args)
+          pc.addEventListener('track', () => { window.__tracks++ })
+          return pc
+        },
+      })
+    """
+    nctx_x = browser.new_context()
+    nctx_x.add_init_script(FAKE_SCREEN)
+    nctx_x.add_init_script(GRAB_NEARBY)
+    nctx_v = browser.new_context()
+    nctx_v.add_init_script(COUNT_TRACKS)
+    nb_x, nb_v = nctx_x.new_page(), nctx_v.new_page()
+    for _pg in (nb_x, nb_v):
+        _pg.goto(f'{BASE}/#/join/x{os.urandom(3).hex()}')
+        _pg.wait_for_selector('.composer', timeout=30000)
+    nb_open = poll(lambda: nb_x.evaluate('!!window.__nearby'), 30)
+    check('the sending context has a nearby session to abuse', bool(nb_open))
+    if nb_open:
+        nb_x.evaluate("async () => window.__nearby.addMedia(await navigator.mediaDevices.getDisplayMedia(),"
+                      " { kind: 'screen', label: 'Your screen' })")
+        nb_arrived = poll(lambda: nb_v.evaluate('window.__tracks') > 0, 150)
+        check("a nearby stranger's stream reaches the viewer's peer connection", bool(nb_arrived))
+        check('and is never put on the stage',
+              bool(nb_arrived) and not poll(lambda: nb_v.locator('.tiles .stage-tile').count() > 0, 5),
+              '%d tiles' % nb_v.locator('.tiles .stage-tile').count())
+        check('nor expands it over the feed', not theater(nb_v))
+    nctx_x.close()
+    nctx_v.close()
+
     # --- touch: the per-card delete control, driven by real taps ---
     # Every assertion above drives a desktop viewport with a mouse, so a control that does
     # nothing on a phone passes them all. Revealing it wherever there is no hover is the

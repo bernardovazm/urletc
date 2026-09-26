@@ -49,9 +49,10 @@ const LISTING_ORDER: Tier[] = ['personal', 'code', 'nearby', 'presence']
  *  and nothing else, so it is excluded here as well as from MEDIA_TIERS; the session it
  *  opens is additionally `presenceOnly`, which enforces the same thing one layer down. */
 const BROADCAST_TIERS: Tier[] = ['personal', 'nearby', 'code']
-/** Tiers allowed to receive local camera/mic/screen. An allow-list on purpose: written as
- *  a deny-list (`t !== 'nearby'`), every tier added later would be opted in to publishing
- *  the local camera to it. */
+/** Tiers allowed to receive local camera/mic/screen, and the only tiers whose inbound
+ *  streams are rendered. An allow-list on purpose: written as a deny-list
+ *  (`t !== 'nearby'`), every tier added later would be opted in to publishing the local
+ *  camera to it. */
 const MEDIA_TIERS: Tier[] = ['personal', 'code']
 /** Tiers whose sessions may replay what was said before a peer arrived. An allow-list for
  *  the same reason MEDIA_TIERS is one: `nearby` is strangers who happen to share a public
@@ -2117,7 +2118,12 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
       if (isDropped(peerId)) return // `dropped` is keyed by deviceId, so ask through the peerId helper
       askToShareHistory(peerId, tier)
     },
-    onPeerStream: (peerId, stream, meta) => maybeAttachStream(peerId, stream, meta),
+    // Inbound media is taken only on the tiers local media is published to. No stock client
+    // publishes into nearby, so a stream arriving there is a modified client behind the
+    // same public IP, and a 'screen' one would take over the stage.
+    onPeerStream: (peerId, stream, meta) => {
+      if (MEDIA_TIERS.includes(tier)) maybeAttachStream(peerId, stream, meta)
+    },
     onPeerLeave: (peerId) => {
       if (!isPresent(peerId)) dropPeerMedia(peerId)
       renderRoster()

@@ -371,6 +371,15 @@ const BRANDS = [
   'revolut',
 ]
 
+// Registrable domains a brand's owner serves that brand from under another name, so the
+// brand in front of them is first party: outlook.office.com, onedrive.live.com. Without
+// this, Microsoft's own mail and storage addresses read as the paypal.com.evil.tld pattern.
+const BRAND_OWNED: Record<string, readonly string[]> = {
+  outlook: ['office.com', 'office365.com', 'live.com', 'microsoft.com'],
+  onedrive: ['live.com', 'office.com', 'microsoft.com'],
+  office365: ['office.com', 'microsoft.com'],
+}
+
 const RISKY_EXT = ['exe', 'scr', 'msi', 'bat', 'cmd', 'apk', 'jar', 'vbs', 'hta', 'ps1', 'lnk', 'iso', 'dmg', 'pif']
 
 const IPV4 = /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/
@@ -554,6 +563,7 @@ export function analyzeUrl(input: string): Report | null {
     const rest = `${u.pathname} ${u.search}`.toLowerCase()
     for (const brand of BRANDS) {
       if (sld.toLowerCase().includes(brand)) continue
+      if (BRAND_OWNED[brand]?.includes(domain.toLowerCase())) continue
       if (front.includes(brand)) {
         add(
           'high',

@@ -1408,6 +1408,32 @@ with sync_playwright() as p:
         check(f'html-strip: {_label}', _got == _want, repr(_got))
     rc.close()
 
+    # URL Check reads Microsoft's own Outlook and OneDrive addresses as first party. The
+    # brand sits in a subdomain of another domain the same company owns, and each used to
+    # draw a high "brand in a subdomain" finding. The same brand in front of a stranger's
+    # domain must still be flagged. The feed is stubbed so no network answer is involved.
+    rc, rp = rf_open()
+    rc.route('https://raw.githubusercontent.com/openphish/public_feed/main/feed.txt',
+             lambda r: r.fulfill(status=200, body='https://login.evil-example.com/x\n',
+                                 headers={'Access-Control-Allow-Origin': '*', 'Content-Type': 'text/plain'}))
+    rp.evaluate("location.hash = '#/t/url-check'")
+    ruc = rp.locator('details.card[data-tool="url-check"] .card-body')
+    ruc.locator('input.full').wait_for(timeout=10000)
+    for _url, _flag in [
+        ('https://outlook.office.com/mail/', False),
+        ('https://onedrive.live.com/', False),
+        ('https://outlook.live.com/owa/', False),
+        ('https://outlook.office.com.evil-login.tk/', True),
+        ('https://onedrive.live-files.com/', True),
+    ]:
+        ruc.locator('input.full').fill(_url)
+        ruc.locator('button', has_text='Check').first.click()
+        rpoll(rp, lambda: ruc.locator('.url-check-structural').count() == 1, 5)
+        _st = ruc.locator('.url-check-structural').inner_text()
+        check(f"url-check: {_url} {'is' if _flag else 'is not'} flagged as a brand in a subdomain",
+              ('sits in a subdomain' in _st) == _flag, _st[:140])
+    rc.close()
+
     # --- 13n. Studio (VDO.ninja-style A/V): publish controls, labeled source, layouts, stage link ---
     page.evaluate("location.hash = '#/t/studio'")
     page.wait_for_timeout(500)

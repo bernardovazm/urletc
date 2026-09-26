@@ -1471,6 +1471,45 @@ with sync_playwright() as p:
         check('studio: the refreshed stage link points at the new code', ('#/stage/' + _code) in _clip.lower(), f'{_code!r} {_clip!r}')
     rc.close()
 
+    # A signed tool whose type names one tier and whose body carries another is refused on
+    # import, while the same body under its own type installs and lists as that type. The
+    # manifests are signed in the page with a fresh key, the way another author would.
+    RSIGN = """async ([type, kind, name]) => {
+      const enc = new TextEncoder()
+      const canon = (v) => v === null || typeof v !== 'object' ? JSON.stringify(v)
+        : Array.isArray(v) ? '[' + v.map(canon).join(',') + ']'
+        : '{' + Object.keys(v).sort().map((k) => JSON.stringify(k) + ':' + canon(v[k])).join(',') + '}'
+      const hex = (b) => [...new Uint8Array(b)].map((x) => x.toString(16).padStart(2, '0')).join('')
+      const hash = async (v) => 'sha256:' + hex(await crypto.subtle.digest('SHA-256', enc.encode(canon(v))))
+      const kp = await crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify'])
+      const pub = hex(await crypto.subtle.exportKey('raw', kp.publicKey))
+      const body = { kind, source: '<p>app body</p>' }
+      const permissions = ['storage']
+      const contentHash = await hash(body)
+      const id = await hash({ name, version: '1', type, permissions, contentHash })
+      const meta = { id, name, version: '1', type, author: { pubkey: 'ed25519:' + pub, displayName: 'peer' }, createdAt: 1, permissions, contentHash }
+      const sig = new Uint8Array(await crypto.subtle.sign('Ed25519', kp.privateKey, enc.encode(canon(meta))))
+      return JSON.stringify({ ...meta, body, sig: 'ed25519:' + btoa(String.fromCharCode(...sig)) })
+    }"""
+    rc, rp = rf_open()
+    rp.evaluate("location.hash = '#/t/workshop'")
+    rws = rp.locator('details.card[data-tool="workshop"]')
+    rws.locator('button', has_text='Sign & install').wait_for(timeout=15000)
+    _bad = rp.evaluate(RSIGN, ['automation', 'html', 'Disguised'])
+    rws.locator('input[type=file]').set_input_files(files=[{'name': 'd.wtool.json', 'mimeType': 'application/json', 'buffer': _bad.encode()}])
+    check('workshop import: an automation carrying an html body is rejected',
+          bool(rpoll(rp, lambda: rp.locator('.toast', has_text='type / body mismatch').count() > 0, 5)),
+          ' | '.join(rp.locator('.toast').all_inner_texts()))
+    check('workshop import: the mislabelled tool gets no consent dialog and no list entry',
+          rp.locator('.modal').count() == 0 and rws.locator('.card', has_text='Disguised').count() == 0)
+    _good = rp.evaluate(RSIGN, ['html', 'html', 'Honest'])
+    rws.locator('input[type=file]').set_input_files(files=[{'name': 'h.wtool.json', 'mimeType': 'application/json', 'buffer': _good.encode()}])
+    rp.locator('.modal button', has_text='Install').click(timeout=5000)
+    _hrow = rws.locator('.card', has_text='Honest')
+    check('workshop import: the same body under its own type installs and lists as html',
+          bool(rpoll(rp, lambda: _hrow.count() == 1 and 'v1, html' in _hrow.inner_text(), 5)))
+    rc.close()
+
     # --- 13n. Studio (VDO.ninja-style A/V): publish controls, labeled source, layouts, stage link ---
     page.evaluate("location.hash = '#/t/studio'")
     page.wait_for_timeout(500)

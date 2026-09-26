@@ -108,8 +108,15 @@ export async function signManifest(id: DeviceIdentity, displayName: string, draf
   return { ...meta, body: draft.body, sig: `ed25519:${bytesToB64(sig)}` }
 }
 
+// Lists and toasts label a tool by `type`, while run() dispatches on `body.kind`, so a
+// signed manifest could otherwise be listed as an automation and run a script or an app.
+// Checked in verifyManifest because every path (gossip, import, load, run) goes through it,
+// including stored manifests that are never schema-parsed.
+const BODY_KIND = { automation: 'rules', script: 'script', html: 'html' } as const
+
 /** Validate integrity (hashes) and authenticity (signature) of an untrusted manifest. */
 export async function verifyManifest(m: Manifest): Promise<{ ok: boolean; reason?: string }> {
+  if (BODY_KIND[m.type] !== m.body?.kind) return { ok: false, reason: 'type / body mismatch' }
   if ((await hashOf(m.body)) !== m.contentHash) return { ok: false, reason: 'content hash mismatch' }
   const expectId = await hashOf({ name: m.name, version: m.version, type: m.type, permissions: m.permissions, contentHash: m.contentHash })
   if (expectId !== m.id) return { ok: false, reason: 'id / content mismatch' }

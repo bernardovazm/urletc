@@ -596,7 +596,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     for (const [peerId, p] of [...historyPrompts]) {
       if (p.tier !== tier) continue
       historyPrompts.delete(peerId)
-      p.card.remove()
+      p.card.closest('.feed-item')?.remove() // the wrapper, or its delete control stays behind
     }
   }
   function askToShareHistory(peerId: string, tier: Tier): void {
@@ -608,7 +608,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     const drop = () => {
       const p = historyPrompts.get(peerId)
       historyPrompts.delete(peerId)
-      p?.card.remove()
+      p?.card.closest('.feed-item')?.remove()
     }
     const card = el('div', { class: 'sys' })
     const send = button(

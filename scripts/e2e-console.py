@@ -3158,6 +3158,37 @@ with sync_playwright() as p:
     mctx_a.close()
     mctx_b.close()
 
+    # --- an answered history prompt leaves nothing behind in the feed ---
+    # Answering removed the prompt's card but not the feed item around it, which kept a
+    # gap and a focusable "Remove from feed" control with nothing left to remove. Both
+    # answers that take the prompt away are driven, since they remove it by two paths. The
+    # message is typed alone, so it goes only to the peers of this block's own room.
+    EMPTY_ITEMS = ("() => [...document.querySelectorAll('.feed-item')]"
+                   ".filter(w => [...w.children].every(c => c.matches('button.del'))).length")
+    HQ_CODE = 'x' + os.urandom(3).hex()
+    qctx_a = browser.new_context()
+    hq_a = qctx_a.new_page()
+    hq_a.goto(f'{BASE}/#/join/{HQ_CODE}')
+    hq_a.wait_for_selector('.composer', timeout=30000)
+    check('the prompting context drops the shared nearby tier', nearby_off(hq_a))
+    hq_a.locator('.composer textarea').fill('prm' + os.urandom(3).hex())
+    hq_a.locator('.composer textarea').press('Enter')
+    hq_ask = hq_a.locator('.sys', has_text='asked for the')
+    for hq_answer in ('No', 'Always in code rooms'):
+        hq_ctx = browser.new_context()
+        hq_peer = hq_ctx.new_page()
+        hq_peer.goto(f'{BASE}/#/join/{HQ_CODE}')
+        hq_peer.wait_for_selector('.composer', timeout=30000)
+        hq_up = poll(lambda: hq_ask.count() == 1, 150)
+        check(f'a joiner raises the history prompt ({hq_answer})', bool(hq_up), hq_a.locator('.feed').inner_text()[-160:])
+        if hq_up:
+            hq_ask.locator('button', has_text=hq_answer).click()
+            check(f'answering {hq_answer} takes the prompt away', bool(poll(lambda: hq_ask.count() == 0, 5)))
+            check(f'and leaves no empty feed item behind ({hq_answer})', hq_a.evaluate(EMPTY_ITEMS) == 0,
+                  '%d empty' % hq_a.evaluate(EMPTY_ITEMS))
+        hq_ctx.close()
+    qctx_a.close()
+
     # --- touch: the per-card delete control, driven by real taps ---
     # Every assertion above drives a desktop viewport with a mouse, so a control that does
     # nothing on a phone passes them all. Revealing it wherever there is no hover is the

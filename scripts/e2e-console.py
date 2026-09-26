@@ -2314,6 +2314,11 @@ with sync_playwright() as p:
         check('the backgrounded receiver restores its title on return',
               sh_b.title() == sh_base_title, sh_b.title())
         check('sharing your own screen expands the stage', theater(sh_a))
+        # The screen's video track is not a camera: "Turn your camera off" on a screen share
+        # blanked the screen for every viewer.
+        check('a screen share raises no camera or microphone toggle',
+              not sh_a.locator('.composer .bar button[title*="your camera o"]').is_visible()
+              and not sh_a.locator('.composer .bar button[title*="Mute your microphone"]').is_visible())
         check('an arriving screen share expands the receiving stage', bool(arrived) and theater(sh_b))
         check('the arriving screen share is the spotlight', sh_b.locator('.stage-tile.spot').count() == 1)
         # The class is set past the button, so the button has to be told; otherwise it

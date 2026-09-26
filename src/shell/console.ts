@@ -1576,8 +1576,11 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
       toast('Camera/mic/screen denied or unavailable')
     }
   }
-  /** Every local track of one kind, across all published streams. */
-  const localTracksOf = (k: 'audio' | 'video') => [...localStreams.keys()].flatMap((st) => (k === 'audio' ? st.getAudioTracks() : st.getVideoTracks()))
+  /** Every local track of one kind across the camera and mic streams. A screen share is left
+   *  out: its video track is not a camera, and "Turn your camera off" blanked the shared
+   *  screen for every viewer. A screen share is stopped, not blanked. */
+  const localTracksOf = (k: 'audio' | 'video') =>
+    [...localStreams].filter(([, m]) => m.kind !== 'screen').flatMap(([st]) => (k === 'audio' ? st.getAudioTracks() : st.getVideoTracks()))
 
   /** Mute the mic / blank the camera by flipping `track.enabled`, deliberately not by
    *  stopping the track: stopping tears the source down, removes it from every session and

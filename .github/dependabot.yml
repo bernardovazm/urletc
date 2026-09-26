@@ -17,6 +17,12 @@ updates:
       # Drop this entry once typescript-eslint supports TS >= 7.1.
       - dependency-name: typescript
         versions: ['>=7.0.0']
+      # From 0.25.4 the Nostr adapter closes a relay for the rest of the page's life on its
+      # first rejected event, backs announcing off for up to 15 minutes on a rate limit, and
+      # announces once a minute after warmup instead of every 5.3 s. With three relays, a
+      # tab left open all day can lose every relay and stop finding peers.
+      - dependency-name: trystero
+        versions: ['>=0.25.4']
   # The actions share one workflow file and one CI run, so one pull request covers them all.
   - package-ecosystem: github-actions
     directory: /

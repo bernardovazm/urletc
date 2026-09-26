@@ -4939,6 +4939,64 @@ with sync_playwright() as p:
     check('store: no page error across the re-key paths', not kx_errs, ' | '.join(kx_errs)[:200])
     kx_ctx.close()
 
+    # --- service worker: an update never reloads a tab out from under live media ---
+    # A deployed worker activates and claims every open tab as soon as any tab of the
+    # origin navigates, and the plugin's default reload ended calls and shares on the spot.
+    # Registering the worker under a second script URL is the same update as a deploy:
+    # workbox-window reports it as an external update and the shipped onNeedReload runs.
+    # Nearby is switched off so this tab has no peer, which leaves the camera as the only
+    # thing holding the reload back.
+    up_ctx = browser.new_context(permissions=['microphone', 'camera'])
+    up_ctx.add_init_script(VISIBILITY)
+    up_pg = up_ctx.new_page()
+    up_errs = []
+    up_pg.on('pageerror', lambda e: up_errs.append(str(e)))
+    up_pg.goto(f'{BASE}/#/join/x{os.urandom(3).hex()}')
+    up_pg.wait_for_selector('.composer', timeout=30000)
+    up_pg.evaluate("location.hash = '#/t/settings'")
+    up_nb = up_pg.locator('label', has_text='Nearby discovery').locator('input[type=checkbox]')
+    up_nb.first.wait_for(state='attached', timeout=20000)
+    up_nb.first.uncheck()
+    up_pg.evaluate("location.hash = ''")
+    try:
+        up_pg.wait_for_function("() => navigator.serviceWorker.getRegistration().then((r) => !!(r && r.active))",
+                                timeout=20000)
+        _up_sw = True
+    except Exception:
+        _up_sw = False
+    check('update: the page has an active service worker to update', _up_sw)
+    up_pg.locator('button[title^="Share your camera"]').click()
+    try:
+        up_pg.wait_for_function("() => [...document.querySelectorAll('video')].some((v) => v.srcObject"
+                                " && v.srcObject.getTracks().some((t) => t.readyState === 'live'))", timeout=15000)
+        _up_cam = True
+    except Exception:
+        _up_cam = False
+    check('update: the camera is live before the update lands', _up_cam)
+    up_pg.evaluate('window.__upAlive = 1')
+    up_pg.evaluate("() => navigator.serviceWorker.register('/sw.js?e2e=' + Math.random().toString(36).slice(2))")
+    _up_toast = poll(lambda: up_pg.locator('.toast.update-ready').count() == 1, 20)
+    check('update: a tab with a live camera says an update is ready', bool(_up_toast),
+          up_pg.locator('#toasts').inner_text()[:160])
+    check('update: that tab keeps running instead of reloading', up_pg.evaluate('window.__upAlive') == 1)
+    check('update: the notice carries a Reload button',
+          up_pg.locator('.toast.update-ready button', has_text='Reload').count() == 1)
+    # Absence of a reload cannot be polled for, so this waits out one pass of the 5 s check.
+    up_pg.evaluate('window.__background(true)')
+    up_pg.wait_for_timeout(6000)
+    check('update: hiding the tab does not reload it while the camera is live',
+          up_pg.evaluate('window.__upAlive') == 1)
+    up_pg.evaluate('window.__background(false)')
+    up_pg.locator('button[title="Stop sharing cam/mic/screen"]').click()
+    try:
+        up_pg.wait_for_function('() => window.__upAlive === undefined', timeout=20000)
+        _up_reloaded = True
+    except Exception:
+        _up_reloaded = False
+    check('update: once the camera stops, the idle tab reloads onto the update by itself', _up_reloaded)
+    check('update: no page error on the update path', not up_errs, ' | '.join(up_errs)[:200])
+    up_ctx.close()
+
     # --- service worker registers and its precache install does not reject ---
     # sw.js is a third execution context, and an unhandled rejection inside it reaches
     # neither page.on('console') nor page.on('pageerror'). That is how

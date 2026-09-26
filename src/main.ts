@@ -34,7 +34,45 @@ async function afterUnlock(app: HTMLElement, caps: CryptoCaps): Promise<void> {
   }
 
   await mountConsole(app, caps)
-  registerSW({ immediate: true })
+  registerSW({ immediate: true, onNeedReload: updateWhenIdle })
+}
+
+// After a deploy the new worker activates and claims every open tab as soon as any tab of
+// the origin navigates, and the plugin's default answer is an immediate reload, which ends
+// a call or a share mid-stream. The page keeps running on the old bundle instead, says an
+// update is ready, and reloads by itself once nothing would be lost.
+//
+// Read off the DOM because the state lives inside the console: a media element on a live
+// track is local or remote media, and an ok peer-state badge is a peer that messages
+// reach. A hidden tab with no media reloads even with peers, since they rejoin on their
+// own. An armed close guard would turn the reload into a prompt nobody asked for.
+function liveMedia(): boolean {
+  return [...document.querySelectorAll<HTMLMediaElement>('video, audio')].some(
+    (m) => m.srcObject instanceof MediaStream && m.srcObject.getTracks().some((t) => t.readyState === 'live'),
+  )
+}
+
+function reloadIfIdle(): boolean {
+  if (liveMedia() || document.documentElement.dataset.closeGuard === 'on') return false
+  if (document.visibilityState !== 'hidden' && document.querySelector('.peer-state.ok')) return false
+  location.reload()
+  return true
+}
+
+let updatePending = false
+function updateWhenIdle(): void {
+  if (updatePending || reloadIfIdle()) return
+  updatePending = true
+  document
+    .getElementById('toasts')
+    ?.append(
+      el('div', { class: 'toast update-ready' }, [
+        el('span', { text: 'Update ready. It loads once this tab is idle, or reload when you are done. ' }),
+        button('Reload', () => location.reload(), 'small'),
+      ]),
+    )
+  document.addEventListener('visibilitychange', () => void reloadIfIdle())
+  window.setInterval(() => void reloadIfIdle(), 5000)
 }
 
 function renderUnlock(app: HTMLElement, caps: CryptoCaps): void {

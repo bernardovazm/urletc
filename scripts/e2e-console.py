@@ -1434,6 +1434,19 @@ with sync_playwright() as p:
               ('sits in a subdomain' in _st) == _flag, _st[:140])
     rc.close()
 
+    # Title case capitalises a word that opens with an accented letter on that letter, where
+    # an ASCII-only \w would give "óTimo" and "ÚLtima".
+    rc, rp = rf_open()
+    rp.evaluate("location.hash = '#/t/text-utils'")
+    rtu = rp.locator('details.card[data-tool="text-utils"]')
+    rtu.locator('textarea').wait_for(timeout=10000)
+    rtu.locator('textarea').fill('ótimo ângela ÚLTIMA NOTÍCIA (test) 3rd')
+    rtu.locator('button', has_text=re.compile(r'^Title$')).click()
+    _tc = rtu.locator('pre').inner_text()
+    check('text-utils: Title capitalises accented initials, bracketed words and leaves 3rd alone',
+          _tc == 'Ótimo Ângela Última Notícia (Test) 3rd', repr(_tc))
+    rc.close()
+
     # --- 13n. Studio (VDO.ninja-style A/V): publish controls, labeled source, layouts, stage link ---
     page.evaluate("location.hash = '#/t/studio'")
     page.wait_for_timeout(500)

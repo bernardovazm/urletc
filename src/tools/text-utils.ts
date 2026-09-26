@@ -19,7 +19,9 @@ export function textStats(s: string): TextStats {
   }
 }
 
-const titleCase = (s: string) => s.replace(/\w\S*/g, (w) => w[0].toUpperCase() + w.slice(1).toLowerCase())
+// A word starts at its first letter or digit in any script. \w is ASCII-only and would
+// capitalise "ótimo" from its first ASCII letter, giving "óTimo".
+const titleCase = (s: string) => s.replace(/([\p{L}\p{N}_])(\S*)/gu, (_, first: string, rest: string) => first.toUpperCase() + rest.toLowerCase())
 
 const tool: ToolModule = {
   activate(container: HTMLElement, ctx: ToolContext) {

@@ -2673,6 +2673,33 @@ with sync_playwright() as p:
     ectx_a.close()
     ectx_b.close()
 
+    # --- a remote source is named after its sender ---
+    # The sender's label is self-asserted and read "Your screen" on every viewer's stage, so
+    # a stranger's feed was presented as the viewer's own. The viewer names it from its own
+    # roster instead.
+    LBL_CODE = 'x' + os.urandom(3).hex()
+    lctx_a = browser.new_context()
+    lctx_a.add_init_script(FAKE_SCREEN)
+    lctx_b = browser.new_context()
+    lb_a, lb_b = lctx_a.new_page(), lctx_b.new_page()
+    for _pg in (lb_a, lb_b):
+        _pg.goto(f'{BASE}/#/join/{LBL_CODE}')
+        _pg.wait_for_selector('.composer', timeout=30000)
+    lb_name = lb_a.locator('.sidebar input[aria-label="This device name"]').input_value()
+    lb_reach = poll(lambda: 'connected' in (lb_a.locator('.topbar .badge').inner_text() or ''), 150)
+    check('the labelling contexts reach each other', bool(lb_reach), lb_a.locator('.feed').inner_text()[-160:])
+    lb_a.locator('.composer .bar button[title^="Share your screen"]').click()
+    lb_got = poll(lambda: lb_b.locator('.tiles .stage-tile .tile-name').count() >= 1, 90)
+    lb_plate = lb_b.locator('.tiles .stage-tile .tile-name').first.inner_text() if lb_got else ''
+    check("a viewer's nameplate names the sender, not the viewer",
+          f"{lb_name}'s screen" in lb_plate and 'Your' not in lb_plate, f'{lb_plate!r} sender={lb_name!r}')
+    check("the viewer's tile controls carry the same name",
+          lb_b.locator(f'.stage-tile button[title="Spotlight {lb_name}\'s screen"]').count() == 1)
+    check("the sender's own tile still says Your screen",
+          'Your screen' in lb_a.locator('.tiles .stage-tile .tile-name').first.inner_text())
+    lctx_a.close()
+    lctx_b.close()
+
     # --- touch: the per-card delete control, driven by real taps ---
     # Every assertion above drives a desktop viewport with a mouse, so a control that does
     # nothing on a phone passes them all. Revealing it wherever there is no hover is the

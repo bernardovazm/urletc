@@ -1046,6 +1046,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   })
 
   const labelIcon = (k: SourceKind) => (k === 'screen' ? '🖥' : k === 'mic' ? '🎤' : '🎥')
+  const kindWord = (k: SourceKind) => (k === 'screen' ? 'screen' : k === 'mic' ? 'mic' : 'camera')
   /** Validate untrusted peer stream metadata into {kind,label}, with the label capped. */
   const asMeta = (m: unknown): StreamMeta | null => {
     if (!m || typeof m !== 'object') return null
@@ -1370,7 +1371,10 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     const m = asMeta(meta)
     const peerName = mergedPeers().find((x) => x.peer.peerId === peerId)?.peer.name ?? 'peer'
     const kind: SourceKind = m?.kind ?? (stream.getVideoTracks().length ? 'cam' : 'mic')
-    const label = m?.label ?? peerName
+    // Named from the roster rather than from the label the sender chose: a label such as
+    // "Your screen" presents someone else's feed as the viewer's own, and two sources
+    // sharing one label cannot be told apart.
+    const label = `${peerName}'s ${kindWord(kind)}`
     const tile = addStageTile({ peerId, kind, label, stream })
     startRemote(tile.media)
     if (kind === 'screen') screenTookStage(tile)
@@ -1512,7 +1516,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     addCard(el('div', { class: 'sys' }, [el('span', { text: 'Mic is live. Want on-device captions of what you say? ' }), enable]))
   }
 
-  const kindLabelSelf = (k: SourceKind) => (k === 'screen' ? 'Your screen' : k === 'mic' ? 'Your mic' : 'Your camera')
+  const kindLabelSelf = (k: SourceKind) => `Your ${kindWord(k)}`
 
   // Mute/blank toggles. They only appear once you actually publish a track of that kind,
   // so the bar stays empty until there is something to mute.
@@ -1543,12 +1547,15 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   async function publishLocal(kind: SourceKind, constraints: MediaStreamConstraints): Promise<void> {
     if (stageView) return // a chromeless stage viewer never publishes
     const stream = kind === 'screen' ? await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true }) : await navigator.mediaDevices.getUserMedia(constraints)
-    const meta: StreamMeta = { kind, label: kindLabelSelf(kind) }
+    // Receivers name a source from their own roster. The label on the wire is for one that
+    // shows it as sent, so it names this device in the third person; the local tile says
+    // "Your".
+    const meta: StreamMeta = { kind, label: `${displayName}'s ${kindWord(kind)}` }
     localStreams.set(stream, meta)
     setTransientGuard(true) // a live source dies with the tab, so closing it asks first
     const targets = mediaTiers()
     for (const s of targets) await s.addMedia(stream, meta)
-    const tile = addStageTile({ peerId: null, kind, label: meta.label, stream, localMuted: true })
+    const tile = addStageTile({ peerId: null, kind, label: kindLabelSelf(kind), stream, localMuted: true })
     if (kind === 'screen') screenTookStage(tile)
     // The browser ends a source on its own: the "Stop sharing" bar, the OS sharing
     // indicator, an unplugged camera. None of those pass through the stop controls, and a

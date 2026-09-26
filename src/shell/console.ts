@@ -790,7 +790,17 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
         `Mute ${who}`,
       )
       showMuted(media[0].muted) // a stream whose sound the browser held back is already muted
-      const vol = el('input', { type: 'range', min: '0', max: '1', step: '0.05', value: '1', title: `Volume for ${who}`, 'aria-label': `Volume for ${who}` }) as HTMLInputElement
+      // The row is rebuilt on every roster event, so the slider starts from the element's
+      // volume: starting at full, it read full while the peer stayed turned down.
+      const vol = el('input', {
+        type: 'range',
+        min: '0',
+        max: '1',
+        step: '0.05',
+        value: String(media[0].volume),
+        title: `Volume for ${who}`,
+        'aria-label': `Volume for ${who}`,
+      }) as HTMLInputElement
       vol.addEventListener('input', () => {
         for (const m of media) m.volume = Number(vol.value)
       })

@@ -3125,6 +3125,39 @@ with sync_playwright() as p:
     hctx_a.close()
     hctx_b.close()
 
+    # --- a peer's roster controls keep their setting across a re-render ---
+    # Every roster event rebuilds the rows, and the volume slider was rebuilt at full while
+    # the peer stayed turned down. The sender's rename is the roster event here.
+    RM_CODE = 'x' + os.urandom(3).hex()
+    mctx_a = browser.new_context()
+    mctx_b = browser.new_context()
+    rm_a, rm_b = mctx_a.new_page(), mctx_b.new_page()
+    for _pg in (rm_a, rm_b):
+        _pg.goto(f'{BASE}/#/join/{RM_CODE}')
+        _pg.wait_for_selector('.composer', timeout=30000)
+        _pg.locator('.topbar button[title*="devices & people"]').click()
+    rm_a.locator('.composer .bar button[title^="Share your microphone"]').click()
+    rm_vol = rm_b.locator('.sidebar .peer input[type=range][aria-label^="Volume for"]')
+    check("the viewer's roster offers the sender's volume", bool(poll(lambda: rm_vol.count() == 1, 150)),
+          rm_b.locator('.sidebar').inner_text()[:200])
+    if rm_vol.count() == 1:
+        rm_vol.fill('0.3')
+        rm_b.locator('.sidebar .peer button[title^="Mute "]').click()
+        rm_new = 'rn' + os.urandom(3).hex()
+        rm_a.locator('.sidebar input[aria-label="This device name"]').fill(rm_new)
+        rm_a.locator('.sidebar input[aria-label="This device name"]').press('Enter')
+        check("the sender's rename rebuilds the viewer's roster",
+              bool(poll(lambda: rm_b.locator('.sidebar .peer', has_text=rm_new).count() == 1, 30)))
+        rm_row = rm_b.locator('.sidebar .peer', has_text=rm_new)
+        check('the rebuilt volume slider still shows the lowered volume',
+              rm_row.locator('input[type=range]').input_value() == '0.3'
+              and rm_b.evaluate("() => [...document.querySelectorAll('audio')].every(a => Math.abs(a.volume - 0.3) < 1e-6)"),
+              rm_row.locator('input[type=range]').input_value() if rm_row.count() else '')
+        check('and the rebuilt mute button still offers to unmute',
+              rm_row.locator('button[title^="Unmute "]').count() == 1)
+    mctx_a.close()
+    mctx_b.close()
+
     # --- touch: the per-card delete control, driven by real taps ---
     # Every assertion above drives a desktop viewport with a mouse, so a control that does
     # nothing on a phone passes them all. Revealing it wherever there is no hover is the

@@ -4,6 +4,7 @@ context), the visual-viewport keyboard inset, code chip, theme, connect modal,
 every text tool driven with real input, and the service worker precache install."""
 import base64
 import io
+import json
 import os
 import re
 import sys
@@ -2361,6 +2362,76 @@ with sync_playwright() as p:
                 sh_a.locator('.composer .bar button[title*="Stop sharing"]').click()
     sctx_a.close()
     sctx_b.close()
+
+    # ============ sound the autoplay policy held back ============
+    # Someone who opened an invite link and never clicked has no activation, and Chromium
+    # refuses autoplay with sound for them, so the remote <video> stayed on a black first
+    # frame for that one viewer. Headless Chromium does not apply the policy on its own,
+    # so this browser is launched with the policy desktop Chrome runs with.
+    #
+    # Every Playwright query into a page (evaluate, locators, wait_for_selector) runs as a
+    # user gesture and would hand the viewer the activation under test, so the viewer is
+    # never queried until the click that is meant to activate it. An init script reports
+    # its state on the console instead, and the waits run on the main page.
+    ap_browser = p.chromium.launch(headless=True, args=[
+        '--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream',
+        '--autoplay-policy=user-gesture-required'])
+    AP_CODE = 'a' + os.urandom(3).hex()
+    AP_REPORT = """
+      setInterval(() => {
+        const v = document.querySelector('.tiles video.tile')
+        const feed = document.querySelector('.feed')
+        console.log('AP ' + JSON.stringify({
+          paired: !!feed && feed.textContent.includes('Secure channel established'),
+          active: navigator.userActivation.hasBeenActive,
+          vid: v ? { paused: v.paused, muted: v.muted, t: v.currentTime } : null,
+          notice: !!document.querySelector('.stage-tile .tile-sound'),
+          card: [...document.querySelectorAll('.feed button')].some(b => b.textContent === 'Turn sound on'),
+        }))
+      }, 250)
+    """
+    ap_state = {}
+
+    def ap_seen(m):
+        if m.text.startswith('AP '):
+            ap_state.clear()
+            ap_state.update(json.loads(m.text[3:]))
+
+    actx_a = ap_browser.new_context(permissions=['microphone', 'camera'])
+    actx_b = ap_browser.new_context()
+    actx_b.add_init_script(AP_REPORT)
+    ap_a, ap_b = actx_a.new_page(), actx_b.new_page()
+    ap_b.on('console', ap_seen)
+    ap_a.goto(f'{BASE}/#/join/{AP_CODE}')
+    ap_a.wait_for_selector('.composer', timeout=30000)
+    ap_b.goto(f'{BASE}/#/join/{AP_CODE}')
+    ap_paired = poll(lambda: 'Secure channel established' in ap_a.locator('.feed').inner_text()
+                     and ap_state.get('paired'), 150)
+    check('the autoplay contexts reach a secure channel', bool(ap_paired), str(ap_state))
+    if ap_paired:
+        poll(lambda: 'connected' in (ap_a.locator('.topbar .badge').inner_text() or ''), 60)
+        ap_a.locator('.composer .bar button[title^="Share your camera"]').click()
+        ap_got = poll(lambda: ap_state.get('vid'), 90)
+        check('a camera with sound reaches a viewer who never interacted', bool(ap_got), str(ap_state))
+        check('that viewer has no activation, so the policy applies to it',
+              ap_state.get('active') is False, str(ap_state))
+        ap_playing = poll(lambda: (ap_state.get('vid') or {}).get('t', 0) > 0
+                          and not ap_state['vid']['paused'], 20)
+        check('the video plays rather than holding a black first frame', bool(ap_playing), str(ap_state))
+        check('it plays muted until the viewer interacts',
+              bool(ap_playing) and ap_state['vid']['muted'], str(ap_state))
+        check('the tile and the feed both say the browser held its sound back',
+              bool(poll(lambda: ap_state.get('notice') and ap_state.get('card'), 5)), str(ap_state))
+        if ap_state.get('notice'):
+            ap_b.locator('.stage-tile .tile-sound').click()
+        ap_back = poll(lambda: (ap_state.get('vid') or {}).get('muted') is False
+                       and not ap_state['vid']['paused'], 10)
+        check('the first click gives the sound back', bool(ap_back), str(ap_state))
+        check('and takes both notices away',
+              bool(poll(lambda: not ap_state.get('notice') and not ap_state.get('card'), 5)), str(ap_state))
+    actx_a.close()
+    actx_b.close()
+    ap_browser.close()
 
     # ============ the screen-share note follows the browser, not the app ============
     # Sharing a tab with its sound is what people actually want out of screen sharing, and

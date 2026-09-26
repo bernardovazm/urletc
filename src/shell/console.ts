@@ -744,18 +744,22 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     const isVerified = verified.has(p.pubKeyHex)
     const ctl = el('div', { class: 'ctl' })
     if (media.length) {
+      const showMuted = (muted: boolean) => {
+        muteBtn.textContent = muted ? '🔇' : '🔊'
+        muteBtn.title = muted ? `Unmute ${who}` : `Mute ${who}`
+        muteBtn.setAttribute('aria-label', muteBtn.title)
+      }
       const muteBtn = button(
         '🔊',
         () => {
           const muted = !media[0].muted
           for (const m of media) m.muted = muted
-          muteBtn.textContent = muted ? '🔇' : '🔊'
-          muteBtn.title = muted ? `Unmute ${who}` : `Mute ${who}`
-          muteBtn.setAttribute('aria-label', muteBtn.title)
+          showMuted(muted)
         },
         'icon sm',
         `Mute ${who}`,
       )
+      showMuted(media[0].muted) // a stream whose sound the browser held back is already muted
       const vol = el('input', { type: 'range', min: '0', max: '1', step: '0.05', value: '1', title: `Volume for ${who}`, 'aria-label': `Volume for ${who}` }) as HTMLInputElement
       vol.addEventListener('input', () => {
         for (const m of media) m.volume = Number(vol.value)
@@ -1172,6 +1176,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     if (document.pictureInPictureElement === tile.media) void document.exitPictureInPicture().catch(() => {})
     ;(tile.wrap.closest('.stage-tile') ?? tile.wrap).remove()
     if (tile.media.parentElement === sink) tile.media.remove()
+    forgetSound(tile.media)
     const i = stageTiles.indexOf(tile)
     if (i >= 0) stageTiles.splice(i, 1)
     if (tile.recUrl) URL.revokeObjectURL(tile.recUrl)
@@ -1261,17 +1266,15 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
         ctl.append(pipBtn)
       }
       if (opts.stream.getAudioTracks().length && opts.peerId) {
-        const mb = button(
-          '🔊',
-          () => {
-            media.muted = !media.muted
-            mb.textContent = media.muted ? '🔇' : '🔊'
-            mb.title = media.muted ? `Unmute ${opts.label}` : `Mute ${opts.label}`
-            mb.setAttribute('aria-label', mb.title)
-          },
-          'icon sm',
-          `Mute ${opts.label}`,
-        )
+        const mb = button('🔊', () => (media.muted = !media.muted), 'icon sm', `Mute ${opts.label}`)
+        // Driven by volumechange rather than by the click, because the roster row and a
+        // playback start that had to fall back to muted also change `muted`.
+        const syncMb = () => {
+          mb.textContent = media.muted ? '🔇' : '🔊'
+          mb.title = media.muted ? `Unmute ${opts.label}` : `Mute ${opts.label}`
+          mb.setAttribute('aria-label', mb.title)
+        }
+        media.addEventListener('volumechange', syncMb)
         ctl.append(mb)
       }
       if (opts.peerId === null) {
@@ -1303,12 +1306,68 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     return tile
   }
 
+  // Remote media is started with play() as well as the autoplay attribute. Autoplay with
+  // sound is refused on a page the viewer has not interacted with, the normal state of
+  // anyone who arrived through an invite link, and a refused <video> never paints a frame:
+  // a black tile for that one viewer while everyone else watches. Muted playback is never
+  // refused, so a refused start plays muted and the sound returns on the first click or key
+  // press anywhere on the page, which is the activation the browser was waiting for.
+  const soundHeld = new Set<HTMLMediaElement>()
+  let soundCard: HTMLElement | null = null
+  function releaseSound(): void {
+    // Escape and modifier keys dispatch keydown without granting activation, and a release
+    // attempted then is refused again. Wait for an input that counts.
+    if (navigator.userActivation && !navigator.userActivation.isActive) return
+    document.removeEventListener('click', releaseSound, true)
+    document.removeEventListener('keydown', releaseSound, true)
+    soundCard?.remove()
+    soundCard = null
+    tiles.querySelectorAll('.tile-sound').forEach((b) => b.remove())
+    const held = [...soundHeld]
+    soundHeld.clear()
+    for (const m of held) {
+      if (!m.isConnected) continue
+      m.muted = false
+      void m.play().catch(() => holdSound(m))
+    }
+    renderRoster()
+  }
+  function holdSound(m: HTMLMediaElement): void {
+    m.muted = true
+    void m.play().catch(() => {})
+    soundHeld.add(m)
+    // Registering the same listener twice is a no-op, so re-arming needs no flag.
+    document.addEventListener('click', releaseSound, true)
+    document.addEventListener('keydown', releaseSound, true)
+    const tile = m.closest('.stage-tile')
+    if (tile && !tile.querySelector('.tile-sound')) tile.append(button('🔇 Sound held by the browser. Click to play it', releaseSound, 'tile-sound'))
+    if (!soundCard) {
+      soundCard = el('div', { class: 'sys' }, [
+        el('span', { text: 'The browser holds back the sound of live streams until you interact with this page. ' }),
+        button('Turn sound on', releaseSound, 'ghost small'),
+      ])
+      addCard(soundCard)
+    }
+    renderRoster()
+  }
+  function forgetSound(m: HTMLMediaElement): void {
+    if (!soundHeld.delete(m) || soundHeld.size) return
+    soundCard?.remove()
+    soundCard = null
+  }
+  function startRemote(m: HTMLMediaElement): void {
+    void m.play().catch((e: unknown) => {
+      if (e instanceof DOMException && e.name === 'NotAllowedError' && m.isConnected) holdSound(m)
+    })
+  }
+
   function attachPeerStream(peerId: string, stream: MediaStream, meta?: unknown) {
     const m = asMeta(meta)
     const peerName = mergedPeers().find((x) => x.peer.peerId === peerId)?.peer.name ?? 'peer'
     const kind: SourceKind = m?.kind ?? (stream.getVideoTracks().length ? 'cam' : 'mic')
     const label = m?.label ?? peerName
     const tile = addStageTile({ peerId, kind, label, stream })
+    startRemote(tile.media)
     if (kind === 'screen') screenTookStage(tile)
     // Keep peerMedia so the roster's per-peer mute/volume control still works.
     const arr = peerMedia.get(peerId) ?? []

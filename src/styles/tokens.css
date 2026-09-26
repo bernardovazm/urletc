@@ -1118,6 +1118,21 @@ video.tile {
   box-shadow: var(--ring);
 }
 
+/* Shown over a remote tile whose sound the autoplay policy held back. Centred and solid,
+   because it is the one thing on the tile the viewer has to act on. */
+.tile-sound {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  max-width: calc(100% - 1rem);
+  padding: 0.35rem 0.7rem;
+  font-size: 0.8rem;
+  background: var(--plate);
+  color: #fff;
+  border: 1px solid var(--border-strong);
+}
+
 /* A shared screen must never be cropped. `cover` on a 16:10 tile cuts off the edges of
    someone's desktop, where the content usually is. */
 .stage-tile.kind-screen video.tile {

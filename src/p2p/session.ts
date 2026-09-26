@@ -385,6 +385,10 @@ interface PeerState {
   eph: CryptoKeyPair
   ephPubB64: string
   channel: SecureChannel | null
+  // Set before the first await of the hs that will complete the channel. A peer that hit
+  // the join race sends two hs, and without this both would derive concurrently and the
+  // later one would overwrite the channel the earlier one already built.
+  hsTaken: boolean
   info: RosterPeer
 }
 
@@ -529,6 +533,7 @@ export async function joinRoomSession(opts: {
       eph: kp,
       ephPubB64: bytesToB64(ephPubRaw),
       channel: null,
+      hsTaken: false,
       info: { peerId, deviceId: '', name: '...', pubKeyHex: '', ready: false, safety: '' },
     }
   }
@@ -539,14 +544,36 @@ export async function joinRoomSession(opts: {
     await hs.send({ eph: st.ephPubB64, idPub: bytesToB64(idPubRaw), sig: bytesToB64(sig), name: displayName }, { target: peerId })
   }
 
-  room.onPeerJoin = async (peerId: string) => {
-    if (peers.has(peerId)) return
-    const st = await newPeerState(peerId)
-    peers.set(peerId, st)
-    emitRoster()
-    // No card for the attempt. Every peer used to cost two feed cards, one for joining and
-    // one for the handshake completing; only the result is reported now.
-    await sendHandshake(peerId, st)
+  // Reserve a peer synchronously so onPeerJoin and the first inbound hs cannot each create a
+  // PeerState and each send an hs. The map holds the in-flight creation; both callers await
+  // the same promise, one ephemeral key is generated and one handshake is sent.
+  const peerInit = new Map<string, Promise<PeerState>>()
+  function ensurePeer(peerId: string): Promise<PeerState> {
+    const existing = peers.get(peerId)
+    if (existing) return Promise.resolve(existing)
+    const pending = peerInit.get(peerId)
+    if (pending) return pending
+    const created = (async () => {
+      const st = await newPeerState(peerId)
+      peers.set(peerId, st)
+      emitRoster()
+      // No card for the attempt. Every peer used to cost two feed cards, one for joining and
+      // one for the handshake completing; only the result is reported now.
+      try {
+        await sendHandshake(peerId, st)
+      } catch {
+        // A failed initial send still leaves the reserved state; the peer's own hs completes
+        // the channel from this side.
+      }
+      return st
+    })()
+    peerInit.set(peerId, created)
+    void created.finally(() => peerInit.delete(peerId))
+    return created
+  }
+
+  room.onPeerJoin = (peerId: string) => {
+    void ensurePeer(peerId)
   }
 
   room.onPeerLeave = (peerId: string) => {
@@ -567,13 +594,11 @@ export async function joinRoomSession(opts: {
 
   hs.onMessage = async (data, ctx) => {
     const peerId = ctx.peerId
-    let st = peers.get(peerId)
-    if (!st) {
-      st = await newPeerState(peerId)
-      peers.set(peerId, st)
-      await sendHandshake(peerId, st)
-    }
-    if (st.channel) return
+    const st = await ensurePeer(peerId)
+    // One hs completes the channel. A second hs for the same state is dropped before any
+    // await, so two runs cannot both derive and race to assign st.channel.
+    if (st.channel || st.hsTaken) return
+    st.hsTaken = true
 
     const theirEph = b64ToBytes(data.eph)
     const theirIdPub = b64ToBytes(data.idPub)
@@ -587,7 +612,11 @@ export async function joinRoomSession(opts: {
 
     const shared = await deriveSharedSecret(st.eph.privateKey, theirEph)
     const initiator = st.ephPubB64 < data.eph
-    st.channel = await SecureChannel.create(shared, roomSalt, initiator)
+    const channel = await SecureChannel.create(shared, roomSalt, initiator)
+    // A peer that left, or was replaced, during the awaits above must not leave a ghost
+    // channel and a doubled post-handshake run behind it.
+    if (peers.get(peerId) !== st) return
+    st.channel = channel
     const theirPubHex = toHex(theirIdPub)
     st.info = {
       peerId,

@@ -2510,6 +2510,41 @@ with sync_playwright() as p:
     tctx_a.close()
     tctx_b.close()
 
+    # ============ transfer, handshake and ratchet: regressions ============
+    # Handshake reservation: onPeerJoin and the first inbound hs share one PeerState and send
+    # one hs. Two contexts in one code room, nearby off so the code tier is the only path
+    # between them, must reach exactly one secure channel each with one connected roster row.
+    # A duplicate PeerState would print a second channel card or leave a peer stuck at '...'.
+    HS_CODE = 'x' + os.urandom(3).hex()
+    NEARBY_OFF = "() => window.dispatchEvent(new CustomEvent('wt:nearby', { detail: false }))"
+    hctx_a = browser.new_context()
+    hctx_a.add_init_script(VISIBILITY)
+    hctx_b = browser.new_context()
+    hctx_b.add_init_script(VISIBILITY)
+    hs_a, hs_b = hctx_a.new_page(), hctx_b.new_page()
+    for _pg in (hs_a, hs_b):
+        _pg.goto(f'{BASE}/#/join/{HS_CODE}')
+        _pg.wait_for_selector('.composer', timeout=30000)
+        _pg.evaluate(NEARBY_OFF)
+    hs_paired = poll(lambda: 'Secure channel established' in feed_text(hs_a)
+                     and 'Secure channel established' in feed_text(hs_b), 150)
+    check('two contexts in a code room reach a secure channel', bool(hs_paired),
+          f'A: {feed_text(hs_a)[-120:]!r} B: {feed_text(hs_b)[-120:]!r}')
+    if hs_paired:
+        # Exactly one card per side: the join race would have created a second PeerState and
+        # sent a second hs, doubling this.
+        na = feed_text(hs_a).count('Secure channel established')
+        nb = feed_text(hs_b).count('Secure channel established')
+        check('one peer yields one secure-channel card, not two', na == 1 and nb == 1, f'A={na} B={nb}')
+        # The roster settles to one connected peer each. A stuck handshake leaves it at
+        # 'connecting' instead.
+        settled = poll(lambda: hs_a.locator('.peer .peer-state').all_inner_texts() == ['connected']
+                       and hs_b.locator('.peer .peer-state').all_inner_texts() == ['connected'], 30)
+        check('each side shows exactly one connected peer, none stuck connecting', bool(settled),
+              f"A={hs_a.locator('.peer .peer-state').all_inner_texts()} B={hs_b.locator('.peer .peer-state').all_inner_texts()}")
+    hctx_a.close()
+    hctx_b.close()
+
     # ============ screen sharing is one press, from the topbar or the composer ============
     # Both controls go straight to the browser's picker and publish what it returns. The
     # topbar button doubles as the stop control while a screen is live.

@@ -2619,6 +2619,60 @@ with sync_playwright() as p:
     nctx_on.close()
     nctx_off.close()
 
+    # ============ stage, tiers and feed: regressions ============
+
+    # --- a share the browser ends is unpublished ---
+    # Chrome's "Stop sharing" bar ends the track without touching any control on the page.
+    # The page is told the way the browser tells it: the track stops and fires `ended`,
+    # which track.stop() alone never does. A dead source left published stayed tiled,
+    # expanded and guarded, and was re-offered to every later peer as a black tile.
+    BROWSER_STOP = """() => {
+      for (const v of document.querySelectorAll('.stage-tile.kind-screen video')) {
+        for (const t of v.srcObject.getTracks()) { t.stop(); t.dispatchEvent(new Event('ended')) }
+      }
+    }"""
+    END_CODE = 'x' + os.urandom(3).hex()
+    ectx_a = browser.new_context()
+    ectx_a.add_init_script(FAKE_SCREEN)
+    en_a = ectx_a.new_page()
+    en_a.goto(f'{BASE}/#/join/{END_CODE}')
+    en_a.wait_for_selector('.composer', timeout=30000)
+    en_share = en_a.locator('.composer .bar button[title^="Share your screen"]')
+    en_share.click()
+    en_live = poll(lambda: en_a.locator('.tiles .stage-tile.kind-screen').count() == 1, 15)
+    check('a screen share is live before the browser ends it',
+          bool(en_live) and theater(en_a) and en_a.evaluate("document.documentElement.dataset.closeGuard") == 'on',
+          'tiles=%d max=%s' % (en_a.locator('.tiles .stage-tile').count(), theater(en_a)))
+    en_a.evaluate(BROWSER_STOP)
+    check('a share the browser ends leaves the stage',
+          bool(poll(lambda: en_a.locator('.tiles .stage-tile').count() == 0, 10)),
+          '%d tiles' % en_a.locator('.tiles .stage-tile').count())
+    check('the stage it expanded shrinks back', not theater(en_a))
+    check('closing the tab no longer asks once nothing is live',
+          en_a.evaluate("document.documentElement.dataset.closeGuard") == 'off')
+    en_top = en_a.locator('.topbar button.screen-share')
+    check('the topbar offers to share again',
+          en_top.count() == 0 or en_top.inner_text() == 'Share screen',
+          en_top.inner_text() if en_top.count() else '')
+    # A peer joining after a second share must be offered only the live one. With the dead
+    # stream still published it arrived first, as a black tile that took the spotlight.
+    en_share.click()
+    poll(lambda: en_a.locator('.tiles .stage-tile.kind-screen').count() == 1, 15)
+    ectx_b = browser.new_context()
+    en_b = ectx_b.new_page()
+    en_b.goto(f'{BASE}/#/join/{END_CODE}')
+    en_b.wait_for_selector('.composer', timeout=30000)
+    en_got = poll(lambda: en_b.locator('.tiles .stage-tile').count() >= 1, 150)
+    check('a late joiner receives the live share', bool(en_got), en_b.locator('.feed').inner_text()[-160:])
+    check('and no tile for the share the browser ended',
+          bool(en_got) and not poll(lambda: en_b.locator('.tiles .stage-tile').count() >= 2, 5),
+          '%d tiles' % en_b.locator('.tiles .stage-tile').count())
+    check('the spotlight lands on a tile that is playing',
+          bool(en_got) and bool(poll(lambda: en_b.evaluate(
+              "() => { const v = document.querySelector('.stage-tile.spot video'); return !!v && v.currentTime > 0 }"), 20)))
+    ectx_a.close()
+    ectx_b.close()
+
     # --- touch: the per-card delete control, driven by real taps ---
     # Every assertion above drives a desktop viewport with a mouse, so a control that does
     # nothing on a phone passes them all. Revealing it wherever there is no hover is the

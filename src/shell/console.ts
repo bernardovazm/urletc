@@ -1550,6 +1550,17 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     for (const s of targets) await s.addMedia(stream, meta)
     const tile = addStageTile({ peerId: null, kind, label: meta.label, stream, localMuted: true })
     if (kind === 'screen') screenTookStage(tile)
+    // The browser ends a source on its own: the "Stop sharing" bar, the OS sharing
+    // indicator, an unplugged camera. None of those pass through the stop controls, and a
+    // source left published there stays tiled and guarded here, and is re-offered as a
+    // dead track to every peer that joins later. track.stop() fires no `ended`, so this
+    // only runs for an end the page did not ask for.
+    const ended = () => {
+      if (localStreams.has(stream) && !stream.getTracks().some((t) => t.readyState === 'live')) unpublish(stream)
+    }
+    for (const t of stream.getTracks()) t.addEventListener('ended', ended)
+    ended()
+    if (!localStreams.has(stream)) return // it ended while the sessions were being offered it
     notifyStage()
     syncMediaButtons()
     if (!targets.length) sys('Started locally. Pair a device or share a code to stream it.')

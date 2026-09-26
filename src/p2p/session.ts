@@ -485,7 +485,10 @@ export async function joinRoomSession(opts: {
   const peers = new Map<string, PeerState>()
   const incoming = new Map<string, Incoming>()
   const outgoing = new Map<string, Outgoing>()
+  // Keyed `${peerId}|${fileId}`, not by fileId alone: every recipient of a broadcast file
+  // shares its fileId, so a per-fileId buffer would let one peer seed another peer's entry.
   const pendingChunks = new Map<string, FileChunk[]>()
+  const pendKey = (peerId: string, fileId: string) => `${peerId}|${fileId}`
   const activeStreams = new Map<MediaStream, unknown>() // stream to its metadata, kept for re-send on handshake
   const receivedUrls = new Set<string>()
 
@@ -632,7 +635,7 @@ export async function joinRoomSession(opts: {
     if (!inc) return
     if (inc.timer) clearTimeout(inc.timer)
     incoming.delete(fileId)
-    pendingChunks.delete(fileId)
+    pendingChunks.delete(pendKey(inc.peerId, fileId))
     ev.onSystem?.(`\u26a0 "${inc.name}" did not finish (${inc.received} of ${inc.total} pieces). Ask for it again.`)
   }
 
@@ -662,7 +665,8 @@ export async function joinRoomSession(opts: {
       // Bind (fileId, index) as AEAD additional data so chunks can't be transposed/substituted.
       const aad = enc.encode(`${fileId}:${chunk.i}`)
       const pt = new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64ToBytes(chunk.iv), additionalData: aad }, inc.key, b64ToBytes(chunk.ct)))
-      if (!inc.chunks[chunk.i]) inc.received++
+      if (inc.chunks[chunk.i]) return // a filled index is never overwritten, so a resend or a forged chunk cannot replace an accepted piece
+      inc.received++
       inc.chunks[chunk.i] = pt
       watchIncoming(fileId) // progress restarts the clock; silence is what the timer is for
       ev.onFileProgress?.(fileId, inc.name, inc.received, inc.total, false)
@@ -733,6 +737,9 @@ export async function joinRoomSession(opts: {
         ev.onSystem?.('⚠ Too many files in flight from peers. Rejected one.')
         return
       }
+      // A second offer reusing a fileId already in flight is dropped rather than allowed to
+      // replace the entry, which would cancel the original transfer with decrypt failures.
+      if (incoming.has(env.fileId)) return
       // Name/MIME/size are peer-controlled and reach the feed, the download attribute
       // and the Blob type, so they are bounded here rather than at each render site.
       const fname =
@@ -758,9 +765,9 @@ export async function joinRoomSession(opts: {
       })
       ev.onSystem?.(`Incoming file "${fname}" (${Math.round(fsize / 1024)} KB)...`)
       watchIncoming(env.fileId)
-      const pend = pendingChunks.get(env.fileId)
+      const pend = pendingChunks.get(pendKey(ctx.peerId, env.fileId))
       if (pend) {
-        pendingChunks.delete(env.fileId)
+        pendingChunks.delete(pendKey(ctx.peerId, env.fileId))
         for (const c of pend) await handleChunk(env.fileId, c)
       }
     } else if (env.t === 'fend') {
@@ -796,15 +803,21 @@ export async function joinRoomSession(opts: {
     // delivered over their ratchet anyway). This and the caps below bound the buffer.
     if (!peers.get(ctx.peerId)?.channel) return
     if (!HISTORY_ID_RE.test(String(data.fileId ?? ''))) return // same bound as the offer above
-    if (!incoming.has(data.fileId)) {
-      if (pendingChunks.size >= MAX_PENDING_FILES) return
-      const arr = pendingChunks.get(data.fileId) ?? []
-      if (arr.length >= MAX_PENDING_CHUNKS) return
-      arr.push(data)
-      pendingChunks.set(data.fileId, arr)
+    const inc = incoming.get(data.fileId)
+    if (inc) {
+      // Every recipient of a broadcast file holds the same fileId and per-file key, so a
+      // chunk counts only from the peer that offered the file. This closes the path where a
+      // co-recipient forges bytes that decrypt into another peer's incoming file.
+      if (inc.peerId !== ctx.peerId) return
+      await handleChunk(data.fileId, data)
       return
     }
-    await handleChunk(data.fileId, data)
+    const key = pendKey(ctx.peerId, data.fileId)
+    if (pendingChunks.size >= MAX_PENDING_FILES) return
+    const arr = pendingChunks.get(key) ?? []
+    if (arr.length >= MAX_PENDING_CHUNKS) return
+    arr.push(data)
+    pendingChunks.set(key, arr)
   }
 
   // Workshop tool gossip. Integrity and signature are verified before surfacing (section 7).

@@ -2626,7 +2626,6 @@ with sync_playwright() as p:
     tp.on('pageerror', lambda e: terrs.append(str(e)))
     tp.goto(BASE)
     tp.wait_for_selector('.composer', timeout=30000)
-    tp.wait_for_timeout(1200)
     tmm = tp.evaluate("() => ({hover: matchMedia('(hover: none)').matches,"
                       " coarse: matchMedia('(pointer: coarse)').matches})")
     check('touch context really reports no hover and a coarse pointer',
@@ -2635,7 +2634,10 @@ with sync_playwright() as p:
         tp.locator('.composer textarea').fill(_msg)
         tp.locator('.composer textarea').press('Enter')
         tp.wait_for_timeout(250)
-    _tn = tp.locator('.feed-item').count()
+    # Cards are addressed by their text, never by position: a nearby peer's cards land in
+    # this feed too, and one arriving mid-block moved `.last` off the card under test.
+    MINE = tp.locator('.feed-item', has_text='touch delete')
+    _tn = MINE.count()
     check('touch: the feed has items to delete', _tn >= 3, f'{_tn} items')
     # Both directions are asserted on computed opacity, never on the node existing: the
     # control is in the DOM either way, so presence cannot tell them apart.
@@ -2644,11 +2646,11 @@ with sync_playwright() as p:
     check('touch: no card wears a delete control until it is asked for',
           _vis == 0, f'{_vis} of {_tn} showing one')
     # ...and it still has to work. Tapping the card reveals and arms in one gesture.
-    tp.locator('.feed-item').last.tap(position={'x': 40, 'y': 8})
+    tcard = tp.locator('.feed-item', has_text='touch delete three')
+    tcard.tap(position={'x': 40, 'y': 8})
     tp.wait_for_timeout(250)
-    tdel = tp.locator('.feed-item').last.locator('button.del')
-    _op = tp.evaluate("""() => { const d = [...document.querySelectorAll('.feed-item')].pop()
-        .querySelector('button.del'); return d ? getComputedStyle(d).opacity : 'absent' }""")
+    tdel = tcard.locator('button.del')
+    _op = tdel.evaluate('d => getComputedStyle(d).opacity') if tdel.count() else 'absent'
     check('touch: tapping a card reveals that card\'s control',
           _op != 'absent' and float(_op) > 0.9, f'opacity={_op}')
     check('touch: exactly one card is revealed at a time',
@@ -2658,15 +2660,14 @@ with sync_playwright() as p:
           'armed' in (tdel.get_attribute('class') or '')
           and tdel.get_attribute('aria-pressed') == 'true',
           f'class={tdel.get_attribute("class")!r} pressed={tdel.get_attribute("aria-pressed")!r}')
-    _tbefore = tp.locator('.feed-item').count()
+    _tbefore = MINE.count()
     tdel.tap()
-    tp.wait_for_timeout(300)
     check('touch: tapping the revealed control removes the card',
-          tp.locator('.feed-item').count() == _tbefore - 1,
-          f'{tp.locator(".feed-item").count()} items, was {_tbefore}')
+          bool(poll(lambda: MINE.count() == _tbefore - 1 and tcard.count() == 0, 3)),
+          f'{MINE.count()} items, was {_tbefore}')
     # A tap that lands anywhere else has to put it away, or the quiet state only holds
     # until the first accidental tap and the icons come back one card at a time.
-    tp.locator('.feed-item').first.tap(position={'x': 40, 'y': 8})
+    MINE.first.tap(position={'x': 40, 'y': 8})
     tp.wait_for_timeout(200)
     check('touch: a card is revealed before the dismissing tap',
           tp.locator('.feed-item.revealed').count() == 1)

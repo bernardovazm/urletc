@@ -2596,6 +2596,46 @@ with sync_playwright() as p:
     tctx_s.close()
     tctx_r.close()
 
+    # Pending chunk buffers: chunks that outrun their offer wait in a per-sender buffer that
+    # is now timed and closed once its file finishes. Two attachments sent back to back put
+    # both offers and their early chunks in flight together, and both downloads must hash
+    # to the bytes attached. A refused or unopenable offer, the case the purge bounds,
+    # needs a tampered peer and is not staged.
+    PEND_CODE = 'x' + os.urandom(3).hex()
+    pend_files = []
+    for _n in (1, 2):
+        _name = f'wt-pend{_n}-{PEND_CODE}.bin'
+        _bytes = os.urandom(300 * 1024 * _n)
+        io.open(os.path.join(SNAP, _name), 'wb').write(_bytes)
+        pend_files.append((_name, hashlib.sha256(_bytes).hexdigest()))
+    pctx_s = browser.new_context()
+    pctx_s.add_init_script(VISIBILITY)
+    pctx_r = browser.new_context()
+    pctx_r.add_init_script(VISIBILITY)
+    pend_s, pend_r = pctx_s.new_page(), pctx_r.new_page()
+    for _pg in (pend_s, pend_r):
+        _pg.goto(f'{BASE}/#/join/{PEND_CODE}')
+        _pg.wait_for_selector('.composer', timeout=30000)
+        _pg.evaluate(NEARBY_OFF)
+    pend_paired = poll(lambda: 'Secure channel established' in feed_text(pend_s)
+                       and 'Secure channel established' in feed_text(pend_r)
+                       and 'connected' in (pend_s.locator('.topbar .badge').inner_text() or ''), 150)
+    check('sender and receiver pair for the back-to-back transfer', bool(pend_paired),
+          f'S: {feed_text(pend_s)[-120:]!r} R: {feed_text(pend_r)[-120:]!r}')
+    if pend_paired:
+        for _name, _ in pend_files:
+            pend_s.locator('.composer-wrap > input[type=file]:not([accept])').set_input_files(os.path.join(SNAP, _name))
+            pend_s.wait_for_selector(f'.card:has-text("{_name}") button:has-text("Send to devices")', timeout=20000)
+        # Both presses in one task, so the two sends overlap on the wire.
+        pend_s.evaluate("() => [...document.querySelectorAll('.card button')].filter(b => b.textContent.trim() === 'Send to devices').slice(-2).forEach(b => b.click())")
+        poll(lambda: all(pend_r.locator(f'.feed a[download="{n}"]').count() > 0 for n, _ in pend_files), 90)
+        got = [downloaded_sha(pend_r, n) for n, _ in pend_files]
+        check('two attachments sent together both arrive byte-exact',
+              got == [h for _, h in pend_files],
+              f'got={[g and g[:12] for g in got]} R: {feed_text(pend_r)[-160:]!r}')
+    pctx_s.close()
+    pctx_r.close()
+
     # ============ screen sharing is one press, from the topbar or the composer ============
     # Both controls go straight to the browser's picker and publish what it returns. The
     # topbar button doubles as the stop control while a screen is live.

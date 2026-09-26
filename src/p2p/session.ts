@@ -102,6 +102,7 @@ const CHUNK = 64 * 1024
 const MAX_FILE_CHUNKS = 32_768 // 64 KiB x 32768 is about a 2 GiB ceiling on a declared file
 const MAX_PENDING_FILES = 16 // distinct unresolved fileIds buffered at once
 const MAX_PENDING_CHUNKS = 4096 // chunks buffered for a not-yet-announced fileId
+const MAX_CLOSED_FILES = 256 // refused, finished or timed-out fileIds whose late chunks are dropped
 const MAX_CHAT_CHARS = 4000 // inbound chat text ceiling (see the 'chat' branch below)
 const MAX_NAME_CHARS = 32 // peer display name, inbound
 const MAX_FILENAME_CHARS = 80 // received file name, inbound
@@ -406,6 +407,11 @@ interface Incoming {
   timer: ReturnType<typeof setTimeout> | null
   repairs: number
 }
+/** Chunks that arrived before their offer opened, held until it does or FILE_STALL_MS passes. */
+interface PendingFile {
+  chunks: FileChunk[]
+  timer: ReturnType<typeof setTimeout> | null
+}
 /** A file we sent, kept briefly so a recipient can ask for pieces that never landed. */
 interface Outgoing {
   file: File
@@ -494,8 +500,20 @@ export async function joinRoomSession(opts: {
   const outgoing = new Map<string, Outgoing>()
   // Keyed `${peerId}|${fileId}`, not by fileId alone: every recipient of a broadcast file
   // shares its fileId, so a per-fileId buffer would let one peer seed another peer's entry.
-  const pendingChunks = new Map<string, FileChunk[]>()
+  const pendingChunks = new Map<string, PendingFile>()
   const pendKey = (peerId: string, fileId: string) => `${peerId}|${fileId}`
+  // Same keys. A refused offer's sender streams the whole file anyway, and duplicates keep
+  // arriving after a receive finishes or is abandoned, so without this every such chunk
+  // was buffered until leave(). FIFO-bounded; an evicted key falls back to the timed purge.
+  const closedFiles = new Set<string>()
+  function closeFile(key: string): void {
+    const pend = pendingChunks.get(key)
+    if (pend?.timer) clearTimeout(pend.timer)
+    pendingChunks.delete(key)
+    closedFiles.delete(key)
+    closedFiles.add(key)
+    if (closedFiles.size > MAX_CLOSED_FILES) closedFiles.delete(closedFiles.values().next().value as string)
+  }
   const activeStreams = new Map<MediaStream, unknown>() // stream to its metadata, kept for re-send on handshake
   const receivedUrls = new Set<string>()
 
@@ -667,7 +685,7 @@ export async function joinRoomSession(opts: {
     if (!inc) return
     if (inc.timer) clearTimeout(inc.timer)
     incoming.delete(fileId)
-    pendingChunks.delete(pendKey(inc.peerId, fileId))
+    closeFile(pendKey(inc.peerId, fileId))
     ev.onSystem?.(`\u26a0 "${inc.name}" did not finish (${inc.received} of ${inc.total} pieces). Ask for it again.`)
   }
 
@@ -709,6 +727,7 @@ export async function joinRoomSession(opts: {
           { type: inc.ftype },
         )
         incoming.delete(fileId)
+        closeFile(pendKey(inc.peerId, fileId))
         const url = URL.createObjectURL(blob)
         receivedUrls.add(url)
         ev.onFileReceived?.({ id: inc.id, name: inc.name, ftype: inc.ftype, url, size: inc.size, from: inc.from })
@@ -759,6 +778,7 @@ export async function joinRoomSession(opts: {
       // bounded here rather than trusted. Ours are UUIDs, which pass.
       if (!HISTORY_ID_RE.test(String(env.fileId ?? ''))) return
       if (!Number.isInteger(env.total) || env.total < 1 || env.total > MAX_FILE_CHUNKS) {
+        closeFile(pendKey(ctx.peerId, env.fileId))
         ev.onSystem?.('⚠ Rejected an oversized or malformed file offer.')
         return
       }
@@ -766,12 +786,16 @@ export async function joinRoomSession(opts: {
       // allocating a 32768-slot backing array. MAX_PENDING_FILES gates `pendingChunks`,
       // which is a different map and does not bound this one.
       if (incoming.size >= MAX_INCOMING_FILES) {
+        closeFile(pendKey(ctx.peerId, env.fileId))
         ev.onSystem?.('⚠ Too many files in flight from peers. Rejected one.')
         return
       }
       // A second offer reusing a fileId already in flight is dropped rather than allowed to
       // replace the entry, which would cancel the original transfer with decrypt failures.
-      if (incoming.has(env.fileId)) return
+      if (incoming.has(env.fileId)) {
+        closeFile(pendKey(ctx.peerId, env.fileId))
+        return
+      }
       // Name/MIME/size are peer-controlled and reach the feed, the download attribute
       // and the Blob type, so they are bounded here rather than at each render site.
       const fname =
@@ -799,8 +823,9 @@ export async function joinRoomSession(opts: {
       watchIncoming(env.fileId)
       const pend = pendingChunks.get(pendKey(ctx.peerId, env.fileId))
       if (pend) {
+        if (pend.timer) clearTimeout(pend.timer)
         pendingChunks.delete(pendKey(ctx.peerId, env.fileId))
-        for (const c of pend) await handleChunk(env.fileId, c)
+        for (const c of pend.chunks) await handleChunk(env.fileId, c)
       }
     } else if (env.t === 'fend') {
       // The sender has run out of chunks to push. Anything still missing is missing for
@@ -848,11 +873,22 @@ export async function joinRoomSession(opts: {
       return
     }
     const key = pendKey(ctx.peerId, data.fileId)
-    if (pendingChunks.size >= MAX_PENDING_FILES) return
-    const arr = pendingChunks.get(key) ?? []
-    if (arr.length >= MAX_PENDING_CHUNKS) return
-    arr.push(data)
-    pendingChunks.set(key, arr)
+    if (closedFiles.has(key)) return
+    let pend = pendingChunks.get(key)
+    if (!pend) {
+      if (pendingChunks.size >= MAX_PENDING_FILES) return
+      // An offer normally lands within milliseconds of its first chunk. One that has not
+      // arrived after FILE_STALL_MS failed to open or never will, so the buffer is freed
+      // and the id closed rather than held until leave().
+      const entry: PendingFile = { chunks: [], timer: null }
+      entry.timer = setTimeout(() => {
+        if (pendingChunks.get(key) === entry) closeFile(key)
+      }, FILE_STALL_MS)
+      pendingChunks.set(key, entry)
+      pend = entry
+    }
+    if (pend.chunks.length >= MAX_PENDING_CHUNKS) return
+    pend.chunks.push(data)
   }
 
   // Workshop tool gossip. Integrity and signature are verified before surfacing (section 7).
@@ -1451,7 +1487,9 @@ export async function joinRoomSession(opts: {
       for (const inc of incoming.values()) if (inc.timer) clearTimeout(inc.timer)
       incoming.clear()
       outgoing.clear()
+      for (const pend of pendingChunks.values()) if (pend.timer) clearTimeout(pend.timer)
       pendingChunks.clear()
+      closedFiles.clear()
       toolHandler = null
       gameHandler = null
       historyProvide = null

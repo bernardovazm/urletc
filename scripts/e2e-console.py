@@ -2905,6 +2905,50 @@ with sync_playwright() as p:
     check('and the empty stage goes with it', not xp.locator('.tiles-region').is_visible())
     xctx.close()
 
+    # --- accepting an invite does not carry live media into the inviter's room ---
+    # The prompt promised the camera, mic and screen stay off, yet joining the inviter's
+    # room republished every live source into it. Both contexts leave nearby first: a peer
+    # also reached there is listed under Nearby, where there is nothing to invite.
+    IV_A, IV_B = 'x' + os.urandom(3).hex(), 'x' + os.urandom(3).hex()
+    ictx_a = browser.new_context()
+    ictx_b = browser.new_context()
+    iv_a, iv_b = ictx_a.new_page(), ictx_b.new_page()
+    for _pg, _code in ((iv_a, IV_A), (iv_b, IV_B)):
+        _pg.goto(f'{BASE}/#/join/{_code}')
+        _pg.wait_for_selector('.composer', timeout=30000)
+    check('both invite contexts drop the shared nearby tier', nearby_off(iv_a) and nearby_off(iv_b))
+    for _pg in (iv_a, iv_b):
+        _pg.locator('.topbar button[title*="devices & people"]').click()
+        _pg.locator('label', has_text='Go online').locator('input[type=checkbox]').check()
+    iv_b.locator('.composer .bar button[title^="Share your camera"]').click()
+    check('the invitee is sharing its camera',
+          bool(poll(lambda: iv_b.locator('.tiles .stage-tile.kind-cam').count() == 1, 15)))
+    iv_name_b = iv_b.locator('.sidebar input[aria-label="This device name"]').input_value()
+    iv_row = iv_a.locator('.sidebar .peer', has_text=iv_name_b).locator('button[title^="Connect to "]')
+    check('the inviter finds the invitee in the online list', bool(poll(lambda: iv_row.count() == 1, 150)),
+          iv_a.locator('.sidebar').inner_text()[:240])
+    if iv_row.count() == 1:
+        iv_row.click()
+        iv_join = iv_b.locator('.sys button', has_text=f'Connect to {IV_A.upper()}')
+        check('the invitee is asked to join', bool(poll(lambda: iv_join.count() == 1, 60)))
+        iv_title = iv_join.get_attribute('title') or '' if iv_join.count() else ''
+        check('the prompt says sharing stops and the current code room is left',
+              'stops first' in iv_title and 'leaving any code room' in iv_title, iv_title)
+        if iv_join.count():
+            iv_join.click()
+            check('accepting moves the invitee into the inviter room',
+                  bool(poll(lambda: iv_b.locator('button.code-chip').inner_text().strip() == IV_A.upper(), 20)))
+            check('and stops its camera before it gets there',
+                  bool(poll(lambda: iv_b.locator('.tiles .stage-tile').count() == 0, 10)),
+                  '%d tiles' % iv_b.locator('.tiles .stage-tile').count())
+            iv_met = poll(lambda: 'accepted' in iv_a.locator('.feed').inner_text(), 90)
+            check('the inviter sees the invitee arrive', bool(iv_met), iv_a.locator('.feed').inner_text()[-160:])
+            check('and never receives its camera',
+                  bool(iv_met) and not poll(lambda: iv_a.locator('.tiles .stage-tile').count() > 0, 8),
+                  '%d tiles' % iv_a.locator('.tiles .stage-tile').count())
+    ictx_a.close()
+    ictx_b.close()
+
     # --- touch: the per-card delete control, driven by real taps ---
     # Every assertion above drives a desktop viewport with a mouse, so a control that does
     # nothing on a phone passes them all. Revealing it wherever there is no hover is the

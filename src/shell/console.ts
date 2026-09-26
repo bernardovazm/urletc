@@ -2321,12 +2321,19 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
       `Connect to ${sig.code.toUpperCase()}`,
       () => {
         dismissInvite(sig.peerId)
+        // joinTier republishes every live source into a code room. That suits a code you
+        // chose, but this room belongs to a stranger from the online list, so live sources
+        // stop before the switch instead of following it.
+        if (localStreams.size) {
+          stopMedia()
+          sys('Stopped sharing before joining their room.')
+        }
         void setCode(sig.code).then((ok) => {
           if (ok) sys(`Joined ${sig.code.toUpperCase()}. You and ${who} can message each other now.`)
         })
       },
       'ghost small',
-      'Join their room. Your camera, mic and screen stay off until you start them',
+      'Join their room, leaving any code room you are in. Anything you are sharing stops first; camera, mic and screen stay off until you start them',
     )
     const no = button(
       'Ignore',

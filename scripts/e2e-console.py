@@ -26,11 +26,14 @@ def check(name, cond, extra=''):
 # stray tab on the same network, join the same room; the "0 peers" assertions then see
 # real peers and fail intermittently. Section 2b closes the other half of that hole.
 OWN_CODE = 'e2e' + os.urandom(3).hex()
-# The code typed into the composer in 13j: 8 characters with a digit, so the composer
-# auto-joins it. Random for the same reason as OWN_CODE. CI runs each push to main in
-# parallel, and with a fixed literal every concurrent run met in one room, where one run's
-# camera arrived as a tile in another run's page.
-TYPED_CODE = 'q7' + os.urandom(3).hex()
+# The code typed into the composer in 13j: six characters of the generated-code alphabet
+# with a digit, the only shape the composer auto-joins. Random for the same reason as
+# OWN_CODE. CI runs each push to main in parallel, and with a fixed literal every
+# concurrent run met in one room, where one run's camera arrived as a tile in another
+# run's page. The alphabet is parsed from discovery.ts so the two cannot drift apart.
+CODE_ALPHABET = re.search(r"const CODE_ALPHABET = '([a-z0-9]+)'", io.open(
+    os.path.join(os.path.dirname(__file__), '..', 'src', 'p2p', 'discovery.ts'), encoding='utf-8').read()).group(1)
+TYPED_CODE = 'q7' + ''.join(CODE_ALPHABET[b % len(CODE_ALPHABET)] for b in os.urandom(4))
 
 
 def tool_ids():
@@ -594,7 +597,7 @@ with sync_playwright() as p:
     # OWN_CODE so the room stays unique per run while still exercising normalization
     # (upper case, a dash and a trailing bang all have to be stripped).
     page.locator('.modal input.mono-input').fill(f'{OWN_CODE[:3].upper()}-{OWN_CODE[3:].upper()}!')
-    page.locator('.modal button', has_text=re.compile(r'^Join$')).click()
+    page.locator('.modal button[title^="Connect with whoever uses this code"]').click()
     page.wait_for_timeout(1200)
     custom = page.locator('.modal .code-big').inner_text().strip().lower()
     check('user can define own code', custom == OWN_CODE, custom)
@@ -2621,6 +2624,23 @@ with sync_playwright() as p:
 
     # ============ stage, tiers and feed: regressions ============
 
+    def nearby_group(pg):
+        return pg.evaluate("() => [...document.querySelectorAll('.sidebar .pgroup > summary')]"
+                           ".some(s => s.textContent.startsWith('Nearby'))")
+
+    def nearby_off(pg):
+        """Leave the nearby tier, which every headless context in this run shares, so a
+        message typed here reaches only this block's own room. Waits for the tier to open
+        first: the boot pass reads the stored switch after an await and would turn a
+        switch flipped earlier back on."""
+        poll(lambda: nearby_group(pg), 30)
+        pg.evaluate("() => window.dispatchEvent(new CustomEvent('wt:nearby', { detail: false }))")
+        return bool(poll(lambda: not nearby_group(pg), 15))
+
+    CODE_PEERS = ("() => { const g = [...document.querySelectorAll('.sidebar .pgroup')]"
+                  ".find(x => x.querySelector('summary').textContent.startsWith('Code '));"
+                  " return g ? g.querySelectorAll('.peer').length : 0 }")
+
     # --- a share the browser ends is unpublished ---
     # Chrome's "Stop sharing" bar ends the track without touching any control on the page.
     # The page is told the way the browser tells it: the track stops and fires `ended`,
@@ -2717,6 +2737,43 @@ with sync_playwright() as p:
           repr(lb_a.locator('.tiles .stage-tile .tile-name').first.inner_text()))
     lctx_a.close()
     lctx_b.close()
+
+    # --- an ordinary reply is never taken for a join code ---
+    # "10min" carries a digit, which was enough to auto-join it: the reply never reached the
+    # room and the sender's camera moved to a room anyone could guess. Only the generated
+    # shape auto-joins, and not while the current room has people in it.
+    TOK_CODE = 'x' + os.urandom(3).hex()
+    kctx_a = browser.new_context()
+    kctx_b = browser.new_context()
+    tk_a = kctx_a.new_page()
+    tk_a.goto(f'{BASE}/#/join/{TOK_CODE}')
+    tk_a.wait_for_selector('.composer', timeout=30000)
+    check('the typing context leaves the shared nearby tier first', nearby_off(tk_a))
+    tk_chip = lambda: tk_a.locator('button.code-chip').inner_text().strip()
+    poll(lambda: tk_chip() == TOK_CODE.upper(), 20)
+    tk_a.locator('.composer textarea').fill('10min')
+    tk_a.locator('.composer textarea').press('Enter')
+    check('a reply like 10min stays in the room it was typed in',
+          not poll(lambda: tk_chip() != TOK_CODE.upper(), 3) and tk_a.locator('.sys', has_text='is a join code').count() == 0,
+          tk_chip())
+    check('and offers joining it as an explicit button instead',
+          tk_a.locator('.msg.me button', has_text='Join code 10MIN').count() == 1)
+    tk_b = kctx_b.new_page()
+    tk_b.goto(f'{BASE}/#/join/{TOK_CODE}')
+    tk_b.wait_for_selector('.composer', timeout=30000)
+    tk_reach = poll(lambda: tk_a.evaluate(CODE_PEERS) >= 1, 150)
+    check('a second device joins the typing room', bool(tk_reach), tk_a.locator('.feed').inner_text()[-160:])
+    check('the queued reply reaches it', bool(poll(lambda: '10min' in tk_b.locator('.feed').inner_text(), 60)))
+    tk_gen = 'k7' + ''.join(CODE_ALPHABET[b % len(CODE_ALPHABET)] for b in os.urandom(4))
+    tk_a.locator('.composer textarea').fill(tk_gen)
+    tk_a.locator('.composer textarea').press('Enter')
+    check('a generated-shape code typed with people in the room does not switch rooms',
+          not poll(lambda: tk_chip() != TOK_CODE.upper(), 3), tk_chip())
+    check('it is offered as a Join button',
+          tk_a.locator('.msg.me button', has_text=f'Join code {tk_gen.upper()}').count() == 1)
+    check('and reaches the people in the room', bool(poll(lambda: tk_gen in tk_b.locator('.feed').inner_text(), 60)))
+    kctx_a.close()
+    kctx_b.close()
 
     # --- touch: the per-card delete control, driven by real taps ---
     # Every assertion above drives a desktop viewport with a mouse, so a control that does

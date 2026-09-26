@@ -238,14 +238,17 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     if (delivered) sys(`Delivered ${delivered} queued message${delivered > 1 ? 's' : ''}.`)
   }
 
-  // A bare alphanumeric token in chat may be a join code ("k4mn2x"): auto-join when it
-  // carries a digit (plain words like "thanks" must stay chat); digit-less tokens that
-  // fit the 6-char generated-code alphabet get an explicit Join button instead.
+  // A bare alphanumeric token in chat may be a join code ("k4mn2x"). Only the shape
+  // generateJoinCode() mints, six characters of its alphabet including a digit, may
+  // auto-join: ordinary replies such as "10min", "1080p" or "win11" also carry a digit,
+  // and auto-joining one leaves the room for a guessable one. Any other digit-bearing
+  // token, and a digit-less one of the generated shape, gets an explicit Join button.
   const chatCodeCandidate = (text: string): { code: string; auto: boolean } | null => {
     const t = text.trim().toLowerCase()
     if (!/^[a-z0-9]{4,20}$/.test(t)) return null
-    if (/\d/.test(t)) return { code: t, auto: t.length >= 5 }
-    return /^[2-9a-hj-km-np-z]{6}$/.test(t) ? { code: t, auto: false } : null
+    const generated = /^[2-9a-hj-km-np-z]{6}$/.test(t)
+    if (/\d/.test(t)) return { code: t, auto: generated }
+    return generated ? { code: t, auto: false } : null
   }
 
   // ---------- feed ----------
@@ -1964,25 +1967,27 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     const ts = Date.now()
     const node = chatCard({ id, peerId: 'self', deviceId: selfDeviceId(), name: `${displayName} (you)`, text, ts, mine: true })
     remember({ id, deviceId: selfDeviceId(), name: displayName, text, ts, kind: 'chat', tier: 'me' })
-    const c = p2pReady ? chatCodeCandidate(text) : null
-    if (c && c.code !== codeLabel) {
-      const join = () =>
-        void setCode(c.code).then((ok) => {
-          if (ok) toast(`Joined code ${c.code.toUpperCase()}`)
-        })
-      if (c.auto) {
-        sys(`"${c.code}" is a join code. Connecting...`)
-        join()
-      } else {
-        node.append(button(`Join code ${c.code.toUpperCase()}`, join, 'ghost small', 'Connect using this as a join code'))
-      }
-    }
+    const found = p2pReady ? chatCodeCandidate(text) : null
+    const c = found && found.code !== codeLabel ? found : null
+    // Never switch rooms under people who are in the current one: they would lose you
+    // mid-conversation, and your live media would follow you into the new room.
+    const auto = !!c?.auto && !(rosters.get('code') ?? []).length
+    const join = (code: string) =>
+      void setCode(code).then((ok) => {
+        if (ok) toast(`Joined code ${code.toUpperCase()}`)
+      })
+    if (c && !auto) node.append(button(`Join code ${c.code.toUpperCase()}`, () => join(c.code), 'ghost small', 'Connect using this as a join code'))
     addCard(node)
+    // Sent or queued before the switch below, which drops the code session synchronously.
     if (reachableCount() > 0) {
       void sendChatAll(text, id)
-    } else if (!c?.auto) {
+    } else if (!auto) {
       outbox.push({ text, id })
       toast('No one connected. Message queued; sends when a device joins')
+    }
+    if (c && auto) {
+      sys(`"${c.code}" is a join code. Connecting...`)
+      join(c.code)
     }
     ta.value = ''
     autosize()

@@ -1568,23 +1568,26 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     [...localStreams].filter(([, m]) => m.kind !== 'screen').flatMap(([st]) => (k === 'audio' ? st.getAudioTracks() : st.getVideoTracks()))
   const localScreens = () => [...localStreams].filter(([, m]) => m.kind === 'screen').map(([st]) => st)
 
-  // The topbar's screen control. One press opens the browser's picker and publishes the
-  // choice; while a screen is shared the same button stops it. Built only where the browser
-  // exposes screen capture at all, which leaves it off phones.
-  const screenBtn = button(
-    'Share screen',
-    () => {
-      const live = localScreens()
-      if (live.length) for (const st of live) unpublish(st)
-      else void startMedia('screen')
-    },
-    'ghost screen-share',
-    'Share your screen with paired and code devices',
-  )
+  // Screen sharing as a launcher entry. It is not a registered tool: it opens no card, so
+  // its button goes straight to the browser's picker, and while a screen is shared the
+  // same button stops it. Listed and pinnable like a tool, and seeded onto the bar.
+  // Offered only where the browser exposes screen capture at all, which leaves it off
+  // phones.
+  const SCREEN_ENTRY = 'screen'
+  const screenCapture = screenShareSupport().capture
+  const toggleScreen = () => {
+    const live = localScreens()
+    if (live.length) for (const st of live) unpublish(st)
+    else void startMedia('screen')
+  }
+  const screenLabel = () => (localScreens().length ? 'Stop sharing' : 'Share screen')
+  const screenTitle = () => (localScreens().length ? 'Stop sharing your screen' : 'Share your screen with paired and code devices')
+  const screenBtn = button('Share screen', toggleScreen, 'ghost tool-pin screen-share', 'Share your screen with paired and code devices')
+  screenBtn.dataset.tool = SCREEN_ENTRY
   function syncScreenBtn(): void {
     const on = localScreens().length > 0
-    screenBtn.textContent = on ? 'Stop sharing' : 'Share screen'
-    screenBtn.title = on ? 'Stop sharing your screen' : 'Share your screen with paired and code devices'
+    screenBtn.textContent = screenLabel()
+    screenBtn.title = screenTitle()
     screenBtn.setAttribute('aria-pressed', String(on))
     screenBtn.classList.toggle('on', on)
   }
@@ -1615,10 +1618,22 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
 
   // ---------- tool launcher (anchored panel: hover to open, drag to reorder) ----------
   let toolOrder: string[] = (await getItem<string[]>('tool-order')) ?? []
-  // Tools pinned to the topbar, by id, in bar order. Nothing is pinned by default; screen
-  // sharing, the one thing most people came to the bar for, has its own button.
+  // Tools pinned to the topbar, by id, in bar order. A stored array is obeyed even when it
+  // is empty, so an unpinned entry stays off the bar. PIN_SEEDS are put on the bar once
+  // per profile, including a profile that saved its pins before the seed existed, and
+  // 'pin-seeds' records which were offered so an unpinned seed never comes back.
+  const PIN_SEEDS = [SCREEN_ENTRY]
   const storedPins = await getItem<string[]>('tool-pins')
   let toolPins: string[] = Array.isArray(storedPins) ? storedPins.filter((id) => typeof id === 'string') : []
+  {
+    const seeded = (await getItem<string[]>('pin-seeds')) ?? []
+    const fresh = PIN_SEEDS.filter((id) => !seeded.includes(id))
+    if (fresh.length) {
+      toolPins = [...fresh.filter((id) => !toolPins.includes(id)), ...toolPins]
+      void setItem('tool-pins', toolPins)
+      void setItem('pin-seeds', [...seeded, ...fresh])
+    }
+  }
   const orderedTools = () => {
     const all = registry.list()
     const pos = (id: string) => {
@@ -1718,8 +1733,40 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     window.clearTimeout(launcherCloseTimer)
     const menu = el('div', { class: 'menu tool-grid' })
     let dragId: string | null = null
+    const pinToggle = (id: string, name: string) => {
+      // The pin toggle is a sibling of the entry's button, not a child: a button cannot
+      // nest another one, and the wrapper is what the grid lays out.
+      const pinned = toolPins.includes(id)
+      const pin = button(
+        pinned ? 'Unpin' : 'Pin',
+        () => {
+          toolPins = pinned ? toolPins.filter((x) => x !== id) : [...toolPins, id]
+          void setItem('tool-pins', toolPins)
+          renderPins()
+          renderItems()
+        },
+        'ghost pin-toggle',
+        pinned ? `Take ${name} off the topbar` : `Put ${name} on the topbar`,
+      )
+      pin.setAttribute('aria-pressed', String(pinned))
+      return pin
+    }
     const renderItems = () => {
       menu.replaceChildren()
+      if (screenCapture && 'share screen'.includes(filter.toLowerCase())) {
+        const b = button(
+          `🖥 ${screenLabel()}`,
+          () => {
+            closeLauncher()
+            toggleScreen()
+          },
+          'ghost tool-open',
+          screenTitle(),
+        )
+        b.addEventListener('mouseenter', scheduleGenClose)
+        b.dataset.tool = SCREEN_ENTRY
+        menu.append(el('div', { class: 'tool-item' }, [b, pinToggle(SCREEN_ENTRY, 'Share screen')]))
+      }
       const list = orderedTools().filter((m) => m.name.toLowerCase().includes(filter.toLowerCase()))
       for (const m of list) {
         const b = button(
@@ -1756,24 +1803,9 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
         } else {
           b.addEventListener('mouseenter', scheduleGenClose)
         }
-        // The pin toggle is a sibling of the tool button, not a child: a button cannot
-        // nest another one, and the wrapper is what the grid lays out.
-        const pinned = toolPins.includes(m.id)
-        const pin = button(
-          pinned ? 'Unpin' : 'Pin',
-          () => {
-            toolPins = pinned ? toolPins.filter((id) => id !== m.id) : [...toolPins, m.id]
-            void setItem('tool-pins', toolPins)
-            renderPins()
-            renderItems()
-          },
-          'ghost pin-toggle',
-          pinned ? `Take ${m.name} off the topbar` : `Put ${m.name} on the topbar`,
-        )
-        pin.setAttribute('aria-pressed', String(pinned))
-        menu.append(el('div', { class: 'tool-item' }, [b, pin]))
+        menu.append(el('div', { class: 'tool-item' }, [b, pinToggle(m.id, m.name)]))
       }
-      if (!list.length) menu.append(el('div', { class: 'muted small', text: 'No tool matches.' }))
+      if (!menu.children.length) menu.append(el('div', { class: 'muted small', text: 'No tool matches.' }))
     }
     renderItems()
     menu.addEventListener('mouseenter', () => window.clearTimeout(launcherCloseTimer))
@@ -1817,6 +1849,10 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   function renderPins() {
     topbar.querySelectorAll<HTMLElement>('button.tool-pin').forEach((old) => old.remove())
     for (const id of toolPins) {
+      if (id === SCREEN_ENTRY) {
+        if (screenCapture) topbar.insertBefore(screenBtn, toolsBtn)
+        continue
+      }
       const m = registry.get(id)
       if (!m) continue // a pin left behind by a tool that is no longer registered
       const b = button(m.name, () => void launchTool(m), 'ghost tool-pin', `${m.description ?? m.name}. Pinned to the bar; unpin it under Tools.`)
@@ -2610,7 +2646,6 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     el('span', { class: 'spacer' }),
     // Text buttons first, then every glyph button in one run. Splitting the four emoji
     // controls around Tools and Connect made two of them read as part of the text group.
-    ...(screenShareSupport().capture ? [screenBtn] : []),
     toolsBtn,
     button('Connect', () => void openConnect(), 'ghost', 'Join a code, pair devices, test mic & cam, device name'),
     shareBtn,

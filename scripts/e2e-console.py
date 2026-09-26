@@ -310,19 +310,22 @@ with sync_playwright() as p:
     page.screenshot(path=f'{SNAP}/e2e-launcher.png')
 
     # --- 6. drag-to-reorder persists ---
-    src = page.locator('.menu.tool-grid button.tool-open').nth(2)
-    dst = page.locator('.menu.tool-grid button.tool-open').nth(0)
+    # Share screen leads the list and is not a tool, so it takes no part in the order.
+    DRAGGABLE = '.menu.tool-grid button.tool-open[draggable="true"]'
+    first_before = page.locator(DRAGGABLE).first.inner_text()
+    src = page.locator(DRAGGABLE).nth(2)
+    dst = page.locator(DRAGGABLE).nth(0)
     moved_name = src.inner_text()
     src.drag_to(dst)
     page.wait_for_timeout(400)
-    first_after = page.locator('.menu.tool-grid button.tool-open').first.inner_text()
+    first_after = page.locator(DRAGGABLE).first.inner_text()
     check('drag reorders tool list', first_after == moved_name and first_after != first_before, f'{first_before!r} -> {first_after!r}')
     page.keyboard.press('Escape')
     page.mouse.click(400, 300)  # close launcher
     page.wait_for_timeout(300)
     tools_btn.hover()
     page.wait_for_selector('.menu.tool-grid', timeout=3000)
-    check('reorder persists on reopen', page.locator('.menu.tool-grid button.tool-open').first.inner_text() == moved_name)
+    check('reorder persists on reopen', page.locator(DRAGGABLE).first.inner_text() == moved_name)
 
     # --- 6b. Generators hover preview: values flyout beside launcher, click-to-copy ---
     page.locator('.menu.tool-grid button', has_text='Generators').hover()
@@ -2509,8 +2512,8 @@ with sync_playwright() as p:
     check('the topbar offers screen sharing by name',
           TOP_SCREEN.count() == 1 and TOP_SCREEN.inner_text() == 'Share screen',
           '%d buttons' % TOP_SCREEN.count())
-    check('the topbar no longer seeds a Studio pin',
-          spg.locator('.topbar button.tool-pin').count() == 0)
+    check('a fresh profile has Share screen on the bar and no Studio pin',
+          spg.eval_on_selector_all('.topbar button.tool-pin', 'els => els.map(e => e.dataset.tool)') == ['screen'])
     TOP_SCREEN.click()
     check('one press on it shares the screen',
           bool(poll(lambda: spg.locator('.tiles .stage-tile.kind-screen').count() == 1, 10)),
@@ -2734,9 +2737,16 @@ with sync_playwright() as p:
         pp.wait_for_selector('.menu.tool-grid', timeout=3000)
 
     av_id = tool_id_for('studio')
-    check('pin: a profile that never wrote the key starts with nothing pinned',
-          pin_ids() == [], str(pin_ids()))
+    check('pin: a profile that never wrote the key starts with Share screen pinned and nothing else',
+          pin_ids() == ['screen'], str(pin_ids()))
     open_launcher()
+    # Share screen is a launcher entry like the tools: listed, pinned, and unpinnable.
+    check('pin: the launcher lists Share screen as a pinned entry',
+          pin_toggle('Share screen').count() == 1 and pin_toggle('Share screen').inner_text() == 'Unpin',
+          '%d entries' % pin_toggle('Share screen').count())
+    pin_toggle('Share screen').click()
+    pp.wait_for_timeout(400)
+    check('pin: Share screen comes off the bar when unpinned', pin_ids() == [], str(pin_ids()))
     pin_toggle('Studio').click()
     pp.wait_for_timeout(500)
     pp.keyboard.press('Escape')
@@ -2792,6 +2802,43 @@ with sync_playwright() as p:
     check('pin: an unpinned tool stays unpinned across a reload', pin_ids() == [], str(pin_ids()))
     check('pin: Studio does not come back once unpinned',
           pp.locator('.topbar button.tool-pin[data-tool="%s"]' % av_id).count() == 0)
+    # The seed is offered once. An unpinned Share screen must not be put back by the next
+    # load, or unpinning it would only last until a reload.
+    check('pin: an unpinned Share screen stays off the bar across reloads',
+          pp.locator('.topbar button.screen-share').count() == 0)
+    open_launcher()
+    pin_toggle('Share screen').click()
+    pp.wait_for_timeout(400)
+    check('pin: Share screen can be pinned back', pin_ids() == ['screen'], str(pin_ids()))
+    # A profile that saved its pins before Share screen existed gets it once. Simulated by
+    # unpinning it and deleting the record of seeds already offered.
+    pin_toggle('Share screen').click()
+    pp.wait_for_timeout(400)
+    pp.keyboard.press('Escape')
+    pp.evaluate("""() => new Promise((res, rej) => {
+      const r = indexedDB.open('wt-data')
+      r.onerror = () => rej(r.error)
+      r.onsuccess = () => { const tx = r.result.transaction('kv', 'readwrite')
+        tx.objectStore('kv').delete('pin-seeds'); tx.oncomplete = () => { r.result.close(); res() } }
+    })""")
+    pp.reload()
+    pp.wait_for_selector('.composer', timeout=30000)
+    check('pin: saved pins from before the seed get Share screen once',
+          bool(poll(lambda: pin_ids() == ['screen'], 5)), str(pin_ids()))
+    # The launcher entry itself shares, with no card in between.
+    pp.add_init_script(FAKE_SCREEN)
+    pp.reload()
+    pp.wait_for_selector('.composer', timeout=30000)
+    open_launcher()
+    pp.locator('.menu.tool-grid button.tool-open[data-tool="screen"]').click()
+    check('pin: the launcher entry shares the screen in one press',
+          bool(poll(lambda: pp.locator('.tiles .stage-tile.kind-screen').count() == 1, 10)))
+    open_launcher()
+    check('pin: the launcher entry reads Stop sharing while the screen is shared',
+          'Stop sharing' in pp.locator('.menu.tool-grid button.tool-open[data-tool="screen"]').inner_text())
+    pp.locator('.menu.tool-grid button.tool-open[data-tool="screen"]').click()
+    check('pin: and one more press stops it',
+          bool(poll(lambda: pp.locator('.tiles .stage-tile').count() == 0, 10)))
     check('pin: no page error on the pin path', not perrs, ' | '.join(perrs)[:200])
     pctx.close()
 

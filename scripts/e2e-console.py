@@ -2988,6 +2988,51 @@ with sync_playwright() as p:
     check('and takes the captions strip down', not cp.locator('.captions').is_visible())
     cctx.close()
 
+    # --- a received file still downloads after its room is left ---
+    # The session revoked every blob URL it had handed out when it left, while the file
+    # card stayed in the feed, so switching rooms broke each earlier Download link without
+    # a word. Both contexts leave nearby, so the file reaches only this block's room.
+    FL_CODE = 'x' + os.urandom(3).hex()
+    FL_PNG = os.path.join(SNAP, f'wt-keep-{FL_CODE}.png')
+    fl_bytes = make_png(FL_PNG, 64, 48)
+    fctx_a = browser.new_context()
+    fctx_b = browser.new_context(accept_downloads=True)
+    fl_a, fl_b = fctx_a.new_page(), fctx_b.new_page()
+    for _pg in (fl_a, fl_b):
+        _pg.goto(f'{BASE}/#/join/{FL_CODE}')
+        _pg.wait_for_selector('.composer', timeout=30000)
+    check('both file contexts drop the shared nearby tier', nearby_off(fl_a) and nearby_off(fl_b))
+    fl_reach = poll(lambda: fl_a.evaluate(CODE_PEERS) >= 1
+                    and 'connected' in (fl_a.locator('.topbar .badge').inner_text() or ''), 150)
+    check('the file contexts share a code room', bool(fl_reach), fl_a.locator('.feed').inner_text()[-160:])
+    fl_a.locator('input[type=file][accept="image/*"]').set_input_files(FL_PNG)
+    fl_a.locator('.card button', has_text='Send to devices').last.click()
+    fl_card = fl_b.locator('.feed-item', has=fl_b.locator('img.preview'))
+    check('the file arrives', bool(poll(lambda: fl_card.count() == 1, 90)), fl_b.locator('.feed').inner_text()[-160:])
+    fl_b.locator('.topbar button', has_text='Connect').click()
+    fl_b.locator('.modal button', has_text='Stop code room').click()
+    fl_b.keyboard.press('Escape')
+    poll(lambda: fl_b.locator('button.code-chip').is_hidden(), 10)
+    fl_href = fl_card.locator('a[download]').get_attribute('href') if fl_card.count() else ''
+    fl_fail, fl_size = 'no card', -1
+    if fl_card.count():
+        with fl_b.expect_download(timeout=15000) as fl_dl:
+            fl_card.locator('a[download]').click()
+        fl_fail = fl_dl.value.failure()
+        fl_size = os.path.getsize(fl_dl.value.path()) if not fl_fail else -1
+    check('its Download link still works after the room is left', not fl_fail and fl_size == fl_bytes,
+          f'failure={fl_fail!r} size={fl_size} expected {fl_bytes}')
+    FL_LOADS = "h => new Promise(r => { const i = new Image(); i.onload = () => r(true); i.onerror = () => r(false); i.src = h })"
+    fl_del = fl_card.locator('button.del')
+    fl_had = fl_card.count() == 1
+    if fl_had:
+        fl_card.hover()
+        fl_del.click()
+        fl_del.click()
+    check('removing the card frees the file', fl_had and fl_card.count() == 0 and not fl_b.evaluate(FL_LOADS, fl_href))
+    fctx_a.close()
+    fctx_b.close()
+
     # --- touch: the per-card delete control, driven by real taps ---
     # Every assertion above drives a desktop viewport with a mouse, so a control that does
     # nothing on a phone passes them all. Revealing it wherever there is no hover is the

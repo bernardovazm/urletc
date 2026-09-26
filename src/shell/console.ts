@@ -2131,7 +2131,9 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     onFileReceived: (f) => {
       if (dropped.has(f.from)) return
       remember({ id: f.id, deviceId: f.from, name: senderLabel(f.from), text: f.name, ts: Date.now(), kind: 'file', size: f.size, tier })
-      addCard(fileCard(f))
+      // The card owns the blob URL: the session hands it over and never revokes it, so a
+      // Download link keeps working after the room that delivered the file is left.
+      addCard(fileCard(f), () => URL.revokeObjectURL(f.url))
       markActivity()
     },
     onHistoryRequest: (peerId) => {

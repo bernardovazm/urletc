@@ -1382,8 +1382,8 @@ export async function joinRoomSession(opts: {
       for (const s of activeStreams.keys()) room.removeStream(s)
       activeStreams.clear()
       mediaChain.clear()
-      for (const u of receivedUrls) URL.revokeObjectURL(u)
-      receivedUrls.clear()
+      // A URL passed to onFileReceived belongs to the receiver, whose file card outlives
+      // the room and revokes it when the card is removed.
       await room.leave()
       peers.clear()
       for (const inc of incoming.values()) if (inc.timer) clearTimeout(inc.timer)

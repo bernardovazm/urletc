@@ -4790,10 +4790,18 @@ with sync_playwright() as p:
     check('clipboard: a URL on the clipboard gets the structural verdict, not just a parse',
           lcard.locator('.url-check-structural').count() >= 1,
           lcard.inner_text()[:220].replace('\n', ' / '))
-    _ltxt = lcard.inner_text().lower()
+    # The card says "Checking blocklist feeds..." until the lookup settles, so the answer
+    # is read off the feed result, or off the placeholder once it names the feeds as down.
+    def _lfeed():
+        r = lcard.locator('.url-check-feedresult')
+        if r.count():
+            return r.first.inner_text()
+        t = lcard.locator('.url-check-pending').all_inner_texts()
+        return t[0] if t and t[0].startswith('Feeds unavailable') else None
+    _lans = (poll(_lfeed, 30) or '').lower()
     check('clipboard: the blocklist answer is on the card',
-          'listed' in _ltxt or 'blocklist' in _ltxt or 'feeds unavailable' in _ltxt,
-          _ltxt[:220].replace('\n', ' / '))
+          any(w in _lans for w in ('listed by', 'related listing', 'not on ', 'unavailable')),
+          (_lans or lcard.inner_text().lower())[:220].replace('\n', ' / '))
     check('clipboard: the parts breakdown is kept, under the verdict and not instead of it',
           lcard.locator('.url-check-parts').count() >= 1)
     # The switch the console reads before it overwrites the clipboard with OCR output. The

@@ -4818,6 +4818,127 @@ with sync_playwright() as p:
     page.set_viewport_size(vp0)
     page.wait_for_timeout(300)
 
+    # ============ store and service worker: regressions ============
+    # --- store: a re-key in one tab reaches every other tab ---
+    # Each tab holds the wrap key in memory while wt-keys is shared, so a tab that kept
+    # writing after another tab enabled a passphrase or reset the device sealed items under
+    # a key nothing could load, and the next boot showed "Boot failed" on every load. Two
+    # tabs of one profile are driven through both re-keys, then an item sealed under a key
+    # no tab holds is planted to stand in for a write that raced one.
+    SEAL_FOREIGN = r"""async (key) => {
+      const db = await new Promise((res, rej) => {
+        const r = indexedDB.open('wt-data')
+        r.onupgradeneeded = () => r.result.createObjectStore('kv')
+        r.onsuccess = () => res(r.result)
+        r.onerror = () => rej(r.error)
+      })
+      const k = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt'])
+      const iv = crypto.getRandomValues(new Uint8Array(12))
+      const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, k, new TextEncoder().encode('true')))
+      await new Promise((res, rej) => {
+        const tx = db.transaction('kv', 'readwrite')
+        tx.objectStore('kv').put({ iv, ct }, key)
+        tx.oncomplete = () => res()
+        tx.onerror = () => rej(tx.error)
+      })
+      db.close()
+      return [...ct].join(',')
+    }"""
+    PEEK_SEALED = r"""async (key) => {
+      const db = await new Promise((res, rej) => {
+        const r = indexedDB.open('wt-data')
+        r.onsuccess = () => res(r.result)
+        r.onerror = () => rej(r.error)
+      })
+      const v = await new Promise((res) => {
+        const rq = db.transaction('kv', 'readonly').objectStore('kv').get(key)
+        rq.onsuccess = () => res(rq.result)
+        rq.onerror = () => res(null)
+      })
+      db.close()
+      return v ? [...v.ct].join(',') : null
+    }"""
+    kx_code = 'x' + os.urandom(3).hex()
+    kx_ctx = browser.new_context()
+    kx_a, kx_b = kx_ctx.new_page(), kx_ctx.new_page()
+    kx_errs = []
+    for _pg in (kx_a, kx_b):
+        _pg.on('pageerror', lambda e: kx_errs.append(str(e)))
+        _pg.on('dialog', lambda d: d.accept())
+        _pg.goto(f'{BASE}/#/join/{kx_code}')
+        _pg.wait_for_selector('.composer', timeout=30000)
+
+    def kx_reloaded(pg):
+        try:
+            pg.wait_for_function('() => window.__kxAlive === undefined', timeout=20000)
+            return True
+        except Exception:
+            return False
+
+    kx_b.evaluate('window.__kxAlive = 1')
+    kx_a.evaluate("location.hash = '#/t/settings'")
+    kx_a.wait_for_selector('input[aria-label="New vault passphrase"]', timeout=20000)
+    kx_a.fill('input[aria-label="New vault passphrase"]', 'kx correct horse')
+    kx_a.fill('input[aria-label="Confirm passphrase"]', 'kx correct horse')
+    kx_a.locator('button', has_text='Enable passphrase lock').last.click()
+    _kx_locked = kx_reloaded(kx_b)
+    if _kx_locked:
+        try:
+            kx_b.wait_for_selector('input[aria-label="Vault passphrase"]', timeout=20000)
+        except Exception:
+            _kx_locked = False
+    check('store: enabling a passphrase in one tab sends the other tab to the unlock screen',
+          _kx_locked, kx_b.locator('#app').inner_text()[:160].replace('\n', ' / '))
+    if _kx_locked:
+        kx_b.fill('input[aria-label="Vault passphrase"]', 'kx correct horse')
+        kx_b.locator('button', has_text='Unlock').click()
+        try:
+            kx_b.wait_for_selector('.composer', timeout=30000)
+            _kx_open = True
+        except Exception:
+            _kx_open = False
+        check('store: that tab opens the vault with the passphrase the first tab set',
+              _kx_open, kx_b.locator('#app').inner_text()[:160].replace('\n', ' / '))
+
+    kx_a.evaluate('window.__kxAlive = 1')
+    kx_b.evaluate('window.__kxAlive = 1')
+    kx_a.wait_for_selector('button:has-text("Delete everything on this device")', timeout=20000)
+    kx_a.locator('button', has_text='Delete everything on this device').last.click()
+    _kx_wiped = kx_reloaded(kx_a) and kx_reloaded(kx_b)
+    check('store: a reset in one tab reloads the other tab too', _kx_wiped,
+          kx_b.locator('#app').inner_text()[:160].replace('\n', ' / '))
+    try:
+        kx_b.wait_for_selector('.composer', timeout=30000)
+        _kx_b_up = True
+    except Exception:
+        _kx_b_up = False
+    check('store: after the reset the other tab boots straight into the console', _kx_b_up,
+          kx_b.locator('#app').inner_text()[:160].replace('\n', ' / '))
+
+    # The drawer toggle writes sidebar-open. Written from the tab that did not reset, it
+    # has to be readable by the tab that did, so both are on the one key now on disk.
+    kx_a.wait_for_selector('.composer', timeout=30000)
+    if _kx_b_up:
+        kx_b.locator('.roster-toggle').click()
+        poll(lambda: kx_b.locator('.sidebar.open').count() == 1, 5)
+        kx_b.wait_for_timeout(300)
+    kx_a.reload()
+    kx_a.wait_for_selector('.composer, #app pre', timeout=30000)
+    check('store: the resetting tab still boots after the other tab wrote',
+          kx_a.locator('.composer').count() == 1, kx_a.locator('#app').inner_text()[:200].replace('\n', ' / '))
+    check('store: it reads that write, so both tabs share one key',
+          kx_a.locator('.sidebar.open').count() == 1)
+
+    kx_sealed = kx_a.evaluate(SEAL_FOREIGN, 'sidebar-open')
+    kx_a.reload()
+    kx_a.wait_for_selector('.composer, #app pre', timeout=30000)
+    check('store: an item sealed under a key no tab holds does not stop boot',
+          kx_a.locator('.composer').count() == 1, kx_a.locator('#app').inner_text()[:200].replace('\n', ' / '))
+    check('store: that item reads as its default', kx_a.locator('.sidebar.open').count() == 0)
+    check('store: that item is left on disk untouched', kx_a.evaluate(PEEK_SEALED, 'sidebar-open') == kx_sealed)
+    check('store: no page error across the re-key paths', not kx_errs, ' | '.join(kx_errs)[:200])
+    kx_ctx.close()
+
     # --- service worker registers and its precache install does not reject ---
     # sw.js is a third execution context, and an unhandled rejection inside it reaches
     # neither page.on('console') nor page.on('pageerror'). That is how

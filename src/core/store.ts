@@ -42,6 +42,57 @@ const decoder = new TextDecoder()
 let wrapKey: CryptoKey | null = null
 let locked = false
 
+// Every tab holds its own copy of the wrap key in memory, while wt-keys is shared. A mode
+// switch or a reset in one tab replaces the key on disk under the others, and a write from
+// a tab still holding the old key lands under a key nothing can load again. So
+// enablePassphrase, disablePassphrase and wipeAll post here, and every other tab drops its
+// key and reloads onto what is on disk now. A channel never receives its own messages.
+const rekeyChannel = typeof BroadcastChannel === 'function' ? new BroadcastChannel('wt-store') : null
+rekeyChannel?.addEventListener('message', () => {
+  lock()
+  location.reload()
+})
+
+/** Run `fn` holding the cross-tab store lock. Key creation, mode switches and the reset
+ *  read state inside it, so two tabs never generate competing keys and a tab booting
+ *  mid-switch never sees the switch half done and rolls it back. */
+function exclusive<T>(fn: () => Promise<T>): Promise<T> {
+  return 'locks' in navigator ? navigator.locks.request('wt-store', fn) : fn()
+}
+
+// In-tab gate. finishSwitch walks a snapshot of the keys, so an item written while it runs
+// would land under the outgoing key after the loop had passed it. Reads and writes wait for
+// a switch to finish, and a switch waits for the ones already in flight.
+let switching: Promise<void> | null = null
+const inflight = new Set<Promise<unknown>>()
+
+async function access<T>(fn: () => Promise<T>): Promise<T> {
+  while (switching) await switching
+  const run = fn()
+  inflight.add(run)
+  try {
+    return await run
+  } finally {
+    inflight.delete(run)
+  }
+}
+
+function rekey<T>(fn: () => Promise<T>): Promise<T> {
+  const run = (async () => {
+    await Promise.allSettled([...inflight])
+    return exclusive(fn)
+  })()
+  const gate = run.then(
+    () => undefined,
+    () => undefined,
+  )
+  switching = gate
+  void gate.then(() => {
+    if (switching === gate) switching = null
+  })
+  return run
+}
+
 /**
  * Boot the store. Returns whether it is locked (passphrase mode, awaiting unlock).
  *
@@ -51,7 +102,11 @@ let locked = false
  * `MODE` is flipped only after every item is re-wrapped, so `MODE` alone is always
  * trustworthy, and the marker says to finish or roll back a leftover switch.
  */
-export async function initStore(): Promise<{ locked: boolean }> {
+export function initStore(): Promise<{ locked: boolean }> {
+  return exclusive(bootStore)
+}
+
+async function bootStore(): Promise<{ locked: boolean }> {
   const migrating = (await get<string>(MIGRATION_ID, keyStore)) as StoreMode | undefined
   const mode = ((await get<string>(MODE_ID, keyStore)) ?? 'device') as StoreMode
 
@@ -114,7 +169,11 @@ async function finishSwitch(target: StoreMode, toKey: CryptoKey, fromKey: Crypto
       continue // already re-wrapped under the target key
     } catch {
       if (!fromKey) throw new Error('store migration is unrecoverable (missing source key)')
+    }
+    try {
       pt = await aesGcmDecrypt(fromKey, blob)
+    } catch {
+      continue // sealed under neither key; left in place, and getItem answers undefined for it
     }
     await set(k, await aesGcmEncrypt(toKey, pt), dataStore)
   }
@@ -147,7 +206,11 @@ async function deriveKey(passphrase: string, salt: Uint8Array<ArrayBuffer>): Pro
 }
 
 /** Unlock a passphrase-mode store. Returns false on wrong passphrase. */
-export async function unlock(passphrase: string): Promise<boolean> {
+export function unlock(passphrase: string): Promise<boolean> {
+  return rekey(() => unlockStore(passphrase))
+}
+
+async function unlockStore(passphrase: string): Promise<boolean> {
   const salt = await get<Uint8Array<ArrayBuffer>>(SALT_ID, keyStore)
   const verifier = await get<AesGcmBlob>(VERIFIER_ID, keyStore)
   if (!salt || !verifier) throw new Error('no passphrase configured')
@@ -197,7 +260,14 @@ export function lock(): void {
  * the next boot or unlock rather than stranding items under the unselected key. `MODE`
  * flips only after the whole rewrite, and the old device key is dropped after the commit.
  */
-export async function enablePassphrase(passphrase: string): Promise<void> {
+export function enablePassphrase(passphrase: string): Promise<void> {
+  return rekey(async () => {
+    await switchToPassphrase(passphrase)
+    rekeyChannel?.postMessage('rekeyed')
+  })
+}
+
+async function switchToPassphrase(passphrase: string): Promise<void> {
   const deviceKey = requireKey()
   const salt = randomBytes(16)
   const ppKey = await deriveKey(passphrase, salt)
@@ -215,7 +285,14 @@ export async function enablePassphrase(passphrase: string): Promise<void> {
  * fresh device key. The new device key is persisted before the rewrite so an interrupted
  * switch can be finished without the passphrase once `MODE` has committed.
  */
-export async function disablePassphrase(): Promise<void> {
+export function disablePassphrase(): Promise<void> {
+  return rekey(async () => {
+    await switchToDevice()
+    rekeyChannel?.postMessage('rekeyed')
+  })
+}
+
+async function switchToDevice(): Promise<void> {
   const ppKey = requireKey()
   const deviceKey = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt'])
 
@@ -226,16 +303,32 @@ export async function disablePassphrase(): Promise<void> {
   locked = false
 }
 
-export async function setItem(key: string, value: unknown): Promise<void> {
-  const blob = await aesGcmEncrypt(requireKey(), encoder.encode(JSON.stringify(value)))
-  await set(key, blob, dataStore)
+export function setItem(key: string, value: unknown): Promise<void> {
+  return access(async () => {
+    const blob = await aesGcmEncrypt(requireKey(), encoder.encode(JSON.stringify(value)))
+    await set(key, blob, dataStore)
+  })
 }
 
-export async function getItem<T = unknown>(key: string): Promise<T | undefined> {
-  const blob = await get<AesGcmBlob>(key, dataStore)
-  if (!blob) return undefined
-  const pt = await aesGcmDecrypt(requireKey(), blob)
-  return JSON.parse(decoder.decode(pt)) as T
+/**
+ * Read one item, or undefined when it is absent or sealed under a key this tab does not
+ * hold. The second case is an item another tab wrote around a re-key: every caller has a
+ * default, and one unreadable item must not take boot down with it. It is left on disk,
+ * since the tab that wrote it may still be able to read it.
+ */
+export function getItem<T = unknown>(key: string): Promise<T | undefined> {
+  return access(async () => {
+    const blob = await get<AesGcmBlob>(key, dataStore)
+    if (!blob) return undefined
+    const k = requireKey()
+    let pt: Uint8Array<ArrayBuffer>
+    try {
+      pt = await aesGcmDecrypt(k, blob)
+    } catch {
+      return undefined
+    }
+    return JSON.parse(decoder.decode(pt)) as T
+  })
 }
 
 export async function removeItem(key: string): Promise<void> {
@@ -257,7 +350,14 @@ export async function allKeys(): Promise<string[]> {
  * vault under a key that no longer exists on disk. The caller must reload; nothing can
  * continue in memory once the identity is gone.
  */
-export async function wipeAll(): Promise<void> {
+export function wipeAll(): Promise<void> {
+  return rekey(async () => {
+    await wipeStore()
+    rekeyChannel?.postMessage('rekeyed')
+  })
+}
+
+async function wipeStore(): Promise<void> {
   await clear(dataStore) // vault items, including every tool:<id>: namespace
   await clear(keyStore) // wrap key, mode, salt, verifier, migration marker, identity keypairs
   wrapKey = null

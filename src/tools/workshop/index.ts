@@ -6,6 +6,7 @@ import { hostFetch, runHtmlApp, runInSandbox, type SandboxPermissions } from '..
 import { getActiveSession } from '../../p2p/session'
 import type { ToolContext, ToolModule } from '../../shell/registry'
 import { badge, button, consent, el, toast } from '../../shell/ui'
+import { addGameHandler, addToolHandler } from '../room-handlers'
 
 // Per-card teardown keyed by container. The cached module is shared across open Workshop
 // cards, so the running-app handle and the session tool-handler unsubscribe must be
@@ -205,13 +206,15 @@ const tool: ToolModule = {
         mountRow,
       )
       const relaySess = getActiveSession()
-      relaySess?.setGameHandler((payload, from) => {
-        const p = payload as { ws?: number; id?: string; d?: unknown }
-        if (p && p.ws === 1 && p.id === m.contentHash) handle.postRoom(from, p.d)
-      })
+      const offRelay = relaySess
+        ? addGameHandler(relaySess, (payload, from) => {
+            const p = payload as { ws?: number; id?: string; d?: unknown }
+            if (p && p.ws === 1 && p.id === m.contentHash) handle.postRoom(from, p.d)
+          })
+        : null
       closeApp = () => {
         handle.close()
-        relaySess?.setGameHandler(null)
+        offRelay?.()
         appBox.replaceChildren()
         closeApp = null
       }
@@ -279,14 +282,13 @@ const tool: ToolModule = {
       )
     }
     if (sess) {
-      sess.setToolHandler((m) => {
+      clearToolHandler = addToolHandler(sess, (m) => {
         if (incoming.length >= 50) return // bound the inbox against a flooding peer
         if (!incoming.some((x) => x.id === m.id)) {
           incoming.push(m)
           renderIncoming()
         }
       })
-      clearToolHandler = () => sess.setToolHandler(null)
     }
 
     // --- Create ---

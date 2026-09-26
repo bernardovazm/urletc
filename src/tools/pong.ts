@@ -9,9 +9,10 @@
 // size. Game state is transport-encrypted by the room password, like media, and carries no
 // secrets.
 
-import { getAllSessions } from '../p2p/session'
+import { getAllSessions, type RoomSession } from '../p2p/session'
 import type { ToolModule } from '../shell/registry'
 import { button, el } from '../shell/ui'
+import { addGameHandler } from './room-handlers'
 
 const PADDLE_X = 0.04 // paddle distance from its wall
 const PADDLE_HALF = 0.11 // paddle half-height
@@ -425,9 +426,17 @@ const tool: ToolModule = {
           return
       }
     }
-    // Set the handler on every current session; the poll re-syncs sessions that join later.
+    // Subscribe on every current session; the poll picks up sessions that join later and
+    // drops the ones that left.
+    const gameSubs = new Map<RoomSession, () => void>()
     const syncHandlers = () => {
-      for (const s of getAllSessions()) s.setGameHandler(onGame)
+      const live = getAllSessions()
+      for (const [s, off] of gameSubs) {
+        if (live.includes(s)) continue
+        off()
+        gameSubs.delete(s)
+      }
+      for (const s of live) if (!gameSubs.has(s)) gameSubs.set(s, addGameHandler(s, onGame))
     }
 
     // --- controls, either pointer on the board or arrow keys and W/S when focused ---
@@ -511,7 +520,8 @@ const tool: ToolModule = {
       window.removeEventListener('wt:theme', onTheme)
       if (opp) sendTo(opp, { t: 'bye' })
       else if (pendingOut) sendTo(pendingOut, { t: 'cancel' })
-      for (const s of getAllSessions()) s.setGameHandler(null)
+      for (const off of gameSubs.values()) off()
+      gameSubs.clear()
     })
   },
 

@@ -1510,6 +1510,84 @@ with sync_playwright() as p:
           bool(rpoll(rp, lambda: _hrow.count() == 1 and 'v1, html' in _hrow.inner_text(), 5)))
     rc.close()
 
+    # Session tool and game handlers fan out per card. Workshop shares and relays on the
+    # personal room, so two contexts open one pairing link and meet only there. On B,
+    # closing one of two Workshop cards leaves the other listing a tool A shares, and a
+    # Workshop app keeps hearing A's copy of the app while a Pong card is open and after
+    # it closes.
+    _hpair = base64.b64encode(os.urandom(32)).decode().replace('+', '%2B').replace('/', '%2F').replace('=', '%3D')
+
+    def rf_peer():
+        c = browser.new_context()
+        pg = c.new_page()
+        pg.goto(f'{BASE}/#/pair?s={_hpair}')
+        pg.wait_for_selector('.composer', timeout=20000)
+        return c, pg
+
+    def ws_card_install(pg, card, kind, name):
+        card.locator('select[aria-label="Tool type"]').select_option(kind)
+        card.locator('input[placeholder="Tool name"]').fill(name)
+        card.locator('button', has_text='Sign & install').click()
+        pg.locator('.modal button', has_text='Install').click()
+        row = card.locator('.card', has_text=name)
+        row.wait_for(timeout=10000)
+        return row
+
+    def rf_until(pg, act, cond, seconds, every=3):
+        """Repeat a send until its effect shows: a send before the pair's handshake is lost."""
+        for _ in range(int(seconds / every)):
+            act()
+            if rpoll(pg, cond, every):
+                return True
+        return False
+
+    _no_device = "document.querySelector('.sidebar').textContent.includes('None yet. Open Connect to pair a device.')"
+    ha, hpa = rf_peer()
+    hb, hpb = rf_peer()
+    _hpaired = rpoll(hpa, lambda: not hpa.evaluate(_no_device) and not hpb.evaluate(_no_device), 150)
+    check('handlers: two contexts on one pairing link list each other under My devices', bool(_hpaired))
+    if _hpaired:
+        hpb.evaluate("location.hash = '#/t/workshop'")
+        hpb.locator('details.card[data-tool="workshop"] button', has_text='Sign & install').first.wait_for(timeout=15000)
+        hpb.evaluate("location.hash = ''")
+        hpb.evaluate("location.hash = '#/t/workshop'")
+        _bws = hpb.locator('details.card[data-tool="workshop"]')
+        rpoll(hpb, lambda: _bws.nth(1).locator('button', has_text='Sign & install').count() == 1, 15)
+        _bwrap = hpb.locator('.feed-item', has=hpb.locator('details.card[data-tool="workshop"]')).first
+        _bwrap.hover()
+        _bwrap.locator('button.del').click()
+        _bwrap.locator('button.del').click()
+        check('handlers: one of two Workshop cards on B is closed', bool(rpoll(hpb, lambda: _bws.count() == 1, 5)))
+        hpa.evaluate("location.hash = '#/t/workshop'")
+        _aws = hpa.locator('details.card[data-tool="workshop"]')
+        _aws.locator('button', has_text='Sign & install').wait_for(timeout=15000)
+        _ashare = ws_card_install(hpa, _aws, 'automation', 'Fanout Sorter').locator('button', has_text='Share to room')
+        check('handlers: the Workshop card left open on B lists the tool A shares',
+              rf_until(hpb, _ashare.click, lambda: 'Shared by peers' in _bws.inner_text() and 'Fanout Sorter' in _bws.inner_text(), 60),
+              _bws.inner_text()[:200])
+        for _pg, _card in ((hpa, _aws), (hpb, _bws)):
+            ws_card_install(_pg, _card, 'html', 'Fanout Pinger').locator('button', has_text=re.compile(r'^Run$')).click()
+            _pg.locator('.modal button', has_text='Run once').click()
+        _aping = hpa.frame_locator('iframe.ws-app-frame').locator('button', has_text='ping room')
+        _aping.wait_for(timeout=10000)
+        hpb.frame_locator('iframe.ws-app-frame').locator('button', has_text='ping room').wait_for(timeout=10000)
+        hpb.evaluate("location.hash = '#/t/pong'")
+        _bpong = hpb.locator('details.card[data-tool="pong"]')
+        _bpong.locator('.pong-lobby').wait_for(state='attached', timeout=10000)
+        _bout = _bws.locator('pre').last
+        check('handlers: a Workshop app on B hears the room while a Pong card is open',
+              rf_until(hpb, _aping.click, lambda: _bout.inner_text().count('from ') >= 1, 15), _bout.inner_text()[-160:])
+        _bpwrap = hpb.locator('.feed-item', has=_bpong)
+        _bpwrap.hover()
+        _bpwrap.locator('button.del').click()
+        _bpwrap.locator('button.del').click()
+        rpoll(hpb, lambda: _bpong.count() == 0, 5)
+        _heard = _bout.inner_text().count('from ')
+        check('handlers: the app on B still hears the room after the Pong card closes',
+              rf_until(hpb, _aping.click, lambda: _bout.inner_text().count('from ') > _heard, 15), _bout.inner_text()[-160:])
+    ha.close()
+    hb.close()
+
     # --- 13n. Studio (VDO.ninja-style A/V): publish controls, labeled source, layouts, stage link ---
     page.evaluate("location.hash = '#/t/studio'")
     page.wait_for_timeout(500)

@@ -1797,8 +1797,13 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
    *  CSP style-src 'self'. */
   const placeMenu = (menu: HTMLElement, r: DOMRect) => {
     menu.style.left = `${Math.max(8, Math.min(r.left, window.innerWidth - menu.offsetWidth - 8))}px`
-    if (r.top > window.innerHeight / 2) menu.style.bottom = `${window.innerHeight - r.top + 6}px`
+    const above = r.top > window.innerHeight / 2
+    if (above) menu.style.bottom = `${window.innerHeight - r.top + 6}px`
     else menu.style.top = `${r.bottom + 6}px`
+    // Capped to the room between the anchor and the far edge, and scrolled inside it: on a
+    // short landscape phone the full grid is taller than that room, and the rows past the
+    // edge could not be reached.
+    menu.style.maxHeight = `${(above ? r.top : window.innerHeight - r.bottom) - 6 - 8}px`
   }
 
   /** Place a submenu beside the open launcher (left if it fits, else right), vertically

@@ -3189,6 +3189,34 @@ with sync_playwright() as p:
         hq_ctx.close()
     qctx_a.close()
 
+    # --- the tool launcher fits a short viewport ---
+    # On a landscape phone the grid is taller than the room above the composer's "/", and
+    # it neither clamped nor scrolled, so the first rows sat above the screen edge. Each end
+    # of the list has to be reachable by scrolling the panel and open its tool.
+    lctx = browser.new_context(viewport={'width': 740, 'height': 360})
+    lp = lctx.new_page()
+    lp.goto(f'{BASE}/#/join/x{os.urandom(3).hex()}')
+    lp.wait_for_selector('.composer', timeout=30000)
+    lp.locator('.composer .bar button[title^="Tools (hover"]').hover()
+    lp.wait_for_selector('.menu.tool-grid', timeout=5000)
+    l_box = lp.locator('.menu.tool-grid').bounding_box()
+    check('the launcher stays inside a 360px-tall viewport',
+          l_box['y'] >= 0 and l_box['y'] + l_box['height'] <= 360, str(l_box))
+    # Tools only: Share screen and Connect lead the list and open no card.
+    l_tools = lp.locator('.menu.tool-grid button.tool-open[draggable="true"]')
+    l_seen = {}
+    for l_end, l_btn in (('last', l_tools.last), ('first', l_tools.first)):
+        l_btn.scroll_into_view_if_needed()
+        b = l_btn.bounding_box()
+        l_seen[l_end] = b['y'] >= 0 and b['y'] + b['height'] <= 360
+        check(f'the {l_end} tool can be scrolled onto the screen', l_seen[l_end], str(b))
+    if l_seen['first']:
+        l_cards = lp.locator('.feed details.card').count()
+        l_tools.first.click()
+        check('and pressing it opens the tool', bool(poll(lambda: lp.locator('.menu.tool-grid').count() == 0
+                                                          and lp.locator('.feed details.card').count() > l_cards, 10)))
+    lctx.close()
+
     # --- touch: the per-card delete control, driven by real taps ---
     # Every assertion above drives a desktop viewport with a mouse, so a control that does
     # nothing on a phone passes them all. Revealing it wherever there is no hover is the

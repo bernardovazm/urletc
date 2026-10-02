@@ -1778,7 +1778,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   // Tools, and is the one pin kept on the narrowest bars, since joining a room is what a
   // phone opens the app for.
   const CONNECT_ENTRY = 'connect'
-  const connectTitle = 'Join a room, pair devices, test mic & cam, device name'
+  const connectTitle = 'Join a room, rejoin a recent one, pair devices, test mic & cam, device name'
   const connectBtn = button('Connect', () => void openConnect(), 'ghost tool-pin', connectTitle)
   connectBtn.dataset.tool = CONNECT_ENTRY
 
@@ -2421,6 +2421,56 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   /** The link that is the invite: it opens urletc already joined to our code room. */
   const inviteLink = (code: string) => `${location.origin}${location.pathname}#/join/${code}${presenceWanted ? '?p=1' : ''}`
 
+  // ---------- recent rooms ----------
+  // Every code room this device joined, newest first, so going back to one (the room a
+  // friend saved and keeps reopening, say) is one press in Connect rather than a request
+  // for the code. Read and written whole on each change, encrypted like everything else.
+  interface RecentRoom {
+    code: string
+    ts: number
+    name?: string
+  }
+  const MAX_RECENT_ROOMS = 12
+  const MAX_ROOM_NAME = 40
+  async function recentRooms(): Promise<RecentRoom[]> {
+    // An unreadable list is an empty one: it must not take the Connect dialog down with it.
+    const raw = await getItem<unknown>('recent-rooms').catch(() => undefined)
+    if (!Array.isArray(raw)) return []
+    const out: RecentRoom[] = []
+    for (const r of raw) {
+      const code = normalizeJoinCode(String((r as RecentRoom)?.code ?? ''))
+      const ts = Number((r as RecentRoom)?.ts)
+      if (code.length < 4 || !Number.isFinite(ts) || out.some((x) => x.code === code)) continue
+      const name = typeof (r as RecentRoom).name === 'string' ? (r as RecentRoom).name!.trim().slice(0, MAX_ROOM_NAME) : ''
+      out.push(name ? { code, ts, name } : { code, ts })
+    }
+    return out.slice(0, MAX_RECENT_ROOMS)
+  }
+  // Edits run one at a time. Each one reads, changes and writes the whole list, so two that
+  // overlapped (a rename committed by the blur of the click that joins another room) both
+  // read the old list and the second write dropped the first.
+  let recentEdits: Promise<unknown> = Promise.resolve()
+  function editRecentRooms(fn: (list: RecentRoom[]) => RecentRoom[]): Promise<void> {
+    const run = recentEdits.then(async () => setItem('recent-rooms', fn(await recentRooms()).slice(0, MAX_RECENT_ROOMS)))
+    recentEdits = run.catch(() => {})
+    return run
+  }
+  const rememberRoom = (code: string) =>
+    editRecentRooms((list) => {
+      const prev = list.find((r) => r.code === code)
+      return [{ ...prev, code, ts: Date.now() }, ...list.filter((r) => r.code !== code)]
+    })
+  /** "5 min ago" style, coarse on purpose: it only has to tell rooms apart. */
+  const ago = (ts: number) => {
+    const m = Math.round((Date.now() - ts) / 60000)
+    if (m < 1) return 'just now'
+    if (m < 60) return `${m} min ago`
+    const h = Math.round(m / 60)
+    if (h < 24) return `${h} h ago`
+    const d = Math.round(h / 24)
+    return d < 30 ? `${d} ${d === 1 ? 'day' : 'days'} ago` : new Date(ts).toLocaleDateString()
+  }
+
   /** Switch the code room: null = just leave; a code = leave current + join that one.
    *  The active code is persisted so it survives a reload: same code next visit,
    *  whether it was auto-generated, self-chosen, or one you joined.
@@ -2435,7 +2485,10 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     codeSwitch = run.catch(() => {})
     return run
   }
-  async function switchCode(code: string | null): Promise<boolean> {
+  async function switchCode(raw: string | null): Promise<boolean> {
+    // Normalised here, at the one place every route goes through, so the chip, the address
+    // bar and the recent-rooms list always hold the same spelling of a code.
+    const code = raw ? normalizeJoinCode(raw) : null
     await leaveTier('code')
     if (code) {
       codeLabel = code
@@ -2444,6 +2497,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     await (codeLabel ? setItem('join-code', codeLabel) : removeItem('join-code'))
     updateCodeChip()
     syncCodeUrl()
+    if (codeLabel) await rememberRoom(codeLabel).catch(() => {}) // the list is a convenience; the join stands without it
     return !!codeLabel
   }
 
@@ -2675,6 +2729,52 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
       })
       content.append(el('div', { class: 'row' }, [codeInput, button('Join', () => void use(), 'primary', 'Connect with whoever uses this code; it becomes your code too')]))
 
+      // Rooms this device was in before. Joining one switches the code room, the same as
+      // typing its code; the others in it see you arrive as usual.
+      const rooms = await recentRooms()
+      if (rooms.length) {
+        content.append(el('div', { class: 'group-label', text: 'Rooms you were in' }))
+        const list = el('div', { class: 'recent-rooms stack' })
+        for (const r of rooms) {
+          const CODE = r.code.toUpperCase()
+          const here = r.code === codeLabel
+          const nameIn = el('input', {
+            type: 'text',
+            class: 'room-name',
+            placeholder: 'Name',
+            maxlength: String(MAX_ROOM_NAME),
+            'aria-label': `Name for room ${CODE}`,
+          }) as HTMLInputElement
+          nameIn.value = r.name ?? ''
+          nameIn.addEventListener('change', () => {
+            const name = nameIn.value.trim().slice(0, MAX_ROOM_NAME)
+            void editRecentRooms((all) => all.map((x) => (x.code === r.code ? (name ? { ...x, name } : { code: x.code, ts: x.ts }) : x)))
+          })
+          const join = async () => {
+            if (await setCode(r.code)) sys(`Back in room ${nameIn.value.trim() ? `${nameIn.value.trim()} (${CODE})` : CODE}.`)
+            void render()
+          }
+          list.append(
+            el('div', { class: `recent-room${here ? ' current' : ''}`, 'data-code': r.code }, [
+              el('span', { class: 'room-code', text: CODE }),
+              nameIn,
+              el('span', { class: 'muted small room-when', text: here ? 'You are here' : ago(r.ts) }),
+              ...(here ? [] : [button('Join', () => void join(), 'ghost small', `Join room ${CODE}`)]),
+              button('🔗', () => void copyText(inviteLink(r.code)), 'icon sm', `Copy the invite link for room ${CODE}`),
+              button(
+                '🗑',
+                () => {
+                  void editRecentRooms((all) => all.filter((x) => x.code !== r.code)).then(render)
+                },
+                'icon sm',
+                `Forget room ${CODE}`,
+              ),
+            ]),
+          )
+        }
+        content.append(list)
+      }
+
       content.append(el('div', { class: 'group-label', text: codeLabel ? 'Or have them join you' : 'Or create a code to share' }))
       if (codeLabel) {
         // The invite link spares the other person any typing: it opens urletc
@@ -2864,6 +2964,10 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
       )
 
       content.append(el('div', { class: 'row' }, [el('span', { class: 'spacer' }), button('Close', close, 'ghost')]))
+      // A re-render replaces the element that had focus, which puts focus on the page
+      // behind the dialog, where the Tab trap no longer reaches it. Bring it back to the
+      // room list, the part a re-render is usually about.
+      if (!content.contains(document.activeElement)) content.querySelector<HTMLElement>('.recent-rooms button, input, button')?.focus()
     }
     await render()
     content.querySelector<HTMLElement>('input, button, select, textarea')?.focus()

@@ -802,6 +802,37 @@ details.card > .card-body {
   border: 1px dashed var(--border-strong);
   border-radius: var(--radius-sm);
 }
+/* Connect's list of rooms joined before: code, an editable name, when, and the actions.
+   The name field keeps a usable width and wraps to its own line on a phone rather than
+   shrinking to a sliver beside the buttons. */
+.recent-room {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  min-width: 0;
+}
+.recent-room + .recent-room {
+  border-top: 1px solid var(--border);
+  padding-top: 0.4rem;
+}
+.recent-room .room-code {
+  font-family: var(--mono);
+  letter-spacing: 0.08em;
+  flex: none;
+}
+.recent-room .room-name {
+  flex: 1 1 9rem;
+  min-width: 0;
+}
+.recent-room .room-when {
+  flex: none;
+  white-space: nowrap;
+}
+.recent-room.current .room-code {
+  color: var(--fg);
+  font-weight: 600;
+}
 .mono-input {
   font-family: var(--mono);
   text-transform: lowercase;

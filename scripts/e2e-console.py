@@ -4421,6 +4421,9 @@ with sync_playwright() as p:
                 le.first.click()
         try:
             cnp.wait_for_selector('.modal[aria-label="Connect"]', timeout=5000)
+            # The dialog is drawn in steps, and the room list after a store read: wait for it,
+            # or a row read straight after opening comes back missing or empty.
+            cnp.wait_for_selector('.modal .recent-rooms', timeout=5000)
         except Exception:
             pass
         return cnp.locator('.modal[aria-label="Connect"]').count() == 1
@@ -4493,6 +4496,138 @@ with sync_playwright() as p:
           '%d pins' % cnp.locator('.topbar button.tool-pin[data-tool="connect"]').count())
     cnp.mouse.click(400, 300)
     poll(lambda: cnp.locator('.menu.tool-grid').count() == 0, 5)
+    cnctx.close()
+
+    # --- recent rooms in Connect: listed newest first, named, rejoined in one press ---
+    # The helpers above read `cnp` when called, so they drive this context's page.
+    cnctx = browser.new_context()
+    cnp = cnctx.new_page()
+    cnp.goto(BASE)
+    cnp.wait_for_selector('.composer', timeout=30000)
+    cnp.wait_for_timeout(2000)
+    cnp.evaluate("() => window.dispatchEvent(new CustomEvent('wt:nearby', { detail: false }))")
+    CODE_A = 'r' + os.urandom(3).hex()
+    CODE_B = 'r' + os.urandom(3).hex()
+    check('rooms: opening Connect for join A', cn_open_connect())
+    check('rooms: join input taken for A', cn_join(CODE_A))
+    check('rooms: chip shows A after join', bool(poll(lambda: cn_chip() == CODE_A.upper(), 20)), cn_chip())
+    check('rooms: join input taken for B', cn_join(CODE_B))
+    check('rooms: chip shows B after join', bool(poll(lambda: cn_chip() == CODE_B.upper(), 20)), cn_chip())
+    check('rooms: dialog closed before reopen', cn_close())
+    check('rooms: Connect reopens on the room list', cn_open_connect())
+    cn_dlg = cnp.locator('.modal[aria-label="Connect"]')
+    cn_groups = cn_dlg.locator('.group-label').all_inner_texts() if cn_dlg.locator('.group-label').count() else []
+    check('rooms: recent group label shown', any('rooms you were in' in t.lower() for t in cn_groups), repr(cn_groups)[:160])
+    cn_row_a = cnp.locator('.modal .recent-room[data-code="%s"]' % CODE_A)
+    cn_row_b = cnp.locator('.modal .recent-room[data-code="%s"]' % CODE_B)
+    check('rooms: row A listed', bool(poll(lambda: cn_row_a.count() == 1, 5)), '%d rows' % cn_row_a.count())
+    check('rooms: row B listed', cn_row_b.count() == 1, '%d rows' % cn_row_b.count())
+    cn_order = cnp.evaluate("() => [...document.querySelectorAll('.modal .recent-room')].map(e => e.dataset.code)")
+    check('rooms: newest room sorts first', cn_order[:2] == [CODE_B, CODE_A], repr(cn_order[:4]))
+    check('rooms: B row is current', 'current' in (cn_row_b.get_attribute('class') if cn_row_b.count() else '' or ''),
+          repr(cn_row_b.get_attribute('class') if cn_row_b.count() else 'no row'))
+    check('rooms: current row says You are here', 'You are here' in (cn_row_b.inner_text() if cn_row_b.count() else ''),
+          repr((cn_row_b.inner_text() if cn_row_b.count() else 'no row')[:80]))
+    check('rooms: current row has no Join button',
+          (cn_row_b.locator('button[title="Join room %s"]' % CODE_B.upper()).count() if cn_row_b.count() else -1) == 0,
+          'join=%d' % (cn_row_b.locator('button[title="Join room %s"]' % CODE_B.upper()).count() if cn_row_b.count() else -1))
+    check('rooms: A row offers Join with room title',
+          (cn_row_a.locator('button[title="Join room %s"]' % CODE_A.upper()).count() if cn_row_a.count() else 0) == 1,
+          'join=%d' % (cn_row_a.locator('button[title="Join room %s"]' % CODE_A.upper()).count() if cn_row_a.count() else -1))
+    for _code, _tag in ((CODE_A, 'A'), (CODE_B, 'B')):
+        _row = cnp.locator('.modal .recent-room[data-code="%s"]' % _code)
+        check('rooms: %s row offers an invite copy' % _tag,
+              (_row.locator('button[title="Copy the invite link for room %s"]' % _code.upper()).count() if _row.count() else 0) == 1,
+              'copy=%d' % (_row.locator('button[title="Copy the invite link for room %s"]' % _code.upper()).count() if _row.count() else -1))
+        check('rooms: %s row offers Forget' % _tag,
+              (_row.locator('button[title="Forget room %s"]' % _code.upper()).count() if _row.count() else 0) == 1,
+              'forget=%d' % (_row.locator('button[title="Forget room %s"]' % _code.upper()).count() if _row.count() else -1))
+        check('rooms: %s row has a name field' % _tag,
+              (_row.locator('input[aria-label="Name for room %s"]' % _code.upper()).count() if _row.count() else 0) == 1,
+              'name=%d' % (_row.locator('input[aria-label="Name for room %s"]' % _code.upper()).count() if _row.count() else -1))
+    cn_first_nc = cnp.evaluate("() => { const r = document.querySelector('.modal .recent-room:not(.current)'); return r ? r.dataset.code : null }")
+    check('rooms: A is the first non-current row', cn_first_nc == CODE_A, repr(cn_first_nc))
+    cn_name_a = cnp.locator('.modal input[aria-label="Name for room %s"]' % CODE_A.upper())
+    if cn_name_a.count():
+        cn_name_a.first.fill('Team')
+        cn_name_a.first.press('Tab')
+    check('rooms: typed name stays in the field',
+          bool(poll(lambda: (cnp.locator('.modal input[aria-label="Name for room %s"]' % CODE_A.upper()).input_value()
+                              if cnp.locator('.modal input[aria-label="Name for room %s"]' % CODE_A.upper()).count() else '') == 'Team', 5)),
+          repr(cnp.locator('.modal input[aria-label="Name for room %s"]' % CODE_A.upper()).input_value()
+               if cnp.locator('.modal input[aria-label="Name for room %s"]' % CODE_A.upper()).count() else 'no field'))
+    # A fresh render reads the list from the store, so seeing the name there means the write
+    # landed; reloading before that tests the race against the reload instead.
+    cn_close()
+    cn_open_connect()
+    check('rooms: the name is in the stored list',
+          bool(poll(lambda: cnp.locator('.modal input[aria-label="Name for room %s"]' % CODE_A.upper()).count() == 1
+                    and cnp.locator('.modal input[aria-label="Name for room %s"]' % CODE_A.upper()).input_value() == 'Team', 5)))
+    check('rooms: dialog closed before reload', cn_close())
+    cnp.reload()
+    cnp.wait_for_selector('.composer', timeout=30000)
+    cnp.wait_for_timeout(2000)
+    cnp.evaluate("() => window.dispatchEvent(new CustomEvent('wt:nearby', { detail: false }))")
+    check('rooms: chip still shows B after reload', bool(poll(lambda: cn_chip() == CODE_B.upper(), 20)), cn_chip())
+    check('rooms: Connect reopens after reload', cn_open_connect())
+    cn_name_a2 = cnp.locator('.modal input[aria-label="Name for room %s"]' % CODE_A.upper())
+    check('rooms: A name survives reload', (cn_name_a2.input_value() if cn_name_a2.count() else '') == 'Team',
+          repr(cn_name_a2.input_value() if cn_name_a2.count() else 'no field'))
+    cn_row_a2 = cnp.locator('.modal .recent-room[data-code="%s"]' % CODE_A)
+    cn_join_a = cn_row_a2.locator('button[title="Join room %s"]' % CODE_A.upper())
+    check('rooms: A row still offers Join after reload', cn_join_a.count() == 1, 'join=%d' % cn_join_a.count())
+    if cn_join_a.count():
+        cn_join_a.first.click()
+    check('rooms: chip shows A after list Join', bool(poll(lambda: cn_chip() == CODE_A.upper(), 20)), cn_chip())
+    check('rooms: A row becomes current',
+          bool(poll(lambda: 'current' in (cnp.locator('.modal .recent-room[data-code="%s"]' % CODE_A).get_attribute('class') or ''), 10)),
+          repr(cnp.locator('.modal .recent-room[data-code="%s"]' % CODE_A).get_attribute('class')
+               if cnp.locator('.modal .recent-room[data-code="%s"]' % CODE_A).count() else 'no row'))
+    cn_row_b2 = cnp.locator('.modal .recent-room[data-code="%s"]' % CODE_B)
+    check('rooms: B row then offers Join',
+          bool(poll(lambda: cn_row_b2.locator('button[title="Join room %s"]' % CODE_B.upper()).count() == 1, 10)),
+          'join=%d' % cn_row_b2.locator('button[title="Join room %s"]' % CODE_B.upper()).count())
+    cn_forget_b = cn_row_b2.locator('button[title="Forget room %s"]' % CODE_B.upper())
+    check('rooms: B row has a Forget button', cn_forget_b.count() == 1, 'forget=%d' % cn_forget_b.count())
+    if cn_forget_b.count():
+        cn_forget_b.first.click()
+    check('rooms: Forget removes the B row',
+          bool(poll(lambda: cnp.locator('.modal .recent-room[data-code="%s"]' % CODE_B).count() == 0, 10)),
+          '%d rows' % cnp.locator('.modal .recent-room[data-code="%s"]' % CODE_B).count())
+    # Edits to the list read it, change it and write it whole. A rename is committed by the
+    # blur that a click elsewhere causes, so renaming one room and pressing Forget on another
+    # starts two edits in the same moment; run side by side, the second write would drop the
+    # first edit.
+    CODE_C = 'r' + os.urandom(3).hex()
+    if cn_join(CODE_C):
+        poll(lambda: cn_chip() == CODE_C.upper(), 20)
+    cn_close()
+    cn_open_connect()
+    cn_other = cnp.evaluate("a => { const r = [...document.querySelectorAll('.modal .recent-room:not(.current)')].find(x => x.dataset.code !== a); return r ? r.dataset.code : null }", CODE_A)
+    cn_name_a3 = cnp.locator('.modal input[aria-label="Name for room %s"]' % CODE_A.upper())
+    cn_forget_o = cnp.locator('.modal button[title="Forget room %s"]' % (cn_other or '').upper())
+    if cn_other and cn_name_a3.count() and cn_forget_o.count():
+        cn_name_a3.first.fill('Later')
+        cn_forget_o.first.click()
+    check('rooms: a third room is there to forget', bool(cn_other), repr(cn_other))
+    poll(lambda: cnp.locator('.modal .recent-room[data-code="%s"]' % cn_other).count() == 0, 5)
+    cn_close()
+    cn_open_connect()
+    cn_name_a4 = cnp.locator('.modal input[aria-label="Name for room %s"]' % CODE_A.upper())
+    check('rooms: a rename and a Forget made together both land',
+          bool(poll(lambda: cn_name_a4.count() == 1 and cn_name_a4.input_value() == 'Later', 5))
+          and cnp.locator('.modal .recent-room[data-code="%s"]' % cn_other).count() == 0,
+          'name=%r other rows=%d' % (cn_name_a4.input_value() if cn_name_a4.count() else 'no field',
+                                     cnp.locator('.modal .recent-room[data-code="%s"]' % cn_other).count()))
+    cn_close()
+    cnp.reload()
+    cnp.wait_for_selector('.composer', timeout=30000)
+    cn_open_connect()
+    check('rooms: and both survive a reload',
+          bool(poll(lambda: cn_name_a4.count() == 1 and cn_name_a4.input_value() == 'Later', 5))
+          and cnp.locator('.modal .recent-room[data-code="%s"]' % cn_other).count() == 0,
+          repr(cn_name_a4.input_value() if cn_name_a4.count() else 'no field'))
+    cn_close()
     cnctx.close()
 
     # --- composer collapse: a manual, persisted toggle that keeps the control row ---

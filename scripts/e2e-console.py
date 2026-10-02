@@ -3460,7 +3460,7 @@ with sync_playwright() as p:
           TOP_SCREEN.count() == 1 and TOP_SCREEN.inner_text() == 'Share screen',
           '%d buttons' % TOP_SCREEN.count())
     check('a fresh profile has Share screen on the bar and no Studio pin',
-          spg.eval_on_selector_all('.topbar button.tool-pin', 'els => els.map(e => e.dataset.tool)') == ['screen'])
+          spg.eval_on_selector_all('.topbar button.tool-pin', 'els => els.map(e => e.dataset.tool)') == ['screen', 'connect'])
     TOP_SCREEN.click()
     check('one press on it shares the screen',
           bool(poll(lambda: spg.locator('.tiles .stage-tile.kind-screen').count() == 1, 10)),
@@ -4235,17 +4235,20 @@ with sync_playwright() as p:
             const box = t.getBoundingClientRect();
             const kids = [...t.children].filter(k => getComputedStyle(k).display !== 'none');
             const rb = t.querySelector('button.roster-toggle');
-            const pins = [...t.querySelectorAll('button.tool-pin, button.screen-share')];
+            const pins = [...t.querySelectorAll('button.tool-pin:not([data-tool="connect"]), button.screen-share')];
+            const cn = t.querySelector('button.tool-pin[data-tool="connect"]');
             return { over: t.scrollWidth - t.clientWidth,
                      clipped: kids.filter(k => k.scrollWidth > k.clientWidth + 1).map(k => k.className),
                      outside: kids.filter(k => k.getBoundingClientRect().right > box.right + 0.5).map(k => k.className),
                      roster: !!rb && getComputedStyle(rb).display !== 'none',
+                     connect: !!cn && getComputedStyle(cn).display !== 'none',
                      pins: pins.length,
                      pinsShown: pins.filter(b => getComputedStyle(b).display !== 'none').length } }""")
         check(f'touch: topbar at {_w}px fits with nothing clipped or pushed off',
               _bar['over'] <= 0 and not _bar['clipped'] and not _bar['outside'],
               f"overflow={_bar['over']} clipped={_bar['clipped']} outside={_bar['outside']}")
         check(f'touch: the drawer toggle survives at {_w}px', _bar['roster'])
+        check(f'touch: the Connect pin survives at {_w}px', _bar['connect'], str(_bar))
         # The fit above only means something while a text button is in the bar's DOM: the
         # screen button is built wherever getDisplayMedia exists, headless included, so it
         # is there and has to be shed, not absent.
@@ -4267,7 +4270,9 @@ with sync_playwright() as p:
     pp.wait_for_timeout(1200)
 
     def pin_ids():
-        return pp.eval_on_selector_all('.topbar button.tool-pin', 'els => els.map(e => e.dataset.tool)')
+        # Connect is seeded too and has its own checks below; these follow the rest.
+        return pp.eval_on_selector_all('.topbar button.tool-pin:not([data-tool="connect"])',
+                                       'els => els.map(e => e.dataset.tool)')
 
     def pin_toggle(name):
         # The pin control of one launcher item, addressed by the tool's visible name.
@@ -4386,6 +4391,109 @@ with sync_playwright() as p:
           bool(poll(lambda: pp.locator('.tiles .stage-tile').count() == 0, 10)))
     check('pin: no page error on the pin path', not perrs, ' | '.join(perrs)[:200])
     pctx.close()
+
+    # --- connect launcher entry: pinned by default, right after Tools, unpinnable ---
+    cnctx = browser.new_context()
+    cnp = cnctx.new_page()
+    cnp.goto(BASE)
+    cnp.wait_for_selector('.composer', timeout=30000)
+    cnp.wait_for_timeout(2000)
+    cnp.evaluate("() => window.dispatchEvent(new CustomEvent('wt:nearby', { detail: false }))")
+
+    def cn_launcher():
+        tb = cnp.locator('.topbar button', has_text='Tools')
+        if tb.count():
+            tb.first.hover()
+        try:
+            cnp.wait_for_selector('.menu.tool-grid', timeout=3000)
+        except Exception:
+            pass
+        return cnp.locator('.menu.tool-grid').count() == 1
+
+    def cn_open_connect():
+        pin = cnp.locator('.topbar button.tool-pin[data-tool="connect"]')
+        if pin.count():
+            pin.first.click()
+        else:
+            cn_launcher()
+            le = cnp.locator('.menu.tool-grid button.tool-open[data-tool="connect"]')
+            if le.count():
+                le.first.click()
+        try:
+            cnp.wait_for_selector('.modal[aria-label="Connect"]', timeout=5000)
+        except Exception:
+            pass
+        return cnp.locator('.modal[aria-label="Connect"]').count() == 1
+
+    def cn_chip():
+        ch = cnp.locator('button.code-chip')
+        return ch.inner_text().strip().upper() if ch.count() else ''
+
+    def cn_join(code):
+        dlg = cnp.locator('.modal[aria-label="Connect"]')
+        inp = dlg.locator('input[aria-label="Join code"]')
+        if inp.count() == 0:
+            return False
+        inp.first.fill(code)
+        inp.first.press('Enter')
+        return True
+
+    def cn_close():
+        cnp.keyboard.press('Escape')
+        return bool(poll(lambda: cnp.locator('.modal[aria-label="Connect"]').count() == 0, 5))
+
+    def cn_toggle():
+        return cnp.locator('.menu.tool-grid div.tool-item', has=cnp.locator('button.tool-open[data-tool="connect"]')).locator('button.pin-toggle')
+
+    cn_pin = cnp.locator('.topbar button.tool-pin[data-tool="connect"]')
+    check('connect: pinned to the topbar by default', cn_pin.count() == 1, '%d pins' % cn_pin.count())
+    check('connect: pin reads Connect', (cn_pin.inner_text().strip() if cn_pin.count() else '') == 'Connect',
+          repr(cn_pin.inner_text()[:40] if cn_pin.count() else 'no pin'))
+    cn_prev = cnp.evaluate("() => { const b = document.querySelector('.topbar button.tool-pin[data-tool=\"connect\"]'); const q = b ? b.previousElementSibling : null; return q ? q.textContent.trim() : null }")
+    check('connect: pin sits right after Tools', cn_prev == 'Tools', repr(cn_prev))
+    check('connect: launcher opens on hover', cn_launcher())
+    cn_entry = cnp.locator('.menu.tool-grid button.tool-open[data-tool="connect"]')
+    check('connect: launcher holds a Connect entry', cn_entry.count() == 1, '%d entries' % cn_entry.count())
+    check('connect: entry reads with signal emoji', (cn_entry.inner_text() if cn_entry.count() else '') == '📡 Connect',
+          repr(cn_entry.inner_text()[:40] if cn_entry.count() else 'no entry'))
+    check('connect: entry carries one pin toggle', cn_toggle().count() == 1, '%d toggles' % cn_toggle().count())
+    check('connect: pinned entry toggle offers Unpin', (cn_toggle().inner_text().strip() if cn_toggle().count() else '') == 'Unpin',
+          repr(cn_toggle().inner_text()[:40] if cn_toggle().count() else 'no toggle'))
+    check('connect: pinned entry toggle pressed', (cn_toggle().get_attribute('aria-pressed') if cn_toggle().count() else '') == 'true',
+          repr(cn_toggle().get_attribute('aria-pressed') if cn_toggle().count() else 'no toggle'))
+    if cn_entry.count():
+        cn_entry.first.click()
+    try:
+        cnp.wait_for_selector('.modal[aria-label="Connect"]', timeout=5000)
+    except Exception:
+        pass
+    check('connect: entry opens the Connect dialog', cnp.locator('.modal[aria-label="Connect"]').count() == 1,
+          '%d dialogs' % cnp.locator('.modal[aria-label="Connect"]').count())
+    check('connect: Escape closes the dialog', cn_close())
+    cn_launcher()
+    if cn_toggle().count():
+        cn_toggle().first.click()
+    check('connect: unpinning drops the topbar pin',
+          bool(poll(lambda: cnp.locator('.topbar button.tool-pin[data-tool="connect"]').count() == 0, 5)),
+          '%d pins' % cnp.locator('.topbar button.tool-pin[data-tool="connect"]').count())
+    cnp.reload()
+    cnp.wait_for_selector('.composer', timeout=30000)
+    cnp.wait_for_timeout(2000)
+    cnp.evaluate("() => window.dispatchEvent(new CustomEvent('wt:nearby', { detail: false }))")
+    check('connect: unpinned stays off the bar after reload',
+          cnp.locator('.topbar button.tool-pin[data-tool="connect"]').count() == 0,
+          '%d pins' % cnp.locator('.topbar button.tool-pin[data-tool="connect"]').count())
+    cn_launcher()
+    check('connect: unpinned entry toggle offers Pin', (cn_toggle().inner_text().strip() if cn_toggle().count() else '') == 'Pin',
+          repr(cn_toggle().inner_text()[:40] if cn_toggle().count() else 'no toggle'))
+    if cn_toggle().count():
+        cn_toggle().first.click()
+    check('connect: re-pin restores the topbar pin',
+          bool(poll(lambda: cnp.locator('.topbar button.tool-pin[data-tool="connect"]').count() == 1, 5)),
+          '%d pins' % cnp.locator('.topbar button.tool-pin[data-tool="connect"]').count())
+    cnp.mouse.click(400, 300)
+    poll(lambda: cnp.locator('.menu.tool-grid').count() == 0, 5)
+    cnctx.close()
 
     # --- composer collapse: a manual, persisted toggle that keeps the control row ---
     # Collapsing is deliberately not wired to sharing: it only ever moves when the toggle
@@ -4944,8 +5052,9 @@ with sync_playwright() as p:
           "  slack: Math.round(t.clientWidth - pad - used - gap * (vis.length - 1)),"
           "  theme: [...t.querySelectorAll('button')]"
           "    .filter(b => (b.title || '').includes('black and white')).length,"
-          "  pins: t.querySelectorAll('button.tool-pin, button.screen-share').length,"
-          "  pin: vis.some(c => c.classList.contains('tool-pin') || c.classList.contains('screen-share')),"
+          "  pins: t.querySelectorAll('button.tool-pin:not([data-tool=connect]), button.screen-share').length,"
+          "  pin: vis.some(c => (c.classList.contains('tool-pin') && c.dataset.tool !== 'connect') || c.classList.contains('screen-share')),"
+          "  connect: vis.some(c => c.dataset.tool === 'connect'),"
           "  brand: vis.some(c => c.classList.contains('brand')),"
           "  badge: vis.some(c => c.classList.contains('badge')),"
           "  link: vis.some(c => c.classList.contains('room-link')),"
@@ -4967,6 +5076,7 @@ with sync_playwright() as p:
               tb['brand'] == want_brand and tb['link'] == want_link
               and (tb['badge'] is False or w > 470), str(tb))
         check(f'the drawer toggle is never shed, at {w}px', tb['roster'], str(tb))
+        check(f'the Connect pin is never shed, at {w}px', tb['connect'], str(tb))
         check(f'no theme button on the topbar at {w}px', tb['theme'] == 0, str(tb))
     page.set_viewport_size(vp0)
     page.wait_for_timeout(300)

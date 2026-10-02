@@ -1773,6 +1773,15 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     screenBtn.classList.toggle('on', on)
   }
 
+  // Connect as a launcher entry, for the same reason: it opens a dialog rather than a card,
+  // and it is pinned by default. Its pin keeps the place the fixed button had, right after
+  // Tools, and is the one pin kept on the narrowest bars, since joining a room is what a
+  // phone opens the app for.
+  const CONNECT_ENTRY = 'connect'
+  const connectTitle = 'Join a room, pair devices, test mic & cam, device name'
+  const connectBtn = button('Connect', () => void openConnect(), 'ghost tool-pin', connectTitle)
+  connectBtn.dataset.tool = CONNECT_ENTRY
+
   /** Mute the mic / blank the camera by flipping `track.enabled`, deliberately not by
    *  stopping the track: stopping tears the source down, removes it from every session and
    *  forces a fresh getUserMedia with a new stream id on resume, so peers watch you
@@ -1805,14 +1814,14 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   // is empty, so an unpinned entry stays off the bar. PIN_SEEDS are put on the bar once
   // per profile, including a profile that saved its pins before the seed existed, and
   // 'pin-seeds' records which were offered so an unpinned seed never comes back.
-  const PIN_SEEDS = [SCREEN_ENTRY]
+  const PIN_SEEDS = [SCREEN_ENTRY, CONNECT_ENTRY]
   const storedPins = await getItem<string[]>('tool-pins')
   let toolPins: string[] = Array.isArray(storedPins) ? storedPins.filter((id) => typeof id === 'string') : []
   {
     const seeded = (await getItem<string[]>('pin-seeds')) ?? []
     const fresh = PIN_SEEDS.filter((id) => !seeded.includes(id))
     if (fresh.length) {
-      toolPins = [...fresh.filter((id) => !toolPins.includes(id)), ...toolPins]
+      toolPins = [...toolPins, ...fresh.filter((id) => !toolPins.includes(id))]
       void setItem('tool-pins', toolPins)
       void setItem('pin-seeds', [...seeded, ...fresh])
     }
@@ -1955,6 +1964,20 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
         b.dataset.tool = SCREEN_ENTRY
         menu.append(el('div', { class: 'tool-item' }, [b, pinToggle(SCREEN_ENTRY, 'Share screen')]))
       }
+      if ('connect'.includes(filter.toLowerCase())) {
+        const b = button(
+          '📡 Connect',
+          () => {
+            closeLauncher()
+            void openConnect()
+          },
+          'ghost tool-open',
+          connectTitle,
+        )
+        b.addEventListener('mouseenter', scheduleGenClose)
+        b.dataset.tool = CONNECT_ENTRY
+        menu.append(el('div', { class: 'tool-item' }, [b, pinToggle(CONNECT_ENTRY, 'Connect')]))
+      }
       const list = orderedTools().filter((m) => m.name.toLowerCase().includes(filter.toLowerCase()))
       for (const m of list) {
         const b = button(
@@ -2039,6 +2062,10 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     for (const id of toolPins) {
       if (id === SCREEN_ENTRY) {
         if (screenCapture) topbar.insertBefore(screenBtn, toolsBtn)
+        continue
+      }
+      if (id === CONNECT_ENTRY) {
+        toolsBtn.after(connectBtn)
         continue
       }
       const m = registry.get(id)
@@ -2932,7 +2959,6 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     // Text buttons first, then every glyph button in one run. Splitting the four emoji
     // controls around Tools and Connect made two of them read as part of the text group.
     toolsBtn,
-    button('Connect', () => void openConnect(), 'ghost', 'Join a code, pair devices, test mic & cam, device name'),
     shareBtn,
     clearBtn,
     peersBtn,

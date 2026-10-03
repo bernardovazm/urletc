@@ -4473,12 +4473,23 @@ with sync_playwright() as p:
     check('connect: entry opens the Connect dialog', cnp.locator('.modal[aria-label="Connect"]').count() == 1,
           '%d dialogs' % cnp.locator('.modal[aria-label="Connect"]').count())
     check('connect: Escape closes the dialog', cn_close())
+    # The stored ciphertext of one key, so a test can wait for a write to land: the encrypted
+    # IndexedDB write runs after the click, and a reload issued first aborts it.
+    STORED = """k => new Promise((res) => {
+      const r = indexedDB.open('wt-data')
+      r.onsuccess = () => {
+        const q = r.result.transaction('kv').objectStore('kv').get(k)
+        q.onsuccess = () => { const v = q.result; r.result.close(); res(v ? Array.from(v.iv).join(',') : null) }
+      }
+    })"""
+    cn_pins_before = cnp.evaluate(STORED, 'tool-pins')
     cn_launcher()
     if cn_toggle().count():
         cn_toggle().first.click()
     check('connect: unpinning drops the topbar pin',
           bool(poll(lambda: cnp.locator('.topbar button.tool-pin[data-tool="connect"]').count() == 0, 5)),
           '%d pins' % cnp.locator('.topbar button.tool-pin[data-tool="connect"]').count())
+    check('connect: the unpin is stored', bool(poll(lambda: cnp.evaluate(STORED, 'tool-pins') != cn_pins_before, 5)))
     cnp.reload()
     cnp.wait_for_selector('.composer', timeout=30000)
     cnp.wait_for_timeout(2000)

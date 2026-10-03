@@ -58,12 +58,29 @@ for i in $(seq 1 60); do
   if [ "$i" = 60 ]; then echo "preview did not come up at $BASE" >&2; exit 1; fi
 done
 
+# Each suite raises its own failed checks as annotations. A run that dies before its
+# summary line (an uncaught exception) raises nothing, and the job log that holds the
+# traceback needs a signed-in account to read, so on Actions its last lines become one.
+run_suite() {
+  local out rc
+  out=$(mktemp)
+  set +e
+  E2E_BASE="$BASE" "$PY" "$1" 2>&1 | tee "$out"
+  rc=${PIPESTATUS[0]}
+  set -e
+  if [ "$rc" != 0 ] && [ -n "${GITHUB_ACTIONS:-}" ] && ! grep -q '^=== ' "$out"; then
+    echo "::error title=$(basename "$1") crashed::$(tail -n 25 "$out" | sed 's/%/%25/g' | awk 'BEGIN { ORS = "%0A" } { print }')"
+  fi
+  rm -f "$out"
+  return "$rc"
+}
+
 # 4. Run the suite.
-E2E_BASE="$BASE" "$PY" scripts/e2e-console.py
+run_suite scripts/e2e-console.py
 
 # 5. Two-context history replay. Its own harness because it needs a second browser
 #    context and real rendezvous between them, which the single-page suite above is not
 #    shaped for. Slower than everything else here, hence the opt-out.
 if [ "${E2E_NO_HISTORY:-0}" != "1" ]; then
-  E2E_BASE="$BASE" "$PY" scripts/e2e-history.py
+  run_suite scripts/e2e-history.py
 fi

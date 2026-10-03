@@ -2676,7 +2676,7 @@ with sync_playwright() as p:
     # --- a remote source is named after its sender ---
     # The sender's label is self-asserted and read "Your screen" on every viewer's stage, so
     # a stranger's feed was presented as the viewer's own. The viewer names it from its own
-    # roster instead.
+    # roster instead, and keeps the name current.
     LBL_CODE = 'x' + os.urandom(3).hex()
     lctx_a = browser.new_context()
     lctx_a.add_init_script(FAKE_SCREEN)
@@ -2695,8 +2695,26 @@ with sync_playwright() as p:
           f"{lb_name}'s screen" in lb_plate and 'Your' not in lb_plate, f'{lb_plate!r} sender={lb_name!r}')
     check("the viewer's tile controls carry the same name",
           lb_b.locator(f'.stage-tile button[title="Spotlight {lb_name}\'s screen"]').count() == 1)
-    check("the sender's own tile still says Your screen",
-          'Your screen' in lb_a.locator('.tiles .stage-tile .tile-name').first.inner_text())
+    lb_own = lb_a.locator('.tiles .stage-tile .tile-name').first.inner_text()
+    check("the sender's own tile carries its own name, marked as its own",
+          f"{lb_name}'s screen (you)" in lb_own and 'Your' not in lb_own, repr(lb_own))
+    # A name can change after the tile is built. The nameplate and the control names are
+    # drawn from the roster on every change, so a rename reaches a share already running.
+    lb_new = 'renamed-' + os.urandom(2).hex()
+    lb_field = lb_a.locator('.sidebar input[aria-label="This device name"]')
+    if not lb_field.is_visible():
+        lb_a.locator('.topbar button[title*="devices & people"]').click()
+    lb_field.fill(lb_new)
+    lb_field.press('Enter')
+    lb_field.blur()
+    check("a rename reaches the viewer's nameplate on a running share",
+          bool(poll(lambda: f"{lb_new}'s screen" in lb_b.locator('.tiles .stage-tile .tile-name').first.inner_text(), 30)),
+          repr(lb_b.locator('.tiles .stage-tile .tile-name').first.inner_text()))
+    check("and the viewer's tile controls follow it",
+          lb_b.locator(f'.stage-tile button[title="Spotlight {lb_new}\'s screen"]').count() == 1)
+    check("and the sender's own nameplate follows it",
+          f"{lb_new}'s screen (you)" in lb_a.locator('.tiles .stage-tile .tile-name').first.inner_text(),
+          repr(lb_a.locator('.tiles .stage-tile .tile-name').first.inner_text()))
     lctx_a.close()
     lctx_b.close()
 

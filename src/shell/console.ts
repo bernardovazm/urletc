@@ -1017,6 +1017,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     recorder: MediaRecorder | null
     fsBtn: HTMLElement | null
     recUrl: string
+    relabel: () => void // redraws the nameplate and control names from `label`
   }
   const stageTiles: StageTile[] = []
   let stageLayout: StageLayout = 'grid'
@@ -1202,6 +1203,30 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     renderRoster()
   }
 
+  /** A source's name: the sender's name as this device's roster has it, or this device's
+   *  own name for a local source. A remote label is never the one the sender put on the
+   *  stream: that is self-asserted, and it read "Your screen" on every viewer's stage. */
+  function sourceLabel(peerId: string | null, kind: SourceKind): string {
+    const name = peerId === null ? displayName : (mergedPeers().find((x) => x.peer.peerId === peerId)?.peer.name ?? '')
+    return `${name || 'peer'}'s ${kindWord(kind)}`
+  }
+
+  /** Re-read every source's name. Names change after a tile is built (a rename, or the
+   *  roster catching up), and a nameplate fixed at build time kept the old one. A sender
+   *  no longer in the roster keeps the last name it had. */
+  function relabelTiles(): void {
+    let changed = false
+    for (const t of stageTiles) {
+      if (t.peerId !== null && !mergedPeers().some((x) => x.peer.peerId === t.peerId)) continue
+      const next = sourceLabel(t.peerId, t.kind)
+      if (next === t.label) continue
+      t.label = next
+      t.relabel()
+      changed = true
+    }
+    if (changed) notifyStage() // Studio's source list reads the labels
+  }
+
   /** Build a source tile. Video becomes a .stage-tile with a nameplate and overlay
    *  controls; audio-only becomes a bare <audio> parked in the hidden sink. */
   function addStageTile(opts: { peerId: string | null; kind: SourceKind; label: string; stream: MediaStream; localMuted?: boolean }): StageTile {
@@ -1221,8 +1246,22 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
       recorder: null,
       recUrl: '',
       fsBtn: null,
+      relabel: () => {},
     }
     if (hasVideo) {
+      // Every name on the tile is drawn by one of these, so a rename reaches all of them.
+      const relabelers: Array<() => void> = []
+      const named = (b: HTMLElement, title: () => string) => {
+        const f = () => {
+          b.title = title()
+          b.setAttribute('aria-label', b.title)
+        }
+        relabelers.push(f)
+        return b
+      }
+      tile.relabel = () => {
+        for (const f of relabelers) f()
+      }
       // Fullscreen targets the wrapper, not the <video>: fullscreening the media element
       // alone drops the nameplate and the overlay controls out of the fullscreen layer.
       const wrap = el('div', { class: `stage-tile kind-${opts.kind}`, tabindex: '0' })
@@ -1234,10 +1273,13 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
       // Every tile renders the same four buttons, so an unqualified label reads as N
       // identical controls to a screen reader. The label is already validated and
       // 40-char capped by asMeta, so naming them costs no extra injection surface.
-      const fsBtn = button('🔳', toggleFs, 'icon sm', `Fullscreen ${opts.label}`)
+      const fsBtn = named(button('🔳', toggleFs, 'icon sm'), () => (document.fullscreenElement === wrap ? `Exit fullscreen of ${tile.label}` : `Fullscreen ${tile.label}`))
       tile.fsBtn = fsBtn
       ctl.append(
-        button('📌', () => toggleSpot(tile.id), 'icon sm', `Spotlight ${opts.label}`),
+        named(
+          button('📌', () => toggleSpot(tile.id), 'icon sm'),
+          () => `Spotlight ${tile.label}`,
+        ),
         fsBtn,
       )
       // Windowed mode: PiP floats this source above other applications, which is the one
@@ -1254,7 +1296,6 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
             else void vid.requestPictureInPicture().catch(() => toast('Windowed mode was refused'))
           },
           'icon sm',
-          `Windowed mode for ${opts.label}: float it above other applications`,
         )
         // The browser also leaves PiP on its own (the floating window's close button, a
         // second video taking the slot), so the glyph follows the element rather than the click.
@@ -1262,33 +1303,44 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
           const on = document.pictureInPictureElement === vid
           pipBtn.classList.toggle('on', on)
           pipBtn.setAttribute('aria-pressed', String(on))
-          const t = on ? `Close the floating window for ${opts.label}` : `Windowed mode for ${opts.label}: float it above other applications`
+          const t = on ? `Close the floating window for ${tile.label}` : `Windowed mode for ${tile.label}: float it above other applications`
           pipBtn.title = t
           pipBtn.setAttribute('aria-label', t)
         }
         vid.addEventListener('enterpictureinpicture', syncPip)
         vid.addEventListener('leavepictureinpicture', syncPip)
-        syncPip()
+        relabelers.push(syncPip)
         ctl.append(pipBtn)
       }
       if (opts.stream.getAudioTracks().length && opts.peerId) {
-        const mb = button('🔊', () => (media.muted = !media.muted), 'icon sm', `Mute ${opts.label}`)
+        const mb = button('🔊', () => (media.muted = !media.muted), 'icon sm')
         // Driven by volumechange rather than by the click, because the roster row and a
         // playback start that had to fall back to muted also change `muted`.
         const syncMb = () => {
           mb.textContent = media.muted ? '🔇' : '🔊'
-          mb.title = media.muted ? `Unmute ${opts.label}` : `Mute ${opts.label}`
+          mb.title = media.muted ? `Unmute ${tile.label}` : `Mute ${tile.label}`
           mb.setAttribute('aria-label', mb.title)
         }
         media.addEventListener('volumechange', syncMb)
+        relabelers.push(syncMb)
         ctl.append(mb)
       }
       if (opts.peerId === null) {
         // Per-source stop: unpublish() is otherwise only reachable through "stop everything",
         // so dropping just the screen while sharing cam + screen is impossible.
-        ctl.append(button('⏹', () => unpublish(opts.stream), 'icon sm', `Stop sharing ${opts.label}`))
+        ctl.append(
+          named(
+            button('⏹', () => unpublish(opts.stream), 'icon sm'),
+            () => `Stop sharing ${tile.label}`,
+          ),
+        )
       } else {
-        ctl.append(button('🚫', () => removeStageTile(tile), 'icon sm', `Remove ${opts.label} from the stage (they keep sending; re-appears if they restart)`))
+        ctl.append(
+          named(
+            button('🚫', () => removeStageTile(tile), 'icon sm'),
+            () => `Remove ${tile.label} from the stage (they keep sending; re-appears if they restart)`,
+          ),
+        )
       }
       // Double-click anywhere on the tile is the affordance people actually reach for;
       // the overlay button is invisible until hover and absent entirely on touch.
@@ -1302,7 +1354,12 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
         e.preventDefault()
         toggleFs()
       })
-      wrap.append(media, el('div', { class: 'tile-name', text: `${labelIcon(opts.kind)} ${opts.label}` }), ctl)
+      // Your own sources carry your name too, marked, so a screenshot or a second screen
+      // showing this stage still says whose feed is whose.
+      const plate = el('div', { class: 'tile-name' })
+      relabelers.push(() => (plate.textContent = `${labelIcon(opts.kind)} ${tile.label}${opts.peerId === null ? ' (you)' : ''}`))
+      tile.relabel()
+      wrap.append(media, plate, ctl)
       tile.wrap = wrap
       tiles.append(wrap)
     } else {
@@ -1369,13 +1426,8 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
 
   function attachPeerStream(peerId: string, stream: MediaStream, meta?: unknown) {
     const m = asMeta(meta)
-    const peerName = mergedPeers().find((x) => x.peer.peerId === peerId)?.peer.name ?? 'peer'
     const kind: SourceKind = m?.kind ?? (stream.getVideoTracks().length ? 'cam' : 'mic')
-    // Named from the roster rather than from the label the sender chose: a label such as
-    // "Your screen" presents someone else's feed as the viewer's own, and two sources
-    // sharing one label cannot be told apart.
-    const label = `${peerName}'s ${kindWord(kind)}`
-    const tile = addStageTile({ peerId, kind, label, stream })
+    const tile = addStageTile({ peerId, kind, label: sourceLabel(peerId, kind), stream })
     startRemote(tile.media)
     if (kind === 'screen') screenTookStage(tile)
     // Keep peerMedia so the roster's per-peer mute/volume control still works.
@@ -1516,8 +1568,6 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     addCard(el('div', { class: 'sys' }, [el('span', { text: 'Mic is live. Want on-device captions of what you say? ' }), enable]))
   }
 
-  const kindLabelSelf = (k: SourceKind) => `Your ${kindWord(k)}`
-
   // Mute/blank toggles. They only appear once you actually publish a track of that kind,
   // so the bar stays empty until there is something to mute.
   const micToggle = button('🎤', () => setLocalEnabled('audio', !localTracksOf('audio').some((t) => t.enabled)), 'icon', 'Mute your microphone')
@@ -1547,15 +1597,14 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   async function publishLocal(kind: SourceKind, constraints: MediaStreamConstraints): Promise<void> {
     if (stageView) return // a chromeless stage viewer never publishes
     const stream = kind === 'screen' ? await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true }) : await navigator.mediaDevices.getUserMedia(constraints)
-    // Receivers name a source from their own roster. The label on the wire is for one that
-    // shows it as sent, so it names this device in the third person; the local tile says
-    // "Your".
+    // Receivers name a source from their own roster. The label on the wire is for a client
+    // that shows it as sent, so it names this device in the third person.
     const meta: StreamMeta = { kind, label: `${displayName}'s ${kindWord(kind)}` }
     localStreams.set(stream, meta)
     setTransientGuard(true) // a live source dies with the tab, so closing it asks first
     const targets = mediaTiers()
     for (const s of targets) await s.addMedia(stream, meta)
-    const tile = addStageTile({ peerId: null, kind, label: kindLabelSelf(kind), stream, localMuted: true })
+    const tile = addStageTile({ peerId: null, kind, label: sourceLabel(null, kind), stream, localMuted: true })
     if (kind === 'screen') screenTookStage(tile)
     // The browser ends a source on its own: the "Stop sharing" bar, the OS sharing
     // indicator, an unplugged camera. None of those pass through the stop controls, and a
@@ -2026,6 +2075,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
       flushPendingStreams()
       settleInvites()
       renderRoster()
+      relabelTiles()
       updateStatus()
       void flushOutbox()
     },
@@ -2292,6 +2342,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     }
     displayName = v
     void setItem('display-name', v)
+    relabelTiles()
     for (const s of sessions.values()) void s.setName(v)
     for (const f of [...nameFields]) {
       if (f.isConnected) f.value = v

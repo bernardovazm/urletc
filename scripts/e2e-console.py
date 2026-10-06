@@ -3466,6 +3466,11 @@ with sync_playwright() as p:
     # topbar button doubles as the stop control while a screen is live.
     sctx = browser.new_context()
     sctx.add_init_script(FAKE_SCREEN)
+    # Records what the page asks getDisplayMedia for; the fake above ignores it.
+    sctx.add_init_script("""
+      const dmInner = navigator.mediaDevices.getDisplayMedia
+      navigator.mediaDevices.getDisplayMedia = (opts) => { window.__dmOpts = JSON.stringify(opts); return dmInner(opts) }
+    """)
     spg = sctx.new_page()
     serrs = []
     spg.on('pageerror', lambda e: serrs.append(str(e)))
@@ -3481,6 +3486,12 @@ with sync_playwright() as p:
     check('one press on it shares the screen',
           bool(poll(lambda: spg.locator('.tiles .stage-tile.kind-screen').count() == 1, 10)),
           '%d screen tiles' % spg.locator('.tiles .stage-tile.kind-screen').count())
+    dm_opts = json.loads(spg.evaluate('window.__dmOpts || "{}"'))
+    # A shared window offers its own sound (a game without the call beside it), and the
+    # system sound of an entire screen leaves out this tab's playback, the room's voices.
+    check('screen share asks for a window its own sound and leaves the room out of system sound',
+          dm_opts.get('windowAudio') == 'window' and dm_opts.get('systemAudio') == 'include'
+          and (dm_opts.get('audio') or {}).get('restrictOwnAudio') is True, str(dm_opts))
     check('the same button then stops it',
           TOP_SCREEN.inner_text() == 'Stop sharing' and TOP_SCREEN.get_attribute('aria-pressed') == 'true',
           '%r pressed=%r' % (TOP_SCREEN.inner_text(), TOP_SCREEN.get_attribute('aria-pressed')))

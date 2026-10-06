@@ -34,7 +34,7 @@ import { createContext } from './context'
 import { registry, type ToolManifest, type ToolModule } from './registry'
 import { Router } from './router'
 import { setStudio, type SourceKind, type StageLayout, type StreamMeta, type StudioController, type StudioSource } from './studio'
-import { screenShareSupport } from './screen-share'
+import { DISPLAY_MEDIA_OPTIONS, screenShareSupport } from './screen-share'
 import { button, copyText, el, toast } from './ui'
 
 type Tier = 'personal' | 'nearby' | 'code' | 'presence'
@@ -1850,7 +1850,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
    *  This is the single publish path for both the composer buttons and the Studio tool. */
   async function publishLocal(kind: SourceKind, constraints: MediaStreamConstraints): Promise<void> {
     if (stageView) return // a chromeless stage viewer never publishes
-    const stream = kind === 'screen' ? await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true }) : await navigator.mediaDevices.getUserMedia(constraints)
+    const stream = kind === 'screen' ? await navigator.mediaDevices.getDisplayMedia(DISPLAY_MEDIA_OPTIONS) : await navigator.mediaDevices.getUserMedia(constraints)
     // Receivers name a source from their own roster. The label on the wire is for a client
     // that shows it as sent, so it names this device in the third person.
     const meta: StreamMeta = { kind, label: `${displayName}'s ${kindWord(kind)}` }

@@ -23,6 +23,22 @@ export interface ScreenShareSupport {
 const PICKER = 'The list of screens, windows and tabs, its audio checkbox and the permission prompt all belong to the browser. Nothing in this app changes what it offers.'
 const SPLIT = 'Chrome, Edge and Brave capture the audio of a shared tab. Firefox and LibreWolf capture picture only.'
 
+/**
+ * What getDisplayMedia is asked for. Members a browser does not know are ignored.
+ * - windowAudio 'window' (Chrome 141): a shared window offers its own sound rather than
+ *   the whole system's, so a game can be shared without the call playing beside it.
+ * - systemAudio 'include': an entire screen still offers the system's sound where the
+ *   platform has it.
+ * - restrictOwnAudio: that system sound leaves out what this tab plays, the room's own
+ *   voices, which would otherwise reach the room again as an echo.
+ */
+export const DISPLAY_MEDIA_OPTIONS = {
+  video: true,
+  audio: { restrictOwnAudio: true },
+  windowAudio: 'window',
+  systemAudio: 'include',
+} as DisplayMediaStreamOptions
+
 /** Probe on every call: a cached answer would survive a browser that gains the capability
  *  mid-session, and the probe is two property reads. */
 export function screenShareSupport(): ScreenShareSupport {
@@ -41,7 +57,7 @@ export function screenShareSupport(): ScreenShareSupport {
       // reports it beforehand, so the copy says that instead of guessing.
       detail: [
         PICKER,
-        'Audio is offered only where the browser allows it, in practice a tab, and only when you tick the box there. Which entries offer it is decided inside the picker, so it cannot be read here in advance.',
+        'Audio is offered only where the browser allows it, and only when you tick the box there: a tab carries its own sound; from Chrome 141 a window can carry its own sound alone, such as a game without the voice call running beside it; an entire screen carries everything the computer plays, such as a call in another app, on the systems that offer it, apart from the sound of this tab. Which entries offer it is decided inside the picker, so it cannot be read here in advance.',
         SPLIT,
       ],
     }

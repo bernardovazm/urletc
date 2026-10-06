@@ -301,6 +301,63 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   // Content that grows after it is appended (an image decoding, an OCR result landing, a
   // card being collapsed) changes the distance to the bottom with no scroll event of its own.
   if ('ResizeObserver' in window) new ResizeObserver(syncJumpLatest).observe(feedInner)
+  // A feed image is a preview capped at 300px; pressing it shows the image at full size
+  // over the page. Escape, a press anywhere or the close button puts it away.
+  const LIGHTBOX_MAX = 4096 // longest side of the full-size view, in canvas pixels
+  const openLightbox = (img: HTMLImageElement) => {
+    if (!img.complete || !img.naturalWidth) return
+    const back = el('div', { class: 'modal-back lightbox', role: 'dialog', 'aria-modal': 'true', 'aria-label': img.alt || 'Image' })
+    // Painted from the decoded preview rather than reloaded from its URL: a pasted image's
+    // blob URL is revoked as soon as the preview has loaded. Scaled down past LIGHTBOX_MAX,
+    // since a phone photo at full size is a canvas of hundreds of megabytes, and past the
+    // canvas size limit of some browsers it paints nothing at all.
+    const scale = Math.min(1, LIGHTBOX_MAX / Math.max(img.naturalWidth, img.naturalHeight))
+    const w = Math.round(img.naturalWidth * scale)
+    const h = Math.round(img.naturalHeight * scale)
+    const full = el('canvas', { width: String(w), height: String(h), role: 'img', 'aria-label': img.alt }) as HTMLCanvasElement
+    full.getContext('2d')?.drawImage(img, 0, 0, w, h)
+    const prevFocus = document.activeElement as HTMLElement | null
+    const done = () => {
+      back.remove()
+      document.removeEventListener('keydown', onKey, true)
+      prevFocus?.focus?.()
+    }
+    // Escape closes; Tab stays on Close, the dialog's one control, as consent() traps it.
+    const onKey = (k: KeyboardEvent) => {
+      if (k.key === 'Tab') {
+        k.preventDefault()
+        closeBtn.focus()
+        return
+      }
+      if (k.key !== 'Escape') return
+      k.stopPropagation()
+      done()
+    }
+    const closeBtn = button('Close', done, 'ghost', 'Close the full-size image')
+    back.append(full, closeBtn)
+    back.addEventListener('click', done)
+    document.addEventListener('keydown', onKey, true)
+    document.body.append(back)
+    closeBtn.focus()
+  }
+  feed.addEventListener('click', (e) => {
+    const img = (e.target as HTMLElement).closest<HTMLImageElement>('img.preview')
+    if (img) openLightbox(img)
+  })
+  feed.addEventListener('keydown', (e) => {
+    const img = (e.target as HTMLElement).closest<HTMLImageElement>('img.preview')
+    if (!img || (e.key !== 'Enter' && e.key !== ' ')) return
+    e.preventDefault()
+    openLightbox(img)
+  })
+  // Every preview in the feed, a tool card's included, opens by keyboard too.
+  new MutationObserver(() => {
+    for (const img of feedInner.querySelectorAll<HTMLImageElement>('img.preview:not([tabindex])')) {
+      img.tabIndex = 0
+      img.setAttribute('role', 'button')
+      img.title = 'Show at full size'
+    }
+  }).observe(feedInner, { childList: true, subtree: true })
   const empty = el('div', { class: 'empty' }, [
     el('div', { class: 'big', text: 'urletc' }),
     el('div', { text: p2pReady ? 'Paste, drop or attach. Type / for tools. Nearby devices connect automatically.' : 'Paste, drop or attach. Type / for tools.' }),

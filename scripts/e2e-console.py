@@ -4641,6 +4641,41 @@ with sync_playwright() as p:
     cn_close()
     cnctx.close()
 
+    # --- feed images keep their aspect ratio and open at full size ---
+    # The preview sits in a flex column whose default stretch widened an image narrower than
+    # the column to its full width while max-height capped the height: a portrait image
+    # came out stretched sideways.
+    ictx = browser.new_context(viewport={'width': 1280, 'height': 900})
+    ipg = ictx.new_page()
+    ipg.goto(BASE)
+    ipg.wait_for_selector('.composer', timeout=30000)
+    for _name, _w, _h in (('wide', 1600, 400), ('tall', 300, 900)):
+        make_png(os.path.join(SNAP, f'e2e-aspect-{_name}.png'), _w, _h)
+        ipg.locator('input[type=file][accept="image/*"]').set_input_files(os.path.join(SNAP, f'e2e-aspect-{_name}.png'))
+    IMG_RATIOS = ("() => [...document.querySelectorAll('.feed img.preview')].filter(i => i.complete && i.naturalWidth)"
+                  ".map(i => { const r = i.getBoundingClientRect(); return { nat: i.naturalWidth / i.naturalHeight, shown: r.width / r.height } })")
+    i_ratios = poll(lambda: (lambda r: r if len(r) >= 2 else None)(ipg.evaluate(IMG_RATIOS)), 15) or []
+    check('feed images: both previews render', len(i_ratios) >= 2, str(i_ratios))
+    check('feed images: each preview keeps its aspect ratio',
+          bool(i_ratios) and all(abs(r['shown'] / r['nat'] - 1) < 0.04 for r in i_ratios), str(i_ratios))
+    ipg.locator('.feed img.preview').first.click()
+    i_full = ipg.evaluate("() => { const c = document.querySelector('.lightbox canvas'); return c ? [c.width, c.height] : null }")
+    check('feed images: pressing a preview shows the image at its full size', i_full == [1600, 400], str(i_full))
+    ipg.keyboard.press('Escape')
+    check('feed images: Escape puts the full-size view away', bool(poll(lambda: ipg.locator('.lightbox').count() == 0, 3)))
+    # The same by keyboard: the preview takes focus, Enter opens it, Tab stays inside the
+    # dialog, and closing hands focus back to the preview.
+    ipg.locator('.feed img.preview').first.focus()
+    ipg.keyboard.press('Enter')
+    i_kb = poll(lambda: ipg.locator('.lightbox canvas').count() == 1, 3)
+    ipg.keyboard.press('Tab')
+    i_in = ipg.evaluate("() => !!document.activeElement && !!document.activeElement.closest('.lightbox')")
+    ipg.keyboard.press('Escape')
+    i_back = ipg.evaluate("() => document.activeElement && document.activeElement.matches('.feed img.preview')")
+    check('feed images: a preview opens by keyboard, keeps focus inside and returns it on close',
+          bool(i_kb) and i_in and i_back, f'opened={bool(i_kb)} inside={i_in} returned={i_back}')
+    ictx.close()
+
     # --- composer collapse: a manual, persisted toggle that keeps the control row ---
     # Collapsing is deliberately not wired to sharing: it only ever moves when the toggle
     # is clicked, so this drives the toggle and nothing else.

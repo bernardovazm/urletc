@@ -1325,11 +1325,30 @@ video.preview.mirror {
   color: var(--danger);
   border-color: var(--danger);
 }
+/* Feed and card previews sit in flex columns, whose default stretch widened any image
+   narrower than the column to its full width while max-height capped the height, so
+   portrait images and small screenshots came out stretched. The image keeps its own aspect
+   ratio, and opens at full size when pressed. */
 img.preview {
+  align-self: flex-start;
+  width: auto;
+  height: auto;
   max-width: 100%;
   max-height: 300px;
+  object-fit: contain;
   border-radius: var(--radius-sm);
   border: 1px solid var(--border);
+  cursor: zoom-in;
+}
+.lightbox {
+  flex-direction: column;
+  gap: 0.6rem;
+  cursor: zoom-out;
+}
+.lightbox canvas {
+  max-width: 96vw;
+  max-height: calc(96vh - 3rem);
+  background: var(--bg);
 }
 canvas.qr {
   image-rendering: pixelated;

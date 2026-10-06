@@ -130,6 +130,14 @@ const tool: ToolModule = {
         void setItem('presence-on', prChk.checked)
         window.dispatchEvent(new CustomEvent('wt:presence', { detail: prChk.checked }))
       })
+      // Covering applies to video that arrives after the change; turning it off also shows
+      // whatever is covered right now.
+      const cvChk = el('input', { type: 'checkbox' }) as HTMLInputElement
+      cvChk.checked = (await getItem<boolean>('cover-video')) ?? true
+      cvChk.addEventListener('change', () => {
+        void setItem('cover-video', cvChk.checked)
+        window.dispatchEvent(new CustomEvent('wt:cover-video', { detail: cvChk.checked }))
+      })
       // Ask when closing tab. The guard belongs to the window and has to survive a
       // reload, so it lives here and is re-armed at boot rather than in a tool card that
       // would take it down when closed.
@@ -149,6 +157,13 @@ const tool: ToolModule = {
           prChk,
           el('span', {
             text: 'Online list. See everyone else using the app right now, and let them see you. Presence only: no messages, files or media travel over it.',
+          }),
+        ]),
+        el('div', { class: 'group-label', text: 'Screen sharing' }),
+        el('label', { class: 'row small' }, [
+          cvChk,
+          el('span', {
+            text: 'Cover video from people outside my own devices until I press Show twice. A room link visible on a stream lets anyone join and share, and the cover keeps what they share off your stage until you choose to see it.',
           }),
         ]),
         el('div', { class: 'group-label', text: 'This tab' }),

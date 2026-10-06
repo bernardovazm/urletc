@@ -1156,6 +1156,46 @@ video.tile {
   box-shadow: var(--ring);
 }
 
+/* Video from outside your own devices, before it is shown (console.ts coverTile). The blur
+   and the dimming keep it unreadable; the controls that would play it unblurred elsewhere
+   (picture-in-picture) or give it sound are gone until it is shown. */
+.stage-tile.covered video.tile {
+  filter: blur(48px) brightness(0.35);
+}
+.stage-tile.covered .tile-pip,
+.stage-tile.covered .tile-mute,
+.stage-tile.covered .tile-sound,
+.stage-tile.covered .tile-name {
+  display: none;
+} /* the nameplate too: the cover names the source, and a thumbnail has no room for both */
+.tile-cover {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  padding: 0.5rem;
+  text-align: center;
+  color: #fff;
+}
+.tile-cover-text {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  padding: 0.15rem 0.5rem;
+  background: var(--plate);
+  font-size: 0.8rem;
+}
+/* the tile's own controls (spotlight, fullscreen, remove) stay usable over the cover */
+.stage-tile.covered .tile-ctl {
+  z-index: 1;
+}
+.tile-cover button.armed {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+
 /* Shown over a remote tile whose sound the autoplay policy held back. Centred and solid,
    because it is the one thing on the tile the viewer has to act on. */
 .tile-sound {

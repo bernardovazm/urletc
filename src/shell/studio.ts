@@ -20,6 +20,8 @@ export interface StudioSource {
   hasVideo: boolean
   spotlighted: boolean
   recording: boolean
+  /** Behind the cover (console.ts coverTile): not recordable until shown. */
+  covered: boolean
 }
 
 export interface DeviceOption {

@@ -97,6 +97,10 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   }
   let autoShare = (await getItem<boolean>('auto-share')) ?? false
   const verified = new Set<string>((await getItem<string[]>('verified')) ?? [])
+  // Video from anyone outside your own paired devices starts covered (see coverTile). On by
+  // default: a room link shown on a stream lets anyone watching join, and their first share
+  // would otherwise land uncovered on the stage being broadcast.
+  let coverVideo = (await getItem<boolean>('cover-video')) ?? true
 
   // ---------- replayable feed history ----------
   // Local, encrypted at rest, capped by count, age and serialized size. Two extra
@@ -901,14 +905,18 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
       const muteBtn = button(
         '🔊',
         () => {
-          const muted = !media[0].muted
-          for (const m of media) m.muted = muted
+          // Read from a stream that is not covered: a covered one is held muted, and reading
+          // it made the button a no-op for the same peer's audible microphone.
+          const audible = media.find((m) => !coveredMedia.has(m))
+          if (!audible) return
+          const muted = !audible.muted
+          for (const m of media) if (muted || !coveredMedia.has(m)) m.muted = muted
           showMuted(muted)
         },
         'icon sm',
         `Mute ${who}`,
       )
-      showMuted(media[0].muted) // a stream whose sound the browser held back is already muted
+      showMuted(!media.some((m) => !coveredMedia.has(m) && !m.muted)) // held back by the browser, or covered
       // The row is rebuilt on every roster event, so the slider starts from the element's
       // volume: starting at full, it read full while the peer stayed turned down.
       const vol = el('input', {
@@ -1336,6 +1344,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     ;(tile.wrap.closest('.stage-tile') ?? tile.wrap).remove()
     if (tile.media.parentElement === sink) tile.media.remove()
     forgetSound(tile.media)
+    coveredMedia.delete(tile.media)
     const i = stageTiles.indexOf(tile)
     if (i >= 0) stageTiles.splice(i, 1)
     if (tile.recUrl) URL.revokeObjectURL(tile.recUrl)
@@ -1454,7 +1463,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
             if (document.pictureInPictureElement === vid) void document.exitPictureInPicture().catch(() => {})
             else void vid.requestPictureInPicture().catch(() => toast('Windowed mode was refused'))
           },
-          'icon sm',
+          'icon sm tile-pip',
         )
         // The browser also leaves PiP on its own (the floating window's close button, a
         // second video taking the slot), so the glyph follows the element rather than the click.
@@ -1472,7 +1481,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
         ctl.append(pipBtn)
       }
       if (opts.stream.getAudioTracks().length && opts.peerId) {
-        const mb = button('🔊', () => (media.muted = !media.muted), 'icon sm')
+        const mb = button('🔊', () => (media.muted = !media.muted), 'icon sm tile-mute')
         // Driven by volumechange rather than by the click, because the roster row and a
         // playback start that had to fall back to muted also change `muted`.
         const syncMb = () => {
@@ -1548,7 +1557,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     const held = [...soundHeld]
     soundHeld.clear()
     for (const m of held) {
-      if (!m.isConnected) continue
+      if (!m.isConnected || coveredMedia.has(m)) continue
       m.muted = false
       void m.play().catch(() => holdSound(m))
     }
@@ -1583,6 +1592,76 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     })
   }
 
+  // ---------- covered video ----------
+  // A room link shown on a stream is a way in for anyone watching it, and what they share
+  // lands on the stage being broadcast. Video from a device that is not one of your own
+  // paired devices, and whose safety number you have not verified, therefore arrives
+  // blurred and silent behind a cover, and shows only after two presses: the first arms
+  // the button, the second shows it. Showing one source shows every source from that
+  // device for the rest of the page, keyed by its identity key so a reconnect under a new
+  // peerId does not cover it again.
+  const shownFrom = new Set<string>()
+  const coveredMedia = new Map<HTMLMediaElement, () => void>() // covered media to its reveal
+  function needsCover(peerId: string): string | null {
+    if (!coverVideo) return null
+    const hit = mergedPeers().find((x) => x.peer.peerId === peerId)
+    const key = hit?.peer.pubKeyHex ?? `peer:${peerId}`
+    if (hit && (hit.tier === 'personal' || verified.has(hit.peer.pubKeyHex))) return null
+    return shownFrom.has(key) ? null : key
+  }
+  function coverTile(tile: StageTile, key: string): void {
+    if (!tile.hasVideo) return // audio alone has no tile to cover; voice is what rooms are for
+    const media = tile.media
+    tile.wrap.classList.add('covered')
+    media.muted = true
+    const text = el('div', { class: 'tile-cover-text' })
+    let armed = 0
+    const show = button('Show', () => {
+      if (!armed) {
+        show.textContent = 'Press again to show'
+        show.classList.add('armed')
+        show.setAttribute('aria-pressed', 'true')
+        armed = window.setTimeout(disarm, 3000)
+        return
+      }
+      shownFrom.add(key)
+      for (const [m, reveal] of [...coveredMedia]) if (m.closest('.stage-tile')?.getAttribute('data-cover-key') === key) reveal()
+    })
+    const disarm = () => {
+      window.clearTimeout(armed)
+      armed = 0
+      show.textContent = 'Show'
+      show.classList.remove('armed')
+      show.setAttribute('aria-pressed', 'false')
+    }
+    const cover = el('div', { class: 'tile-cover' }, [text, show])
+    tile.wrap.setAttribute('data-cover-key', key)
+    tile.wrap.append(cover)
+    const relabel = tile.relabel
+    const sync = () => {
+      text.textContent = `${tile.label} is covered`
+      show.title = `Show ${tile.label}. Press twice: the first press arms it`
+      show.setAttribute('aria-label', show.title)
+    }
+    tile.relabel = () => {
+      relabel()
+      sync()
+    }
+    sync()
+    coveredMedia.set(media, () => {
+      disarm()
+      coveredMedia.delete(media)
+      cover.remove()
+      tile.wrap.classList.remove('covered')
+      tile.wrap.removeAttribute('data-cover-key')
+      tile.relabel = relabel
+      if (tile.kind === 'screen' && stageTiles.includes(tile)) screenTookStage(tile)
+      if (soundHeld.has(media)) return // the autoplay notice gives the sound back
+      media.muted = false
+      startRemote(media)
+    })
+  }
+
   function attachPeerStream(peerId: string, stream: MediaStream, meta?: unknown) {
     // A device reachable on two media tiers publishes to both, and Trystero hands the one
     // shared peer connection's stream to every room, so it arrives once per tier.
@@ -1590,8 +1669,12 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     const m = asMeta(meta)
     const kind: SourceKind = m?.kind ?? (stream.getVideoTracks().length ? 'cam' : 'mic')
     const tile = addStageTile({ peerId, kind, label: sourceLabel(peerId, kind), stream })
+    const coverKey = needsCover(peerId)
+    if (coverKey) coverTile(tile, coverKey)
     startRemote(tile.media)
-    if (kind === 'screen') screenTookStage(tile)
+    // A covered screen takes the stage only once shown (coverTile's reveal), so a stranger
+    // sharing cannot rearrange the stage, or hide the feed, before anyone chose to see it.
+    if (kind === 'screen' && !coverKey) screenTookStage(tile)
     // Keep peerMedia so the roster's per-peer mute/volume control still works.
     const arr = peerMedia.get(peerId) ?? []
     arr.push(tile.media)
@@ -3216,6 +3299,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
         hasVideo: t.hasVideo,
         spotlighted: t.id === effSpot,
         recording: !!t.recorder,
+        covered: coveredMedia.has(t.media),
       }))
     },
     layout: () => stageLayout,
@@ -3229,6 +3313,11 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     toggleRecord(id) {
       const tile = stageTiles.find((t) => t.id === id)
       if (!tile) return
+      // A recording holds the untouched tracks, so it would keep exactly what the cover hides.
+      if (coveredMedia.has(tile.media)) {
+        toast('Show this source on the stage before recording it')
+        return
+      }
       if (tile.recorder && tile.recorder.state !== 'inactive') {
         tile.recorder.stop()
         return
@@ -3524,6 +3613,15 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
       for (const peerId of [...inboundInvites.keys()]) dismissInvite(peerId)
       void leaveTier('presence').then(() => sys('Online list off, so you no longer appear to other users.'))
     }
+  })
+  window.addEventListener('wt:cover-video', (e) => {
+    coverVideo = !!(e as CustomEvent).detail
+    if (!coverVideo) for (const reveal of [...coveredMedia.values()]) reveal()
+    else
+      for (const t of [...stageTiles]) {
+        const key = t.peerId === null ? null : needsCover(t.peerId)
+        if (key && !coveredMedia.has(t.media)) coverTile(t, key)
+      }
   })
   window.addEventListener('wt:nearby', (e) => {
     nearbyWanted = !!(e as CustomEvent).detail

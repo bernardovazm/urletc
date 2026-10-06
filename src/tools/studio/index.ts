@@ -104,14 +104,14 @@ const tool: ToolModule = {
               button('📌', () => studio.spotlight(s.id), s.spotlighted ? 'icon sm primary' : 'icon sm', s.spotlighted ? 'Remove the spotlight' : 'Spotlight this source'),
             )
           }
-          ctlRow.append(
-            button(
-              s.recording ? '⏹ Rec' : '🔴 Rec',
-              () => studio.toggleRecord(s.id),
-              'ghost small',
-              s.recording ? 'Stop recording and save the file' : 'Record this source to a downloadable file',
-            ),
+          const rec = button(
+            s.recording ? '⏹ Rec' : '🔴 Rec',
+            () => studio.toggleRecord(s.id),
+            'ghost small',
+            s.covered ? 'Covered: show it on the stage before recording it' : s.recording ? 'Stop recording and save the file' : 'Record this source to a downloadable file',
           )
+          if (s.covered) rec.setAttribute('disabled', '')
+          ctlRow.append(rec)
           return ctlRow
         }),
       )

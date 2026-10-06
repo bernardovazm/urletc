@@ -2844,6 +2844,16 @@ with sync_playwright() as p:
     def theater(pg):
         return pg.evaluate("document.documentElement.classList.contains('stage-max')")
 
+    # Switches covering off from inside the page, for sections about uncovered video. An
+    # evaluate from the harness would also work, but it hands the page user activation.
+    COVER_OFF = """
+      let coverOffTries = 0
+      const coverOff = setInterval(() => {
+        window.dispatchEvent(new CustomEvent('wt:cover-video', { detail: false }))
+        if (++coverOffTries > 40) clearInterval(coverOff)
+      }, 250)
+    """
+
     # The newest screen tile has decoded video: its playhead has moved.
     PAINTS = ("() => { const v = [...document.querySelectorAll('.tiles .stage-tile.kind-screen video')].pop();"
               " return !!v && v.currentTime > 0.5 }")
@@ -2854,6 +2864,8 @@ with sync_playwright() as p:
     sctx_a.add_init_script(FAKE_SCREEN)
     sctx_b = browser.new_context()
     sctx_b.add_init_script(VISIBILITY)
+    # This section is about how an uncovered share takes the stage, so covering is off.
+    sctx_b.add_init_script(COVER_OFF)
     sh_a, sh_b = sctx_a.new_page(), sctx_b.new_page()
     for _pg in (sh_a, sh_b):
         _pg.goto(f'{BASE}/#/join/{SCREEN_CODE}')
@@ -3087,6 +3099,10 @@ with sync_playwright() as p:
     actx_a = ap_browser.new_context(permissions=['microphone', 'camera'])
     actx_b = ap_browser.new_context()
     actx_b.add_init_script(AP_REPORT)
+    # The camera comes from a code-room peer, so it would arrive covered, and a covered
+    # stream is silent until shown, which never meets the autoplay policy. Covering is
+    # switched off from inside the page, since a query from the harness would activate it.
+    actx_b.add_init_script(COVER_OFF)
     ap_a, ap_b = actx_a.new_page(), actx_b.new_page()
     ap_b.on('console', ap_seen)
     ap_a.goto(f'{BASE}/#/join/{AP_CODE}')
@@ -3615,6 +3631,7 @@ with sync_playwright() as p:
     en_share.click()
     poll(lambda: en_a.locator('.tiles .stage-tile.kind-screen').count() == 1, 15)
     ectx_b = browser.new_context()
+    ectx_b.add_init_script(COVER_OFF)  # about which stream takes the spotlight, not covering
     en_b = ectx_b.new_page()
     en_b.goto(f'{BASE}/#/join/{END_CODE}')
     en_b.wait_for_selector('.composer', timeout=30000)
@@ -3766,6 +3783,7 @@ with sync_playwright() as p:
     vctx_a = browser.new_context()
     vctx_a.add_init_script(FAKE_SCREEN)
     vctx_b = browser.new_context()
+    vctx_b.add_init_script(COVER_OFF)  # an uncovered share expands the stage this checks
     lv_a, lv_b = vctx_a.new_page(), vctx_b.new_page()
     for _pg in (lv_a, lv_b):
         _pg.goto(f'{BASE}/#/join/{LV_CODE}')
@@ -4714,6 +4732,75 @@ with sync_playwright() as p:
           bool(poll(lambda: th_b.evaluate(COMPOSER_VIS)['ta'], 5)), str(th_b.evaluate(COMPOSER_VIS)))
     thctx_a.close()
     thctx_b.close()
+
+    # --- video from outside your own devices arrives covered ---
+    # A room link shown on a stream lets anyone watching join and share onto the stage being
+    # broadcast. Their video arrives blurred and silent until shown with two presses, and
+    # once shown, that device's later video is not covered again.
+    CV_CODE = 'x' + os.urandom(3).hex()
+    cctx_a = browser.new_context(permissions=['microphone', 'camera'])
+    cctx_a.add_init_script(FAKE_SCREEN)
+    cctx_b = browser.new_context()
+    cv_a, cv_b = cctx_a.new_page(), cctx_b.new_page()
+    for _pg in (cv_a, cv_b):
+        _pg.goto(f'{BASE}/#/join/{CV_CODE}')
+        _pg.wait_for_selector('.composer', timeout=30000)
+    cv_reach = poll(lambda: 'connected' in (cv_a.locator('.topbar .badge').inner_text() or '')
+                    and 'connected' in (cv_b.locator('.topbar .badge').inner_text() or ''), 150)
+    check('cover: the two contexts reach each other', bool(cv_reach), cv_b.locator('.feed').inner_text()[-160:])
+    cv_name = cv_a.locator('.sidebar input[aria-label="This device name"]').input_value()
+    cv_a.locator('.composer .bar button[title^="Share your camera"]').click()
+    CV_TILE = '.tiles .stage-tile.kind-cam'
+    cv_got = poll(lambda: cv_b.locator(CV_TILE).count() == 1, 90)
+    check('cover: the camera reaches the viewer', bool(cv_got))
+    CV_STATE = ("() => { const t = document.querySelector('.tiles .stage-tile.kind-cam'); if (!t) return null;"
+                " const v = t.querySelector('video'); const vis = e => !!e && getComputedStyle(e).display !== 'none';"
+                " return { covered: t.classList.contains('covered'), muted: v.muted, t: v.currentTime,"
+                " blur: getComputedStyle(v).filter.includes('blur'), pip: vis(t.querySelector('.tile-pip')),"
+                " mute: vis(t.querySelector('.tile-mute')), text: (t.querySelector('.tile-cover-text') || {}).textContent || '' } }")
+    cv_s = cv_b.evaluate(CV_STATE) if cv_got else None
+    check('cover: it arrives covered, blurred and silent',
+          bool(cv_s) and cv_s['covered'] and cv_s['blur'] and cv_s['muted'], str(cv_s))
+    check('cover: the cover names whose video it is', bool(cv_s) and cv_name in cv_s['text'], str(cv_s))
+    check('cover: nothing on the tile plays it unblurred or with sound',
+          bool(cv_s) and not cv_s['pip'] and not cv_s['mute'], str(cv_s))
+    check('cover: the covered video still plays, so showing it is instant',
+          bool(poll(lambda: (cv_b.evaluate(CV_STATE) or {}).get('t', 0) > 0.5, 15)), str(cv_b.evaluate(CV_STATE)))
+    # A covered screen does not take the stage: a stranger sharing must not rearrange it, or
+    # hide the feed, before anyone chose to see it.
+    cv_a.locator('.topbar button.screen-share').click()
+    cv_scr = poll(lambda: cv_b.locator('.tiles .stage-tile.kind-screen.covered').count() == 1, 60)
+    check('cover: a covered screen arrives without taking the stage', bool(cv_scr) and not theater(cv_b),
+          'screen tiles=%d stage-max=%s' % (cv_b.locator('.tiles .stage-tile.kind-screen').count(), theater(cv_b)))
+    # A recording holds the untouched tracks, so Studio offers no recording of a covered source.
+    cv_b.evaluate("location.hash = '#/t/studio'")
+    cv_rec = cv_b.locator('details.card[data-tool="studio"] button[title^="Covered:"]')
+    check('cover: Studio will not record a covered source',
+          bool(poll(lambda: cv_rec.count() >= 1, 15)) and cv_rec.first.is_disabled(), '%d covered rec buttons' % cv_rec.count())
+    cv_b.evaluate("location.hash = ''")
+    cv_show = cv_b.locator(CV_TILE + ' .tile-cover button')
+    if cv_show.count():
+        cv_show.click()
+    check('cover: the first press only arms it',
+          (cv_b.evaluate(CV_STATE) or {}).get('covered') is True and cv_show.count() == 1
+          and cv_show.get_attribute('aria-pressed') == 'true', str(cv_b.evaluate(CV_STATE)))
+    if cv_show.count():
+        cv_show.click()
+    cv_open = poll(lambda: (lambda st: st and not st['covered'] and not st['blur'] and not st['muted'])(cv_b.evaluate(CV_STATE)), 5)
+    check('cover: the second press shows it with its sound', bool(cv_open), str(cv_b.evaluate(CV_STATE)))
+    check("cover: showing one source shows the device's other one, and the screen then takes the stage",
+          bool(poll(lambda: cv_b.locator('.tiles .stage-tile.covered').count() == 0 and theater(cv_b), 5)),
+          'covered=%d stage-max=%s' % (cv_b.locator('.tiles .stage-tile.covered').count(), theater(cv_b)))
+    cv_a.locator('.topbar button.screen-share').click()
+    poll(lambda: cv_b.locator('.tiles .stage-tile.kind-screen').count() == 0, 30)
+    cv_a.locator('.composer .bar button[title*="Stop sharing"]').click()
+    poll(lambda: cv_b.locator(CV_TILE).count() == 0, 30)
+    cv_a.locator('.composer .bar button[title^="Share your camera"]').click()
+    cv_again = poll(lambda: cv_b.locator(CV_TILE).count() == 1, 90)
+    check('cover: a device already shown is not covered again',
+          bool(cv_again) and (cv_b.evaluate(CV_STATE) or {}).get('covered') is False, str(cv_b.evaluate(CV_STATE)))
+    cctx_a.close()
+    cctx_b.close()
 
     # --- composer collapse: a manual, persisted toggle that keeps the control row ---
     # Collapsing is deliberately not wired to sharing: it only ever moves when the toggle

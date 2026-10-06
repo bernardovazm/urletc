@@ -4676,6 +4676,45 @@ with sync_playwright() as p:
           bool(i_kb) and i_in and i_back, f'opened={bool(i_kb)} inside={i_in} returned={i_back}')
     ictx.close()
 
+    # --- an expanded stage hides the composer, apart from your own live controls ---
+    # While a screen has the expanded stage, a viewer sees nothing but the stream. Controls
+    # for sources of your own that are live (mute, camera off, stop) are the ones kept.
+    TH_CODE = 'x' + os.urandom(3).hex()
+    thctx_a = browser.new_context(viewport={'width': 1280, 'height': 800})
+    thctx_a.add_init_script(FAKE_SCREEN)
+    thctx_b = browser.new_context(viewport={'width': 1280, 'height': 800}, permissions=['microphone', 'camera'])
+    th_a, th_b = thctx_a.new_page(), thctx_b.new_page()
+    for _pg in (th_a, th_b):
+        _pg.goto(f'{BASE}/#/join/{TH_CODE}')
+        _pg.wait_for_selector('.composer', timeout=30000)
+        _pg.evaluate("() => window.dispatchEvent(new CustomEvent('wt:cover-video', { detail: false }))")
+    COMPOSER_VIS = ("() => { const vis = e => !!e && getComputedStyle(e).display !== 'none' && e.getClientRects().length > 0;"
+                    " return { wrap: vis(document.querySelector('.composer-wrap')), ta: vis(document.querySelector('.composer textarea')),"
+                    " shown: [...document.querySelectorAll('.composer .bar > *')].filter(vis).map(e => e.title) } }")
+    TH_MAX = "document.documentElement.classList.contains('stage-max')"
+    th_reach = poll(lambda: 'connected' in (th_b.locator('.topbar .badge').inner_text() or ''), 150)
+    check('theater: the two contexts reach each other', bool(th_reach))
+    th_b.locator('.composer .bar button[title^="Share your microphone"]').click()
+    poll(lambda: th_b.locator('.composer .bar button[title="Mute your microphone"]').is_visible(), 10)
+    th_a.locator('.topbar button.screen-share').click()
+    th_max = poll(lambda: th_b.evaluate(TH_MAX), 60)
+    check('theater: a screen arriving expands the viewer stage', bool(th_max))
+    th_v = th_b.evaluate(COMPOSER_VIS)
+    check("theater: the viewer's composer is gone apart from its live mic controls",
+          th_v['wrap'] and not th_v['ta']
+          and sorted(th_v['shown']) == ['Mute your microphone', 'Stop sharing cam/mic/screen'], str(th_v))
+    th_b.locator('.composer .bar button[title*="Stop sharing"]').click()
+    th_v2 = poll(lambda: (lambda v: v if not v['wrap'] else None)(th_b.evaluate(COMPOSER_VIS)), 10)
+    check('theater: with nothing of its own live the viewer sees no composer at all', bool(th_v2), str(th_b.evaluate(COMPOSER_VIS)))
+    th_s = th_a.evaluate(COMPOSER_VIS)
+    check('theater: the sharer keeps only the stop control',
+          th_s['wrap'] and not th_s['ta'] and th_s['shown'] == ['Stop sharing cam/mic/screen'], str(th_s))
+    th_b.locator('.tiles-head button[title*="Collapse"]').click()
+    check('theater: collapsing the stage brings the composer back',
+          bool(poll(lambda: th_b.evaluate(COMPOSER_VIS)['ta'], 5)), str(th_b.evaluate(COMPOSER_VIS)))
+    thctx_a.close()
+    thctx_b.close()
+
     # --- composer collapse: a manual, persisted toggle that keeps the control row ---
     # Collapsing is deliberately not wired to sharing: it only ever moves when the toggle
     # is clicked, so this drives the toggle and nothing else.

@@ -55,6 +55,18 @@ export function registerBuiltins(): void {
   })
 
   registry.register({
+    id: 'board',
+    name: 'Whiteboard',
+    description: 'Draw and write on a board every connected device shares',
+    category: 'p2p',
+    version: '0.1.0',
+    icon: '🖊',
+    source: 'builtin',
+    permissions: [],
+    load: () => import('./board'),
+  })
+
+  registry.register({
     id: 'ocr',
     name: 'OCR',
     description: 'Extract text from an image with Tesseract',

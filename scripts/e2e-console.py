@@ -4801,6 +4801,129 @@ with sync_playwright() as p:
           bool(cv_again) and (cv_b.evaluate(CV_STATE) or {}).get('covered') is False, str(cv_b.evaluate(CV_STATE)))
     cctx_a.close()
     cctx_b.close()
+    # --- whiteboard: a board every connected device shares ---
+    berrs_a, berrs_b = [], []
+    bctx_a = browser.new_context()
+    bctx_b = browser.new_context()
+    bcode = 'w' + os.urandom(3).hex()
+    pa = bctx_a.new_page()
+    pb = bctx_b.new_page()
+    pa.on('pageerror', lambda e: berrs_a.append(str(e)))
+    pb.on('pageerror', lambda e: berrs_b.append(str(e)))
+    for _pg in (pa, pb):
+        _pg.goto(f'{BASE}/#/join/{bcode}')
+        _pg.wait_for_selector('.composer', timeout=30000)
+    pa.wait_for_timeout(2000)
+    pb.wait_for_timeout(2000)
+    pa.evaluate("() => window.dispatchEvent(new CustomEvent('wt:nearby', { detail: false }))")
+    pb.evaluate("() => window.dispatchEvent(new CustomEvent('wt:nearby', { detail: false }))")
+
+    def bfeed(pg):
+        return pg.locator('.feed').inner_text()
+
+    def bops(pg):
+        c = pg.locator('canvas.board')
+        return c.get_attribute('data-ops') if c.count() == 1 else None
+
+    def bcard(pg):
+        return pg.locator('details.card[data-tool="board"]').last
+
+    def bpainted(pg):
+        try:
+            return pg.evaluate("""() => {
+              const c = document.querySelector('canvas.board')
+              if (!c) return 0
+              const g = c.getContext('2d')
+              const d = g.getImageData(0, 0, c.width, c.height).data
+              let n = 0
+              for (let i = 0; i < d.length; i += 16) if (d[i] + d[i + 1] + d[i + 2] > 60) n++
+              return n
+            }""")
+        except Exception:
+            return 0
+
+    def bdraw(pg):
+        """A mouse stroke across the board canvas. False when there is no canvas."""
+        if pg.locator('canvas.board').count() != 1:
+            return False
+        pg.locator('canvas.board').scroll_into_view_if_needed()
+        box = pg.locator('canvas.board').bounding_box()
+        if not box:
+            return False
+        x0, y0 = box['x'] + box['width'] * 0.2, box['y'] + box['height'] * 0.3
+        pg.mouse.move(x0, y0)
+        pg.mouse.down()
+        for i in range(1, 8):
+            pg.mouse.move(x0 + box['width'] * 0.07 * i, y0 + box['height'] * 0.05 * (i % 3), steps=4)
+        pg.mouse.up()
+        return True
+
+    bpaired = poll(lambda: 'Secure channel established' in bfeed(pa) and 'Secure channel established' in bfeed(pb), 150)
+    check('board: two contexts reach a secure channel', bool(bpaired),
+          f'A: {bfeed(pa)[-120:]!r} B: {bfeed(pb)[-120:]!r}')
+    pa.evaluate("location.hash = '#/t/board'")
+    check('board: A opens the board', bool(poll(lambda: pa.locator('canvas.board').count() == 1, 15)),
+          f'{pa.locator("canvas.board").count()} canvases')
+    check('board: A draws a stroke', bdraw(pa), 'no canvas to draw on')
+    check('board: A sees its own stroke', bool(poll(lambda: bops(pa) == '1', 10)), f'A data-ops={bops(pa)!r}')
+    pb.evaluate("location.hash = '#/t/board'")
+    check('board: B opens the board', bool(poll(lambda: pb.locator('canvas.board').count() == 1, 15)),
+          f'{pb.locator("canvas.board").count()} canvases')
+    check('board: B receives the stroke drawn before it opened', bool(poll(lambda: bops(pb) == '1', 30)),
+          f'B data-ops={bops(pb)!r}')
+    check('board: B canvas is not blank', bool(poll(lambda: (bpainted(pb) or 0) > 0, 15)),
+          f'painted={bpainted(pb)}')
+    check('board: B draws a stroke', bdraw(pb), 'no canvas to draw on')
+    check('board: A sees the second stroke live', bool(poll(lambda: bops(pa) == '2', 30)),
+          f'A data-ops={bops(pa)!r}')
+    atext = bcard(pa).locator('button', has_text='Text') if bcard(pa).count() else None
+    check('board: A offers Text mode', atext is not None and atext.count() == 1,
+          f'{atext.count() if atext is not None else "no card"} matches')
+    if atext is not None and atext.count() == 1:
+        atext.click()
+        # Upper left, and scrolled into view first: the feed's "Jump to latest" dock floats
+        # over the lower middle of whatever card sits there.
+        if pa.locator('canvas.board').count() == 1:
+            pa.locator('canvas.board').scroll_into_view_if_needed()
+        tbox = pa.locator('canvas.board').bounding_box() if pa.locator('canvas.board').count() == 1 else None
+        if tbox:
+            pa.mouse.click(tbox['x'] + tbox['width'] * 0.25, tbox['y'] + tbox['height'] * 0.3)
+    tinput = bcard(pa).locator('input.board-text-input') if bcard(pa).count() else pa.locator('no-such-element')
+    check('board: clicking the board in Text mode opens an input', bool(poll(lambda: tinput.count() == 1, 10)),
+          f'{tinput.count()} inputs')
+    if tinput.count() == 1:
+        tinput.fill('hello board')
+        tinput.press('Enter')
+    check('board: B sees the text op', bool(poll(lambda: bops(pb) == '3', 30)), f'B data-ops={bops(pb)!r}')
+    bundo = bcard(pb).locator('button', has_text='Undo') if bcard(pb).count() else pb.locator('no-such-element')
+    check('board: B offers Undo', bundo.count() == 1, f'{bundo.count()} matches')
+    if bundo.count() == 1:
+        bundo.click()
+    check('board: undo removes only the peer own stroke', bool(poll(lambda: bops(pa) == '2', 30)),
+          f'A data-ops={bops(pa)!r} B data-ops={bops(pb)!r}')
+    if bundo.count() == 1:
+        bundo.click()
+    check('board: a second undo with no own ops removes nothing',
+          bool(poll(lambda: bops(pa) == '2' and bops(pb) == '2', 5)) and bops(pa) == '2',
+          f'A data-ops={bops(pa)!r} B data-ops={bops(pb)!r}')
+    aclear = bcard(pa).locator('button', has_text='Clear board') if bcard(pa).count() else pa.locator('no-such-element')
+    check('board: A offers Clear board', aclear.count() == 1, f'{aclear.count()} matches')
+    if aclear.count() == 1:
+        aclear.click()
+    aconfirm = bcard(pa).locator('button', has_text='Click again to clear') if bcard(pa).count() else pa.locator('no-such-element')
+    check('board: the first Clear press only arms', bops(pa) == '2' and aconfirm.count() == 1,
+          f'A data-ops={bops(pa)!r} armed={aconfirm.count()}')
+    if aconfirm.count() == 1:
+        aconfirm.first.click()
+    check('board: confirming clears both boards', bool(poll(lambda: bops(pa) == '0' and bops(pb) == '0', 30)),
+          f'A data-ops={bops(pa)!r} B data-ops={bops(pb)!r}')
+    # The count is the board's own bookkeeping; the pixels are what a person sees.
+    check('board: both canvases are blank after the clear', bool(poll(lambda: bpainted(pa) == 0 and bpainted(pb) == 0, 10)),
+          f'painted A={bpainted(pa)} B={bpainted(pb)}')
+    check('board: no page errors on A', not berrs_a, ' | '.join(berrs_a)[:200])
+    check('board: no page errors on B', not berrs_b, ' | '.join(berrs_b)[:200])
+    bctx_a.close()
+    bctx_b.close()
 
     # --- composer collapse: a manual, persisted toggle that keeps the control row ---
     # Collapsing is deliberately not wired to sharing: it only ever moves when the toggle

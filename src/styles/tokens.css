@@ -961,6 +961,61 @@ button.gen-value:hover {
   padding: 0.25rem 0.5rem;
 }
 
+/* whiteboard (shared drawing board, tools/board.ts). The canvas paints its own fixed
+   background so every viewer sees the same contrast whatever their theme. */
+.board {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 10;
+  background: #111315;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  touch-action: none;
+}
+.board:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+}
+.board-wrap {
+  position: relative;
+}
+.board-tools {
+  display: flex;
+  gap: 0.3rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.board-tools button[aria-pressed='true'] {
+  background: var(--surface-2);
+  border-color: var(--border-strong);
+  color: var(--fg);
+}
+.board-tools button.armed {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+.board-tools button.board-swatch {
+  width: 1.7rem;
+  min-width: 1.7rem;
+  height: 1.7rem;
+  padding: 0;
+  border: 1px solid var(--border-strong);
+}
+.board-tools button.board-swatch[aria-pressed='true'] {
+  outline: 2px solid var(--fg);
+  outline-offset: 2px;
+}
+.board-text-input {
+  position: absolute;
+  transform: translateY(-50%);
+  width: 12rem;
+  max-width: 60%;
+  z-index: 2;
+}
+.board-text-input.flip {
+  transform: translate(-100%, -50%);
+}
+
 /* collapsible video-tiles region: a header with a collapse toggle; hides entirely
    when there are no video sources (so it costs nothing when nothing is shared) */
 .tiles-region {

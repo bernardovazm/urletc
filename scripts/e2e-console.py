@@ -4931,6 +4931,22 @@ with sync_playwright() as p:
     # The count is the board's own bookkeeping; the pixels are what a person sees.
     check('board: both canvases are blank after the clear', bool(poll(lambda: bpainted(pa) == 0 and bpainted(pb) == 0, 10)),
           f'painted A={bpainted(pa)} B={bpainted(pb)}')
+    # Two cards on one page share one subscription per room. Each card used to subscribe
+    # the same handler, which the fan-out holds once, so closing one card deafened the other.
+    pb.evaluate("location.hash = ''")
+    pb.evaluate("location.hash = '#/t/board'")
+    two_cards = poll(lambda: pb.locator('canvas.board').count() == 2, 15)
+    if two_cards:
+        bfirst = pb.locator('.feed-item', has=pb.locator('canvas.board')).first
+        bfirst.hover()
+        bfirst.locator('button.del').click()
+        bfirst.locator('button.del').click()
+    check('board: closing one of two cards leaves one open', bool(two_cards) and bool(poll(lambda: pb.locator('canvas.board').count() == 1, 5)),
+          f'{pb.locator("canvas.board").count()} cards')
+    if bcard(pa).count():
+        bcard(pa).locator('button', has_text='Pen').click()  # A was left in Text mode above
+    bdraw(pa)
+    check('board: the card left open still receives marks', bool(poll(lambda: bops(pb) == '1', 30)), f'B data-ops={bops(pb)!r}')
     check('board: no page errors on A', not berrs_a, ' | '.join(berrs_a)[:200])
     check('board: no page errors on B', not berrs_b, ' | '.join(berrs_b)[:200])
     bctx_a.close()

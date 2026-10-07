@@ -335,6 +335,8 @@ export interface SessionEvents {
 
 export interface RoomSession {
   selfId: string
+  /** The online list's session: roster only, carries no content (see joinRoomSession). */
+  presenceOnly: boolean
   selfDeviceId: string
   peerCount(): number
   roster(): RosterPeer[]
@@ -1483,6 +1485,7 @@ export async function joinRoomSession(opts: {
 
   const api: RoomSession = {
     selfId,
+    presenceOnly: !!opts.presenceOnly,
     selfDeviceId: id.deviceId,
     peerCount: () => peers.size,
     roster: () => [...peers.values()].map((p) => p.info),

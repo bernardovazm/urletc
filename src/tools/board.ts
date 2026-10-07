@@ -231,7 +231,9 @@ function onGame(payload: unknown, from: string): void {
           const o = sanitizeOp(raw)
           if (!o) continue
           const by = (raw as { by?: unknown }).by
-          const author = typeof by === 'string' && by.length > 0 && by.length <= MAX_ID ? by : from
+          // A relayed author is a peer id; SELF names this device and is never accepted from
+          // outside, or a peer could plant marks that this device's Undo treats as its own.
+          const author = typeof by === 'string' && by.length > 0 && by.length <= MAX_ID && by !== SELF ? by : from
           // Taken when new; an op already held changes only when its author sends it.
           if (!ops.has(o.id)) {
             ops.set(o.id, o)
@@ -287,6 +289,21 @@ function onGame(payload: unknown, from: string): void {
   } catch {
     // inbound payloads are untrusted and must never throw
   }
+}
+
+// One subscription per session for the whole page, held while any card is open. Each card
+// subscribing on its own registered the same onGame twice, which the fan-out stores once,
+// so closing one card unsubscribed the board and left the other card deaf.
+const gameSubs = new Map<RoomSession, () => void>()
+let openCards = 0
+const syncHandlers = () => {
+  const live = getAllSessions()
+  for (const [s, off] of gameSubs) {
+    if (live.includes(s) && openCards > 0) continue
+    off()
+    gameSubs.delete(s)
+  }
+  if (openCards > 0) for (const s of live) if (!gameSubs.has(s)) gameSubs.set(s, addGameHandler(s, onGame))
 }
 
 const detachers = new WeakMap<HTMLElement, () => void>()
@@ -406,6 +423,7 @@ const tool: ToolModule = {
     const peers = (): string[] => {
       const out = new Set<string>()
       for (const s of getAllSessions()) {
+        if (s.presenceOnly) continue // the online list carries no board messages
         for (const p of s.roster()) {
           if (!p.ready) continue
           out.add(p.peerId)
@@ -417,17 +435,6 @@ const tool: ToolModule = {
     const refreshStatus = () => {
       const n = peers().length
       status.textContent = n > 0 ? `Shared with ${n} ${n === 1 ? 'device' : 'devices'}` : 'Not connected to anyone yet. Marks you make are shared when someone joins.'
-    }
-
-    const gameSubs = new Map<RoomSession, () => void>()
-    const syncHandlers = () => {
-      const live = getAllSessions()
-      for (const [s, off] of gameSubs) {
-        if (live.includes(s)) continue
-        off()
-        gameSubs.delete(s)
-      }
-      for (const s of live) if (!gameSubs.has(s)) gameSubs.set(s, addGameHandler(s, onGame))
     }
 
     const tick = () => {
@@ -633,6 +640,7 @@ const tool: ToolModule = {
     // quiet; the window's resize event does fire.
     window.addEventListener('resize', draw)
 
+    openCards++
     syncHandlers()
     for (const id of peers()) seen.add(id)
     broadcast({ t: 'board-hello', epoch })
@@ -658,8 +666,8 @@ const tool: ToolModule = {
         wrap.querySelectorAll('.board-text-input').forEach((n) => n.remove())
       }
       drawing = null
-      for (const off of gameSubs.values()) off()
-      gameSubs.clear()
+      openCards--
+      syncHandlers() // the last card to close drops the subscriptions
     })
   },
 

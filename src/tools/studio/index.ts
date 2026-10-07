@@ -130,7 +130,7 @@ const tool: ToolModule = {
               'Copy stage link',
               () => void copyText(link, ctx.clipboard.write),
               'ghost',
-              'A chromeless view of this room. Add it as a Browser source in OBS, or open it on another screen',
+              "A chromeless view of this room. Add it as a Browser source in OBS, or open it on another screen. Video from outside your devices arrives covered there too; show it from the source's Interact window in OBS",
             )
           : el('span', { class: 'muted small', text: 'Open Connect and start or join a code room to get a shareable stage link.' }),
       )

@@ -1066,13 +1066,14 @@ button.icon.on {
 
 /* Expanded stage. The in-document counterpart to the chromeless #/stage route: the stage
    takes the window and the roster stays usable. The composer goes too, apart from the
-   controls for your own live sources (mute, camera off, stop), so a viewer sees nothing
-   but the stream. Shrinking or collapsing the stage brings the feed and the composer back. */
+   mute and camera-off toggles of your own live mic or camera, so nothing but the stream is
+   on screen. Stopping a share is the topbar's screen button or the stop on your own tile.
+   Shrinking or collapsing the stage brings the feed and the composer back. */
 :root.stage-max .feed,
 :root.stage-max .captions,
 :root.stage-max .composer textarea,
-:root.stage-max .composer .bar > :not(.live-toggle, .local-live),
-:root.stage-max .composer-wrap:not(:has(.live-toggle:not(.hidden), .local-live)) {
+:root.stage-max .composer .bar > :not(.live-toggle),
+:root.stage-max .composer-wrap:not(:has(.live-toggle:not(.hidden))) {
   display: none;
 }
 :root.stage-max .center {

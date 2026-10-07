@@ -2926,7 +2926,7 @@ with sync_playwright() as p:
         check('collapsing an expanded stage gives the window back to the feed',
               bool(poll(lambda: not theater(sh_b) and sh_b.locator('.feed').is_visible(), 5)),
               'stage-max=%s feed=%s' % (theater(sh_b), sh_b.locator('.feed').is_visible()))
-        sh_a.locator('.composer .bar button[title*="Stop sharing"]').click()
+        sh_a.locator('.topbar button.screen-share').click()
         ended = poll(lambda: sh_b.locator('.tiles .stage-tile').count() == 0, 60)
         check('the tile goes when the share stops', bool(ended), sh_b.locator('.feed').inner_text()[-160:])
         check('the receiving stage shrinks back when the share ends', bool(ended) and not theater(sh_b))
@@ -2954,7 +2954,7 @@ with sync_playwright() as p:
             check('shrinking while the share runs is obeyed', not theater(sh_b))
             sh_b.locator('.tiles-head button[title*="Expand the stage"]').click()
             sh_b.wait_for_timeout(200)
-            sh_a.locator('.composer .bar button[title*="Stop sharing"]').click()
+            sh_a.locator('.topbar button.screen-share').click()
             poll(lambda: sh_b.locator('.tiles .stage-tile').count() == 0, 60)
             check('the last video ending releases even an expansion set by hand', not theater(sh_b))
         else:
@@ -2962,7 +2962,7 @@ with sync_playwright() as p:
             check('the last video ending releases even an expansion set by hand', False,
                   'the stage never expanded')
             if again:
-                sh_a.locator('.composer .bar button[title*="Stop sharing"]').click()
+                sh_a.locator('.topbar button.screen-share').click()
     sctx_a.close()
     sctx_b.close()
 
@@ -3506,7 +3506,7 @@ with sync_playwright() as p:
     check('the composer screen control shares in one press too',
           bool(poll(lambda: spg.locator('.tiles .stage-tile.kind-screen').count() == 1, 10))
           and TOP_SCREEN.inner_text() == 'Stop sharing')
-    spg.locator('.composer .bar button[title*="Stop sharing"]').click()
+    TOP_SCREEN.click()
     poll(lambda: spg.locator('.tiles .stage-tile').count() == 0, 10)
     check('no page error on the screen share path', not serrs, ' | '.join(serrs)[:200])
     sctx.close()
@@ -4705,9 +4705,9 @@ with sync_playwright() as p:
           bool(i_kb) and i_in and i_back, f'opened={bool(i_kb)} inside={i_in} returned={i_back}')
     ictx.close()
 
-    # --- an expanded stage hides the composer, apart from your own live controls ---
-    # While a screen has the expanded stage, a viewer sees nothing but the stream. Controls
-    # for sources of your own that are live (mute, camera off, stop) are the ones kept.
+    # --- an expanded stage hides the composer, apart from your own live mic and camera ---
+    # While a screen has the expanded stage, nothing but the stream is on screen. The mute
+    # and camera-off toggles of your own live sources are the controls kept.
     TH_CODE = 'x' + os.urandom(3).hex()
     thctx_a = browser.new_context(viewport={'width': 1280, 'height': 800})
     thctx_a.add_init_script(FAKE_SCREEN)
@@ -4729,15 +4729,11 @@ with sync_playwright() as p:
     th_max = poll(lambda: th_b.evaluate(TH_MAX), 60)
     check('theater: a screen arriving expands the viewer stage', bool(th_max))
     th_v = th_b.evaluate(COMPOSER_VIS)
-    check("theater: the viewer's composer is gone apart from its live mic controls",
-          th_v['wrap'] and not th_v['ta']
-          and sorted(th_v['shown']) == ['Mute your microphone', 'Stop sharing cam/mic/screen'], str(th_v))
-    th_b.locator('.composer .bar button[title*="Stop sharing"]').click()
-    th_v2 = poll(lambda: (lambda v: v if not v['wrap'] else None)(th_b.evaluate(COMPOSER_VIS)), 10)
-    check('theater: with nothing of its own live the viewer sees no composer at all', bool(th_v2), str(th_b.evaluate(COMPOSER_VIS)))
+    check("theater: the viewer's composer is gone apart from its live mic's mute",
+          th_v['wrap'] and not th_v['ta'] and th_v['shown'] == ['Mute your microphone'], str(th_v))
     th_s = th_a.evaluate(COMPOSER_VIS)
-    check('theater: the sharer keeps only the stop control',
-          th_s['wrap'] and not th_s['ta'] and th_s['shown'] == ['Stop sharing cam/mic/screen'], str(th_s))
+    check('theater: the sharer sees no composer; the topbar button stops the share',
+          not th_s['wrap'] and th_a.locator('.topbar button.screen-share').inner_text() == 'Stop sharing', str(th_s))
     th_b.locator('.tiles-head button[title*="Collapse"]').click()
     check('theater: collapsing the stage brings the composer back',
           bool(poll(lambda: th_b.evaluate(COMPOSER_VIS)['ta'], 5)), str(th_b.evaluate(COMPOSER_VIS)))

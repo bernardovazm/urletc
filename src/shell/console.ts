@@ -1821,11 +1821,10 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   // Mute/blank toggles. They only appear once you actually publish a track of that kind,
   // so the bar stays empty until there is something to mute.
   // `live-toggle` keeps these two on screen when an expanded stage hides the rest of the
-  // composer (tokens.css): a running mic has to stay mutable during a share. The stop
-  // control stays too while anything of yours is live (`local-live`).
+  // composer (tokens.css): a running mic has to stay mutable during a share. Stopping is
+  // left to the topbar's screen button and each of your own tiles' stop control.
   const micToggle = button('🎤', () => setLocalEnabled('audio', !localTracksOf('audio').some((t) => t.enabled)), 'icon live-toggle', 'Mute your microphone')
   const camToggle = button('🎥', () => setLocalEnabled('video', !localTracksOf('video').some((t) => t.enabled)), 'icon live-toggle', 'Turn your camera off')
-  const stopAllBtn = button('⏹', () => stopMedia(), 'icon', 'Stop sharing cam/mic/screen')
   /** Reflect real track state in the bar: the buttons are a view of the tracks. */
   function syncMediaButtons(): void {
     const a = localTracksOf('audio')
@@ -1842,7 +1841,6 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     camToggle.setAttribute('aria-label', camToggle.title)
     micToggle.setAttribute('aria-pressed', String(!aOn))
     camToggle.setAttribute('aria-pressed', String(!vOn))
-    stopAllBtn.classList.toggle('local-live', localStreams.size > 0)
     syncScreenBtn()
   }
 
@@ -2338,7 +2336,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
       button('🖥', () => void startMedia('screen'), 'icon', 'Share your screen (paired/code devices only)'),
       micToggle,
       camToggle,
-      stopAllBtn,
+      button('⏹', stopMedia, 'icon', 'Stop sharing cam/mic/screen'),
       slashBtn,
       el('span', { class: 'spacer' }),
       composerCollapseBtn,

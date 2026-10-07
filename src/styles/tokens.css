@@ -737,7 +737,8 @@ details.card > .card-body {
 /* The row is a no-wrap flex line and .badge has no flex-basis, so in a narrow sidebar the
    state chip would clip or wrap its own text instead of letting .peer .name (which has
    ellipsis) absorb the squeeze. */
-.peer .peer-state {
+.peer .peer-state,
+.peer .peer-relay {
   flex: none;
   white-space: nowrap;
 }
@@ -1440,6 +1441,10 @@ video.preview.mirror {
 .badge.danger {
   color: var(--danger);
   border-color: var(--danger);
+}
+/* A Settings message reporting a rejected input or a failed check. */
+.settings-error {
+  color: var(--danger);
 }
 /* Feed and card previews sit in flex columns, whose default stretch widened any image
    narrower than the column to its full width while max-height capped the height, so

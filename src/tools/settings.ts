@@ -1,13 +1,15 @@
 import { OCR_MODE_EVENT, getOcrMode, setOcrMode, type OcrMode } from '../core/prefs'
-import { disablePassphrase, enablePassphrase, getItem, getStoreMode, lock, setItem, wipeAll } from '../core/store'
+import { disablePassphrase, enablePassphrase, getItem, getStoreMode, lock, removeItem, setItem, wipeAll } from '../core/store'
+import { checkRelay, deploymentRelay, describeRelay, parseIceServers, validateIceServers, type RelayCheck } from '../p2p/turn'
 import type { ToolModule } from '../shell/registry'
 import { currentTheme, toggleTheme } from '../shell/theme'
 import { button, el, toast } from '../shell/ui'
 import { getCloseGuard, setCloseGuard } from './close-guard'
 
 // Manages the at-rest encryption mode (ARCHITECTURE section 9) plus the console's
-// proactivity switches (auto-OCR on images, live mic captions). Built-in and trusted, so
-// it talks to the store directly rather than through the capability facade.
+// proactivity switches (auto-OCR on images, live mic captions) and this device's TURN
+// relay. Built-in and trusted, so it talks to the store directly rather than through the
+// capability facade.
 //
 // It is also the only entry point to the theme. The topbar button was removed because the
 // topbar runs out of room on a phone and appearance is its least frequently touched
@@ -138,6 +140,79 @@ const tool: ToolModule = {
         void setItem('cover-video', cvChk.checked)
         window.dispatchEvent(new CustomEvent('wt:cover-video', { detail: cvChk.checked }))
       })
+      // TURN relay. The parsed, normalized list is what gets stored; the raw paste is never
+      // kept, and nothing here is sent to peers. The console applies a change live
+      // (wt:turn), so rooms already joined use it for the connections they build next.
+      const turnStatus = el('p', { class: 'small turn-status' })
+      const turnMsg = el('p', { class: 'small turn-msg hidden', role: 'status' })
+      const turnIn = el('textarea', {
+        class: 'full turn-input',
+        rows: '4',
+        autocomplete: 'off',
+        spellcheck: 'false',
+        'aria-label': 'TURN servers',
+        placeholder: 'Paste the iceServers list from Metered, Cloudflare or your own coturn: JSON, or the JavaScript snippet as given',
+      }) as HTMLTextAreaElement
+      const turnRemove = button('Remove', () => void removeRelay(), 'danger', 'Remove the relay set on this device')
+      const turnCheck = button('Check relay', () => void runCheck(), '', 'Ask the relay for an allocation from this network')
+      let turnOwn: RTCIceServer[] | null = null
+      let checkSeq = 0 // a check that finishes after Save or Remove reports nothing
+      const say = (text: string, error = false) => {
+        turnMsg.textContent = text
+        turnMsg.classList.toggle('hidden', !text)
+        turnMsg.classList.toggle('settings-error', error)
+      }
+      const activeRelay = () => turnOwn ?? (deploymentRelay().length ? deploymentRelay() : null)
+      const showRelay = async () => {
+        const stored = await getItem<unknown>('turn-servers')
+        const v = stored === undefined ? null : validateIceServers(stored)
+        turnOwn = v && 'servers' in v ? v.servers : null
+        const dep = deploymentRelay()
+        turnStatus.textContent = turnOwn
+          ? `Relay: ${describeRelay(turnOwn)}, set on this device.`
+          : dep.length
+            ? `Relay: ${describeRelay(dep)}, from this deployment.`
+            : 'No relay server. Devices behind symmetric or carrier-grade NAT cannot be reached.'
+        turnRemove.classList.toggle('hidden', !turnOwn)
+        turnCheck.toggleAttribute('disabled', !activeRelay())
+      }
+      const CHECK_SAYS: Record<RelayCheck, string> = {
+        ok: 'The relay answered. A device that cannot be reached directly connects through it.',
+        auth: 'The relay refused the username or password.',
+        unreachable: 'The relay did not answer from this network.',
+      }
+      const runCheck = async () => {
+        const servers = activeRelay()
+        if (!servers) return
+        const seq = ++checkSeq
+        turnCheck.setAttribute('disabled', '')
+        say('Checking the relay...')
+        const r = await checkRelay(servers)
+        if (seq !== checkSeq) return
+        turnCheck.removeAttribute('disabled')
+        say(CHECK_SAYS[r], r !== 'ok')
+      }
+      const saveRelay = async () => {
+        const r = parseIceServers(turnIn.value)
+        if ('error' in r) {
+          say(r.error, true)
+          return
+        }
+        checkSeq++
+        await setItem('turn-servers', r.servers)
+        window.dispatchEvent(new CustomEvent('wt:turn', { detail: r.servers }))
+        turnIn.value = ''
+        await showRelay()
+        await runCheck()
+      }
+      const removeRelay = async () => {
+        checkSeq++
+        await removeItem('turn-servers')
+        window.dispatchEvent(new CustomEvent('wt:turn', { detail: null }))
+        say('')
+        await showRelay()
+      }
+      await showRelay()
       // Ask when closing tab. The guard belongs to the window and has to survive a
       // reload, so it lives here and is re-armed at boot rather than in a tool card that
       // would take it down when closed.
@@ -166,6 +241,15 @@ const tool: ToolModule = {
             text: 'Cover video from people outside my own devices until I press Show twice. A room link visible on a stream lets anyone join and share, and the cover keeps what they share off your stage until you choose to see it.',
           }),
         ]),
+        el('div', { class: 'group-label', text: 'Relay server (TURN)' }),
+        turnStatus,
+        turnIn,
+        el('div', { class: 'row' }, [button('Save', () => void saveRelay(), 'primary', 'Check and save this relay on this device'), turnCheck, turnRemove]),
+        turnMsg,
+        el('p', {
+          class: 'muted small',
+          text: "Used only when a direct connection fails. The relay carries traffic that is already encrypted, and sees both devices' addresses. Kept on this device and never sent to peers. A free plan's monthly allowance runs out quickly under video: Metered counts every relayed byte in and out, so its free 500 MB is roughly 15 to 30 minutes of screen sharing.",
+        }),
         el('div', { class: 'group-label', text: 'This tab' }),
         el('label', { class: 'row small' }, [
           acChk,

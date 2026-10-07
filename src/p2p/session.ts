@@ -25,6 +25,7 @@ import { loadOrCreateIdentity } from '../core/identity'
 import { ManifestSchema, verifyManifest, type Manifest } from '../workshop/manifest'
 import { normalizeJoinCode } from './discovery'
 import { SecureChannel, type SealedMessage } from './ratchet'
+import { deploymentRelay, validateIceServers } from './turn'
 
 // Trystero namespace. Every room id derives from it, so changing this value moves the
 // whole app to a fresh namespace and older clients can no longer see newer ones.
@@ -61,26 +62,93 @@ const RELAY_HEALTH_DELAY = 12_000
 // `defaultIceServers.concat(turnConfig)`). The defaults are four STUN servers, so a
 // turnConfig stacked on top made six entries and Firefox logged "WebRTC: Using five or
 // more STUN/TURN servers slows down discovery" on every peer connection (20 to 25 lines
-// per page, and this app opens up to four rooms).
+// per page, and this app opens up to four rooms). The whole list therefore stays at four
+// URLs or fewer.
 //
 // Two STUN servers on two operators is redundancy without that penalty. A server-reflexive
 // address is one binding request, so asking four hosts for the same answer only widens the
-// window before gathering completes.
+// window before gathering completes. With a relay set, STUN shrinks to the first server: a
+// TURN allocation reports the server-reflexive address too, and the relay takes up to three
+// URLs (turn.ts) of the four.
 const STUN_SERVERS: RTCIceServer[] = [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun.cloudflare.com:3478' }]
-// Relay servers, deliberately empty. The openrelay.metered.ca entry that used to live
-// here answers an Allocate with "400 TURN allocate error" (the free openrelayproject
-// credentials were retired), so it relayed nothing while costing every connection a full
-// gathering timeout on a host that would never answer, and counting toward Firefox's
-// five-server warning.
-//
-// Without a relay, peers behind symmetric NAT or carrier-grade NAT cannot reach each
-// other at all. Adding a working TURN entry here is the fix, and relayOnly (below)
+// The relay, set at runtime and never committed: the device's own list from Settings
+// (setTurnServers), else the deployment's VITE_TURN_SERVERS, else none. Without one, peers
+// behind symmetric or carrier-grade NAT cannot reach each other at all, and relayOnly
 // refuses rather than pretending otherwise.
-const TURN_SERVERS: RTCIceServer[] = []
-const ICE_SERVERS: RTCIceServer[] = [...STUN_SERVERS, ...TURN_SERVERS]
-/** Read by the console, whose report of an unreachable peer names the missing relay.
- *  Derived from TURN_SERVERS so that adding an entry above drops that sentence. */
-export const hasTurnRelay = TURN_SERVERS.length > 0
+//
+// No relay ships in the repository. The openrelay.metered.ca entry that used to live here
+// answers an Allocate with "400 TURN allocate error" (the free openrelayproject credentials
+// were retired), so it relayed nothing while costing every connection a full gathering
+// timeout (11 to 20 s) on a host that would never answer. Settings' Check relay exists for
+// that failure.
+let turnServers: RTCIceServer[] = []
+let turnSource: 'device' | 'deployment' | null = null
+// One array object for the page's life, rewritten in place. Trystero keeps the joinRoom
+// config by reference and reads rtcConfig.iceServers each time it builds a connection, so a
+// room already joined picks up a changed relay for every connection it builds afterwards.
+const ICE_SERVERS: RTCIceServer[] = []
+
+// Connections built ahead of time do not read that list again. Trystero keeps one pool of
+// 20 offering connections per page, shared by every room and recycled rather than rebuilt,
+// so without more a relay saved in Settings would reach only the connections answering a
+// peer until the page reloads. Every connection Trystero builds goes through this class
+// (its rtcPolyfill option), and a relay change is pushed to each one still open with
+// setConfiguration. A pooled offer older than 57 s is ICE-restarted when it is handed out,
+// and that restart gathers from the new list; a younger one goes out with what it gathered.
+const openConnections = new Set<RTCPeerConnection>()
+let trackedPc: typeof RTCPeerConnection | undefined
+/** Built on first use: a browser with WebRTC disabled has no RTCPeerConnection to extend,
+ *  and must still load this module and fail where a room is joined, as before. */
+function trackedPeerConnection(): typeof RTCPeerConnection | undefined {
+  if (trackedPc || typeof RTCPeerConnection !== 'function') return trackedPc
+  trackedPc = class extends RTCPeerConnection {
+    constructor(config?: RTCConfiguration) {
+      super(config)
+      // A connection closed by close() fires no event, so closed ones are dropped here.
+      for (const pc of openConnections) if (pc.connectionState === 'closed') openConnections.delete(pc)
+      openConnections.add(this)
+    }
+  }
+  return trackedPc
+}
+
+/**
+ * Use `list` (the device's relay) for every connection from now on, or the deployment's
+ * relay when it is null. The list is validated again here, since it arrives from the store
+ * or a window event; an invalid one counts as unset.
+ */
+export function setTurnServers(list: RTCIceServer[] | null): void {
+  const own = list ? validateIceServers(list) : null
+  if (own && 'servers' in own) {
+    turnServers = own.servers
+    turnSource = 'device'
+  } else {
+    turnServers = deploymentRelay()
+    turnSource = turnServers.length ? 'deployment' : null
+  }
+  ICE_SERVERS.splice(0, ICE_SERVERS.length, ...(turnServers.length ? STUN_SERVERS.slice(0, 1) : STUN_SERVERS), ...turnServers)
+  for (const pc of openConnections) {
+    if (pc.connectionState === 'closed') {
+      openConnections.delete(pc)
+      continue
+    }
+    try {
+      pc.setConfiguration({ ...pc.getConfiguration(), iceServers: [...ICE_SERVERS] })
+    } catch {
+      // A browser that refuses the change keeps the old list on that connection only.
+    }
+  }
+}
+setTurnServers(null)
+
+/** Read by the console, whose report of an unreachable peer names the missing relay. */
+export function hasTurnRelay(): boolean {
+  return turnServers.length > 0
+}
+
+export function relaySource(): 'device' | 'deployment' | null {
+  return turnSource
+}
 let relayHealthReported = false
 
 /** Surface degraded rendezvous once, quietly. Silent while every relay is up. */
@@ -136,6 +204,10 @@ const MIN_CODE_CHARS = 4 // anything shorter is treated as a mistyped code
 // tab produces, so the connection under each peer is watched separately.
 const TRANSPORT_POLL = 2000 // ms between passes that attach to newly opened connections
 const MAX_TRANSPORT_TRACKED = 64 // peerIds whose last transport state is remembered
+// How often a connected peer's selected candidate pair is re-read for the relay marker. ICE
+// can move a link between a relay and a direct path, so it is re-read rather than read
+// once, and getStats walks every stat of the connection, so not on every 2 s pass.
+const RELAY_STATS_EVERY = 10_000
 const MAX_PEER_ID_CHARS = 64 // a peerId is announced by the peer, so it is bounded like any inbound string
 // Wait before calling a peer unreachable. Trystero's own handshake gives up after 10s, so a
 // peer that is going to join over a connection that did come up has joined by then.
@@ -222,6 +294,9 @@ export interface RosterPeer {
   pubKeyHex: string
   ready: boolean
   safety: string // safety number for OOB verification (empty until ready)
+  /** The selected candidate pair runs through a TURN relay, ours or the peer's. Read from
+   *  getStats on connected peers of content-carrying sessions; never set on presence. */
+  relay?: boolean
 }
 
 export interface ChatMessage {
@@ -521,7 +596,7 @@ export async function joinRoomSession(opts: {
   const ev = opts.events
   // 'relay' means "use only a relay", so with no TURN entry the browser gathers zero
   // candidates and the room silently connects nobody. Refusing here surfaces that instead.
-  if (opts.relayOnly && !TURN_SERVERS.length) throw new Error('Relay-only needs a TURN server, and none is configured.')
+  if (opts.relayOnly && !turnServers.length) throw new Error('Relay-only needs a TURN server, and none is configured.')
   let displayName = opts.displayName
   const id = await loadOrCreateIdentity()
   const enc = new TextEncoder()
@@ -548,6 +623,7 @@ export async function joinRoomSession(opts: {
       // iceServers, not turnConfig, so this replaces Trystero's four default STUN
       // servers instead of stacking on top of them (see ICE_SERVERS above).
       rtcConfig: { iceServers: ICE_SERVERS, iceTransportPolicy: opts.relayOnly ? 'relay' : 'all' },
+      rtcPolyfill: trackedPeerConnection(),
     },
     opts.roomId,
     {
@@ -718,10 +794,49 @@ export async function joinRoomSession(opts: {
       }
       const s = readTransport(pc)
       if (s) emitTransport(peerId, s, st)
+      if (s === 'connected' && st.info.ready) noteRelay(peerId, pc)
     }
   }
 
   transportTimer = setInterval(watchTransport, TRANSPORT_POLL)
+
+  /** Whether the connection's selected candidate pair uses a relay candidate on either
+   *  side. Null when the stats name no selected pair yet. */
+  async function readRelayed(pc: RTCPeerConnection): Promise<boolean | null> {
+    const report = await pc.getStats()
+    let pairId: string | undefined
+    report.forEach((r: { type?: string; selectedCandidatePairId?: string }) => {
+      if (r.type === 'transport' && r.selectedCandidatePairId) pairId = r.selectedCandidatePairId
+    })
+    let pair: { localCandidateId?: string; remoteCandidateId?: string } | undefined = pairId ? report.get(pairId) : undefined
+    // Firefox has no transport stat; it flags the pair itself.
+    if (!pair)
+      report.forEach((r: { type?: string; selected?: boolean; localCandidateId?: string; remoteCandidateId?: string }) => {
+        if (!pair && r.type === 'candidate-pair' && r.selected) pair = r
+      })
+    if (!pair) return null
+    const local = pair.localCandidateId ? report.get(pair.localCandidateId) : undefined
+    const remote = pair.remoteCandidateId ? report.get(pair.remoteCandidateId) : undefined
+    return local?.candidateType === 'relay' || remote?.candidateType === 'relay'
+  }
+
+  const relayReadAt = new WeakMap<RTCPeerConnection, number>()
+  /** Refresh one peer's relay marker, at most every RELAY_STATS_EVERY per connection. */
+  function noteRelay(peerId: string, pc: RTCPeerConnection): void {
+    if (opts.presenceOnly) return // the online list carries nothing, so no marker
+    const now = Date.now()
+    if (now - (relayReadAt.get(pc) ?? 0) < RELAY_STATS_EVERY) return
+    relayReadAt.set(pc, now)
+    void readRelayed(pc)
+      .then((relay) => {
+        const st = peers.get(peerId)
+        if (relay === null || !st || transportTimer === null || currentPc(peerId) !== pc) return
+        if (!!st.info.relay === relay) return
+        st.info.relay = relay
+        emitRoster()
+      })
+      .catch(() => {}) // a connection closed mid-read has nothing to report
+  }
 
   function stopTransportWatch(): void {
     if (transportTimer !== null) clearInterval(transportTimer)

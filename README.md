@@ -60,6 +60,23 @@ Static files on Vercel. `vercel.json` carries the COOP and COEP isolation header
 Content Security Policy and the single page rewrite; `npm run preview` applies the same
 policy locally.
 
+### TURN relay
+
+Devices behind symmetric or carrier-grade NAT need a TURN relay, and none is committed.
+Set `VITE_TURN_SERVERS` in the hosting provider's build environment to a JSON iceServers
+array:
+
+```json
+[{ "urls": ["turn:global.relay.metered.ca:80", "turns:global.relay.metered.ca:443?transport=tcp"], "username": "...", "credential": "..." }]
+```
+
+Vite compiles the value into the public bundle, so anyone can extract the credentials and
+spend the relay's quota. The alternative keeps them off the bundle: paste the provider's
+iceServers list (JSON, or its JavaScript snippet as given) into Settings, Relay server
+(TURN), which stores it encrypted on that device only and replaces the deployment value
+while set. A relay on one side of a pair is enough. ARCHITECTURE.md section 5.2 covers
+validation, the relay check and the `relay` roster badge.
+
 ## Reference
 
 - [`ARCHITECTURE.md`](./ARCHITECTURE.md): design study, threat model, security invariants,

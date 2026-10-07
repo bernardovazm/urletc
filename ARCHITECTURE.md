@@ -22,8 +22,9 @@ inside its tool's import boundary, is fetched only on activation, and is then ca
 Cache API or OPFS.
 
 Peer discovery and signaling are serverless via Trystero, Nostr primary with a BitTorrent
-fallback `[v]`. NAT traversal is STUN only: free Google STUN, and no TURN server, so the
-symmetric-NAT tail does not connect (section 5.2). Identity is a single Ed25519 + X25519
+fallback `[v]`. NAT traversal is STUN first, with a TURN relay that is configured at runtime
+(per device in Settings, or per deployment at build time) and never committed; without one
+the symmetric-NAT tail does not connect (section 5.2). Identity is a single Ed25519 + X25519
 device keypair, non-extractable,
 in IndexedDB; the dual public/private model was rejected in favour of room scoping plus
 challenge-response admission. The messenger reuses one WebRTC mesh (cap 6 video, about 12
@@ -42,7 +43,7 @@ defence in depth behind it.
 Security is cross-cutting: native WebCrypto only, strict CSP plus Trusted Types, COOP/COEP,
 encrypted-at-rest IndexedDB. There is no backend you operate in the core product. Three
 external dependencies are flagged instead of hidden (Nostr and BitTorrent relays, Google
-STUN, and a TURN server if one is ever added), along with one optional Vercel Edge Function
+STUN, and a TURN relay when one is configured), along with one optional Vercel Edge Function
 (section 10). The target deployment is a small team, a handful of peers, which is what makes
 best-effort free infrastructure an acceptable trade.
 
@@ -77,8 +78,8 @@ best-effort free infrastructure an acceptable trade.
       app-layer AES-GCM + ratchet| over WebRTC DTLS DataChannels/media
         +------------------------+-----------------------------+
         v                        v                             v
-  Nostr relays (signaling)   Google STUN (free)         TURN: none configured
-  BitTorrent trackers (FB)   ~70-90% direct [~]         ~10-30% tail does not connect
+  Nostr relays (signaling)   Google STUN (free)         TURN: runtime config only
+  BitTorrent trackers (FB)   ~70-90% direct [~]         ~10-30% tail needs it
   *3rd-party, not yours*     *3rd-party*                *see section 5.2*
   NOTE: WebRTC ICE/media traffic is NOT governed by CSP connect-src (sections 2 and 10).
 ```
@@ -152,7 +153,7 @@ urletc/
 |   |-- p2p/
 |   |   |-- discovery.ts       # Trystero room + signed heartbeat presence
 |   |   |-- channel.ts         # E2EE DataChannel wrapper (X25519 + HKDF ratchet)
-|   |   `-- ice.ts             # STUN list, TURN config, relay-only toggle, getStats meter
+|   |   `-- turn.ts            # TURN list parsing and validation, relay check (ICE list: session.ts)
 |   |-- automation/
 |   |   |-- schema.ts          # declarative rule AST (zod), bounded ops only (section 7)
 |   |   `-- interpreter.ts     # safe-by-construction evaluator, ReDoS-guarded (7.1)
@@ -368,20 +369,44 @@ infrastructure acceptable here.
    covers the majority. Residential STUN success is around 70-90% `[~]`; the
    symmetric-NAT, CGNAT and enterprise tail of roughly 10-30% needs TURN `[~]`. These are
    industry order-of-magnitude figures, not measured for this app; see section 13.
-2. No TURN ships. `TURN_SERVERS` in `src/p2p/session.ts` is an empty array. The Metered
-   OpenRelay entry that used to sit there answers an Allocate with `400 TURN allocate
-   error` since the free public credentials were retired, so it gathered zero relay
-   candidates while costing every connection 11 to 20 seconds of ICE gathering. The
-   consequence is stated plainly rather than papered over: peers behind symmetric or
-   carrier-grade NAT cannot connect, and `relayOnly` refuses to pretend otherwise.
+2. TURN is configured at runtime and nothing is committed. Two sources, the first winning
+   while it is set:
+   - Per device: an iceServers list pasted into Settings (JSON, or the JavaScript snippet a
+     Metered or Cloudflare dashboard hands out, read without evaluating it). The normalized
+     list goes into the encrypted store under `turn-servers` and is never sent to peers.
+   - Per deployment: `VITE_TURN_SERVERS`, a JSON iceServers array set in the hosting
+     provider's build environment. Vite compiles it into the public bundle, so anyone who
+     reads the bundle can extract the credentials and spend that relay's quota. That is the
+     trade for having no backend; short-lived credentials would need the vending function
+     below.
+
+   `src/p2p/turn.ts` parses and validates both with one parser: at most three TURN URLs, one
+   per transport where possible (UDP, TCP, TLS on 443), and STUN entries dropped. With a
+   relay set, the app's STUN shrinks to one server so the ICE list stays at four URLs or
+   fewer. `ICE_SERVERS` in `src/p2p/session.ts` is one array rewritten in place, and
+   Trystero reads it each time it builds a connection, so a change applies to rooms already
+   joined. Relay through one side is enough for a pair, since a TURN permission is per peer
+   IP, so one device with a relay fixes that device's links.
+
+   A relay that never answers is worse than none: the retired Metered OpenRelay credentials
+   answered an Allocate with `400 TURN allocate error`, gathering zero relay candidates while
+   costing every connection 11 to 20 seconds of ICE gathering. Settings' Check relay asks
+   for an allocation over a relay-only connection and reports one of: answered, refused the
+   username or password (401), or no answer from this network. Without any relay, peers
+   behind symmetric or carrier-grade NAT cannot connect, the failure report says so, and
+   `relayOnly` refuses to pretend otherwise.
 3. Self-hosted coturn on Oracle Always Free ARM remains the planned fallback, not built.
    One box, and an operated dependency, flagged in sections 10 and 13.
 
-Relay-bandwidth planning below applies once a TURN server exists. A shared free pool
-exposes no client API for remaining quota, so the app would estimate locally with
-`RTCPeerConnection.getStats()` (`bytesSent`/`bytesReceived` on `transport` or
-`candidate-pair` where a `relay` candidate is selected), surface a session estimate, and
-cap video-over-relay by default. STUN-first stays the default either way.
+Relay bandwidth is the scarce part. Metered's free plan allows 500 MB of relayed traffic a
+month, counting each relayed byte in and out, so roughly 15 to 30 minutes of screen
+sharing at 1 to 2 Mbps, and a provider exposes no client API for the remaining quota. The
+roster marks a link that runs through a relay: for each connected peer of a
+content-carrying session (never the presence tier), the session reads `getStats()` at most
+every 10 s and shows a `relay` badge beside `connected` when the selected candidate pair
+has a `relay` candidate on either side. A local byte estimate (`bytesSent`/`bytesReceived`
+on that pair) and a default cap on video over a relay are not built. STUN-first stays the
+default either way.
 
 Scale guard: the mesh degrades past roughly 20-30 peers `[~]` (Chromium PeerConnection
 ceiling, Firefox and Safari mesh lag). Enforce app-level room caps around 12-15 data peers
@@ -887,17 +912,20 @@ copy in this document drifts out of date, which is what happened to the previous
 Backends and external dependencies, stated explicitly: no backend you operate is required
 for the core product, but client-only and free does not mean nothing third-party is involved.
 The app depends on third-party Nostr relays and BitTorrent trackers for signaling (free,
-unreliable, no SLA, may gate writes) and on Google STUN. No TURN server is configured, so
-the symmetric-NAT tail simply fails rather than falling back (per 5.2). Self-hosted coturn
-on Oracle Always Free would be a server you operate, one box, if relay reliability matters
-later. None of these is your application backend, but each dents a naive "fully serverless,
-depends on nothing" reading, so they are named here.
+unreliable, no SLA, may gate writes) and on Google STUN. A TURN relay is used only when a
+device or the deployment configures one (per 5.2); without one the symmetric-NAT tail simply
+fails rather than falling back. Self-hosted coturn on Oracle Always Free would be a server
+you operate, one box, if relay reliability matters later. None of these is your application
+backend, but each dents a naive "fully serverless, depends on nothing" reading, so they are
+named here.
 
 One optional Vercel concession: a stateless TURN-credential vending Edge Function holding a
 free-tier Metered or Cloudflare API key server-side and returning short-lived rotating TURN
 credentials (sub-second, no state, within the Hobby timeout). It keeps the secret out of
 client code and isolates bandwidth from a shared public-credential pool. Nothing like it
-ships today. Self-hosted coturn is the alternative that keeps everything off Vercel.
+ships today: the shipped path is a static credential pasted per device or set per deployment
+(5.2), whose deployment form is readable in the public bundle. Self-hosted coturn is the
+alternative that keeps everything off Vercel.
 
 ### Minimal UI against security ceremony
 The security-first posture risks overloading the UI. Ceremony is therefore progressive rather
@@ -973,7 +1001,7 @@ self-hosted coturn; Double-Ratchet upgrade if the threat model escalates.
 | # | Decision | Options | Choice | Trade-off |
 |---|---|---|---|---|
 | 1 | Signaling and discovery backend | (a) Trystero on free public Nostr/BitTorrent infra; (b) self-host `@trystero-p2p/ws-relay` on an Oracle/Fly free tier; (c) keep PeerJS cloud | (a) for v1, with a curated relay allow-list rather than arbitrary user relays (section 10) | (a) zero ops, no SLA and write-gating risk; (b) reliable but a box you run; (c) ~50-conn cap, "not production." |
-| 2 | TURN strategy | (a) a public static credential; (b) Vercel cred-vending Edge Function plus a provider key; (c) self-host coturn (Oracle Always Free) | none shipped: (a) was tried and the public credentials were retired, leaving dead ICE candidates, so it was removed; none shipped; (c) is the fallback if relay reliability starts to matter | (a) shared-pool exhaustion you cannot meter; (b) one tiny backend touchpoint; (c) zero cost plus your own box, best reliability. |
+| 2 | TURN strategy | (a) a static credential, either the retired public one or your own provider account's; (b) Vercel cred-vending Edge Function plus a provider key; (c) self-host coturn (Oracle Always Free) | (a) with your own account, configured at runtime and never committed: pasted per device in Settings or set per deployment in `VITE_TURN_SERVERS` (5.2). The retired public credential left dead ICE candidates and was removed; (c) is the fallback if relay reliability starts to matter | (a) a deployment credential is readable in the public bundle and its quota (Metered free: 500 MB a month) can be spent by anyone who extracts it, while a device credential stays on that device; (b) one tiny backend touchpoint; (c) zero cost plus your own box, best reliability. |
 | 3 | Identity model | (a) single keypair plus room-scoping plus challenge-response; (b) dual public/private peer | (a) | (b) adds state and linkability risk for no gain once signature admission exists. |
 | 4 | Executable-script sharing | (a) declarative automations only; (b) declarative plus QuickJS-sandboxed JS; (c) full JS | (b): declarative primary, sandboxed JS as an opt-in tier behind 8.2 | (a) safest, limited; (b) covers most needs with bounded risk and an honest "isolated, not safe" framing; (c) unacceptable. |
 | 5 | Forward secrecy depth | (a) per-session HKDF ratchet, in scope for v1 (section 6); (b) full Double-Ratchet now | (a) now, (b) at Phase 4 | v1 already gives session FS; (b) adds post-compromise security at X3DH, prekey and state cost. Deferred; it matters only for contact with high-risk strangers. |

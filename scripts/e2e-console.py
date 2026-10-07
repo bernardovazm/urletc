@@ -4951,6 +4951,220 @@ with sync_playwright() as p:
     bctx_a.close()
     bctx_b.close()
 
+    # --- relay: a TURN relay set per device in Settings, used by every connection after ---
+    # turn.invalid never resolves, so nothing is relayed and no real credential is involved.
+    # The init script records the ICE list of every RTCPeerConnection the page builds, and of
+    # every setConfiguration that changes one already open (Trystero recycles its pooled
+    # offers instead of rebuilding them), which is the only place the relay can be seen
+    # taking effect. A setConfiguration the browser refuses is recorded as failed.
+    RL_LOG = """
+      (() => {
+        const Orig = window.RTCPeerConnection
+        window.__iceLog = []
+        const urlsOf = cfg => ((cfg && cfg.iceServers) || []).flatMap(s => [].concat(s.urls))
+        const relayOnly = cfg => !!cfg && cfg.iceTransportPolicy === 'relay'
+        class Recorded extends Orig {
+          constructor(cfg, ...rest) {
+            window.__iceLog.push({ urls: urlsOf(cfg), relayOnly: relayOnly(cfg), kind: 'new' })
+            super(cfg, ...rest)
+          }
+        }
+        const set = Orig.prototype.setConfiguration
+        Orig.prototype.setConfiguration = function (cfg) {
+          const rec = { urls: urlsOf(cfg), relayOnly: relayOnly(cfg), kind: 'set', failed: false }
+          window.__iceLog.push(rec)
+          try {
+            return set.call(this, cfg)
+          } catch (e) {
+            rec.failed = true
+            throw e
+          }
+        }
+        window.RTCPeerConnection = Recorded
+      })()
+    """
+    RL_SNIPPET = '''const iceServers = [
+      {
+        urls: "stun:stun.relay.metered.ca:80",
+      },
+      {
+        urls: "turn:turn.invalid:80",
+        username: "fakeuser01",
+        credential: "fakecred01",
+      },
+      {
+        urls: "turn:turn.invalid:80?transport=tcp",
+        username: "fakeuser01",
+        credential: "fakecred01",
+      },
+      {
+        urls: "turn:turn.invalid:443",
+        username: "fakeuser01",
+        credential: "fakecred01",
+      },
+      {
+        urls: "turns:turn.invalid:443?transport=tcp",
+        username: "fakeuser01",
+        credential: "fakecred01",
+      },
+    ];'''
+    rctx = browser.new_context()
+    rctx.add_init_script(RL_LOG)
+    rpg = rctx.new_page()
+    rerrs = []
+    rpg.on('pageerror', lambda e: rerrs.append(str(e)))
+    rpg.goto(BASE)
+    rpg.wait_for_selector('.composer', timeout=30000)
+
+    def rl_card():
+        return rpg.locator('details.card[data-tool="settings"]').last
+
+    def rl_open():
+        rpg.evaluate("location.hash = '#/t/settings'")
+        try:
+            rl_card().locator('p.turn-status').wait_for(state='attached', timeout=15000)
+        except Exception:
+            pass
+
+    def rl_status():
+        s = rl_card().locator('p.turn-status')
+        return s.inner_text() if s.count() else ''
+
+    def rl_msg():
+        m = rl_card().locator('p.turn-msg')
+        return m.inner_text() if m.count() and m.is_visible() else ''
+
+    def rl_log():
+        return rpg.evaluate('window.__iceLog || []')
+
+    rl_open()
+    check('relay: a fresh profile has no relay, and Settings says what that costs',
+          'No relay server' in rl_status() and 'carrier-grade NAT' in rl_status(), rl_status())
+    rl_in = rl_card().locator('textarea.turn-input')
+    # Rooms joined at boot have already built their pooled offers by now.
+    poll(lambda: any(r['kind'] == 'new' and not r['relayOnly'] for r in rl_log()), 30)
+    rl_mark0 = len(rl_log())
+    rl_in.fill(RL_SNIPPET)
+    rl_card().locator('button', has_text='Save').click()
+    check('relay: the pasted dashboard snippet is saved and named by its host',
+          bool(poll(lambda: 'turn.invalid' in rl_status() and 'set on this device' in rl_status(), 10)), rl_status())
+    check('relay: the status names the transports and no credential',
+          '(UDP, TCP, TLS)' in rl_status() and 'fakecred01' not in rl_status() and 'fakeuser01' not in rl_status(), rl_status())
+    check('relay: the textarea is cleared, so the credential does not stay on screen',
+          rl_in.input_value() == '', rl_in.input_value()[:60])
+    # Without a reload: the connections already open (the pooled offers the next peer is
+    # answered with) take the relay at once.
+    rl_live = poll(lambda: [r for r in rl_log()[rl_mark0:] if r['kind'] == 'set'], 10) or []
+    check('relay: saving hands the relay to connections already open, without a reload',
+          bool(rl_live) and all('turn:turn.invalid:80' in r['urls'] and not r['failed'] for r in rl_live),
+          str(rl_live[:2]))
+    # Saving runs the check. turn.invalid never resolves, so the check has to give up, and
+    # within its 8 s timeout rather than hang.
+    rl_said = poll(lambda: 'did not answer' in rl_msg(), 15)
+    check('relay: saving checks the relay and reports that it did not answer', bool(rl_said), rl_msg())
+    rl_t0 = rpg.evaluate('Date.now()')
+    rl_card().locator('button', has_text='Check relay').click()
+    rl_again = poll(lambda: 'did not answer' in rl_msg() and not rl_card().locator('button', has_text='Check relay').is_disabled(), 15)
+    rl_ms = rpg.evaluate('Date.now()') - rl_t0
+    check('relay: Check relay reports no answer within its timeout', bool(rl_again) and rl_ms < 10000, f'{rl_ms} ms: {rl_msg()}')
+    check('relay: the check ran over the relay alone, with only the saved addresses',
+          any(r['relayOnly'] and r['urls'] and all(u.startswith(('turn:', 'turns:')) for u in r['urls']) for r in rl_log()),
+          str([r for r in rl_log() if r['relayOnly']][:2]))
+    for bad, why in (('[{"urls":"http://x"}]', 'an http: address'), ('just some words', 'plain text')):
+        rl_in.fill(bad)
+        rl_card().locator('button', has_text='Save').click()
+        rl_err = poll(lambda: rl_card().locator('p.turn-msg.settings-error').count() == 1 and 'expected' in rl_msg().lower(), 5)
+        check(f'relay: {why} is refused with a reason', bool(rl_err), rl_msg())
+        check(f'relay: {why} leaves the saved relay in place', 'turn.invalid' in rl_status(), rl_status())
+    check('relay: no error text repeats the credential', 'fakecred01' not in rl_msg(), rl_msg())
+    # turn.invalid fails its DNS lookup and gathering ends in about 0.1 s, so the timeout is
+    # only exercised by a relay that drops packets: 192.0.2.1 (TEST-NET-1) is never routed and
+    # gathering against it does not end on its own. The check must give up at its 8 s timer.
+    rl_in.fill('[{"urls":"turn:192.0.2.1:3478","username":"fakeuser01","credential":"fakecred01"}]')
+    rl_t0 = rpg.evaluate('Date.now()')
+    rl_card().locator('button', has_text='Save').click()
+    rl_silent = poll(lambda: 'did not answer' in rl_msg() and not rl_card().locator('button', has_text='Check relay').is_disabled(), 20)
+    rl_ms = rpg.evaluate('Date.now()') - rl_t0
+    check('relay: a relay that never answers is given up on at the timeout, not before or long after',
+          bool(rl_silent) and '192.0.2.1' in rl_status() and 7000 <= rl_ms < 11000, f'{rl_ms} ms: {rl_msg()} | {rl_status()}')
+    rl_in.fill(RL_SNIPPET)
+    rl_card().locator('button', has_text='Save').click()
+    poll(lambda: 'turn.invalid' in rl_status() and 'did not answer' in rl_msg(), 15)
+    # At rest the store is encrypted, so the credential must not sit in IndexedDB as text.
+    rl_plain = rpg.evaluate("""async () => {
+      const dec = new TextDecoder()
+      const flat = v => JSON.stringify(v, (k, x) => x instanceof ArrayBuffer ? dec.decode(x)
+        : ArrayBuffer.isView(x) ? dec.decode(x) : x)
+      let hit = false
+      for (const d of await indexedDB.databases()) {
+        const db = await new Promise((ok, no) => { const q = indexedDB.open(d.name); q.onsuccess = () => ok(q.result); q.onerror = no })
+        for (const name of db.objectStoreNames) {
+          const all = await new Promise(ok => { const q = db.transaction(name).objectStore(name).getAll(); q.onsuccess = () => ok(q.result) })
+          if (flat(all).includes('fakecred01')) hit = true
+        }
+        db.close()
+      }
+      return hit
+    }""")
+    check('relay: the credential is not stored as plain text', rl_plain is False, str(rl_plain))
+
+    rpg.reload()
+    rpg.wait_for_selector('.composer', timeout=30000)
+    rl_open()
+    check('relay: a reload keeps the relay', bool(poll(lambda: 'turn.invalid' in rl_status(), 10)), rl_status())
+    check('relay: the paste is not shown back after a reload', rl_card().locator('textarea.turn-input').input_value() == '')
+    RL_CODE = 'r' + os.urandom(3).hex()
+    rpg.evaluate(f"location.hash = '#/join/{RL_CODE}'")
+    rl_used = poll(lambda: any(r['kind'] == 'new' and 'turn:turn.invalid:80' in r['urls'] for r in rl_log() if not r['relayOnly']), 30)
+    check('relay: connections built after a reload carry the saved relay', bool(rl_used), str(rl_log()[-2:]))
+    rl_conns = [r['urls'] for r in rl_log() if not r['relayOnly']]
+    check('relay: every connection keeps the ICE list at four addresses or fewer',
+          bool(rl_conns) and all(len(u) <= 4 for u in rl_conns), str([len(u) for u in rl_conns]))
+    check("relay: the paste's own STUN and its fourth TURN address never reach a connection",
+          bool(rl_conns) and not any('stun:stun.relay.metered.ca:80' in u or 'turn:turn.invalid:443' in u for u in rl_conns),
+          str(rl_conns[-1:]))
+
+    rl_open()
+    # Marked before Remove: the pooled offers changed in place by it are connections after
+    # it too, and when the new peer answers one of them no connection is built at all.
+    rl_mark = len(rl_log())
+    rl_rm = rl_card().locator('button', has_text='Remove')
+    if rl_rm.count():
+        rl_rm.click()
+    check('relay: Remove goes back to no relay', bool(poll(lambda: 'No relay server' in rl_status(), 5)), rl_status())
+    # What shows the removal is the ICE list of connections from then on, in the same page:
+    # the pooled offers changed in place and any connection built for the new room.
+    RL_CODE2 = 's' + os.urandom(3).hex()
+    rpg.evaluate(f"location.hash = '#/join/{RL_CODE2}'")
+    rctx_b = browser.new_context()
+    rctx_b.add_init_script(RL_LOG)
+    rpg_b = rctx_b.new_page()
+    rpg_b.on('pageerror', lambda e: rerrs.append('B: ' + str(e)))
+    rpg_b.goto(f'{BASE}/#/join/{RL_CODE2}')
+    rpg_b.wait_for_selector('.composer', timeout=30000)
+    rl_met = poll(lambda: 'connected' in (rpg.locator('.topbar .badge').inner_text() or '')
+                  and 'connected' in (rpg_b.locator('.topbar .badge').inner_text() or ''), 150)
+    check('relay: a device joining after Remove connects', bool(rl_met), rpg.locator('.topbar .badge').inner_text())
+    # Removal reaches the open connections synchronously as setConfiguration records, so
+    # what precedes the first of them was built before Remove took effect.
+    rl_seg = rl_log()[rl_mark:]
+    rl_first = next((i for i, r in enumerate(rl_seg) if r['kind'] == 'set'), 0)
+    rl_after = [r for r in rl_seg[rl_first:] if not r['relayOnly']]
+    check('relay: connections after Remove carry no relay, in the same page',
+          bool(rl_after) and not any(u.startswith(('turn:', 'turns:')) for r in rl_after for u in r['urls'])
+          and not any(r.get('failed') for r in rl_after),
+          str(rl_after[:2]))
+    # A direct link must not be marked as relayed: the marker reads the selected pair, and
+    # neither side has a relay now. The first stats read runs on the first 2 s pass after
+    # the link is up, so 3 s is past it.
+    rpg.wait_for_timeout(3000)
+    check('relay: a direct link shows connected without a relay badge',
+          rpg.locator('.peer .peer-state', has_text='connected').count() >= 1 and rpg.locator('.peer .peer-relay').count() == 0,
+          f"{rpg.locator('.peer .peer-state').all_inner_texts()} relay={rpg.locator('.peer .peer-relay').count()}")
+    rctx_b.close()
+    check('relay: no page errors', not rerrs, ' | '.join(rerrs)[:200])
+    rctx.close()
+
     # --- composer collapse: a manual, persisted toggle that keeps the control row ---
     # Collapsing is deliberately not wired to sharing: it only ever moves when the toggle
     # is clicked, so this drives the toggle and nothing else.

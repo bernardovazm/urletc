@@ -101,6 +101,9 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   // default: a room link shown on a stream lets anyone watching join, and their first share
   // would otherwise land uncovered on the stage being broadcast.
   let coverVideo = (await getItem<boolean>('cover-video')) ?? true
+  // This device's TURN relay, as Settings stored it (the normalized list, never the raw
+  // paste). Handed to the engine when it loads; null falls back to the deployment's relay.
+  let turnServers = (await getItem<RTCIceServer[]>('turn-servers')) ?? null
 
   // ---------- replayable feed history ----------
   // Local, encrypted at rest, capped by count, age and serialized size. Two extra
@@ -153,9 +156,9 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
    *  far enough to have one and by peerId where it did not. Kept after the roster drops
    *  the peer, because a dead connection is exactly what disappears from the roster. */
   const failures = new Map<string, Tier>()
-  /** Whether a TURN relay is configured, read off the engine when it loads. Until then
-   *  nothing is claimed, so an unknown cause is never named as a known one. */
-  let relayConfigured = true
+  /** The P2P engine once loaded. Its relay state is read from it when a failure is
+   *  reported, since Settings can change the relay at any moment. */
+  let engine: typeof import('../p2p/session') | null = null
   const peerMedia = new Map<string, HTMLMediaElement[]>()
   const pendingStreams = new Map<string, Array<[MediaStream, unknown]>>()
   const localStreams = new Map<MediaStream, StreamMeta>() // own published streams and their metadata
@@ -948,6 +951,12 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     if (p.deviceId) ctl.append(button('🗑', () => dropPeer(p, tier), 'icon sm', `Remove ${who} from this list and stop their audio and video`))
     const [word, cls] = peerState(p, tier, pending)
     const state = el('span', { class: `badge peer-state${cls}`, text: word, title: PEER_STATE_TITLES[word] })
+    // Its own badge beside the state word rather than a different word, so 'connected' keeps
+    // meaning one thing whichever path the link took.
+    const relayed =
+      word === 'connected' && p.relay
+        ? el('span', { class: 'badge peer-relay', text: 'relay', title: 'This link goes through the relay server and counts toward its monthly allowance.' })
+        : null
     // In the presence list a peer is a stranger, and `name` is whatever they typed, so
     // a stranger could otherwise copy a paired device's name and its avatar initial and
     // sit one group below it looking identical. There, lead with the short fingerprint
@@ -960,6 +969,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
         ? el('span', { class: 'name' }, [el('span', { class: 'fp', text: p.deviceId.slice(0, 6) }), el('span', { class: 'claimed', text: ` ${p.name.slice(0, 24)}` })])
         : el('span', { class: 'name', text: p.name + (isVerified ? ' (verified)' : '') }),
       state,
+      ...(relayed ? [relayed] : []),
       ctl,
     ])
   }
@@ -2377,7 +2387,9 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
    * Record a connection that will not come back, and say so once. Only one cause is ever
    * named, and only where the code establishes it: with no TURN relay configured a peer
    * behind symmetric or carrier-grade NAT cannot be reached at all, and that is what a
-   * connection that never authenticated looks like. Nothing else is guessed at.
+   * connection that never authenticated looks like. With a relay configured the relay did
+   * not carry it either, which points at the relay, so the copy says where to check it.
+   * Nothing else is guessed at.
    */
   const noteFailure = (tier: Tier, t: PeerTransport) => {
     if (!(t.authed ? BROADCAST_TIERS : UNREACHABLE_TIERS).includes(tier)) return
@@ -2389,10 +2401,18 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     }
     failures.set(key, tier)
     if (t.authed) sys(`Lost the connection to ${t.name || TIER_ANON[tier]}.`)
-    else
-      sys(
-        `Could not connect to ${TIER_ANON[tier]}.${relayConfigured ? '' : ' No relay server is configured, so a device behind symmetric or carrier-grade NAT cannot be reached.'}`,
-      )
+    else {
+      // Read now rather than when the engine loaded: the relay can change in Settings.
+      // Until the engine is loaded nothing is claimed, so an unknown cause is never named.
+      const relay = engine?.hasTurnRelay()
+      const why =
+        relay === false
+          ? ' No relay server is configured, so a device behind symmetric or carrier-grade NAT cannot be reached.'
+          : relay
+            ? ' The relay server did not carry it either. Check relay in Settings tells whether the relay answers from this network.'
+            : ''
+      sys(`Could not connect to ${TIER_ANON[tier]}.${why}`)
+    }
   }
 
   // ---------- sessions ----------
@@ -2497,11 +2517,11 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     try {
       // Lazy-load the P2P engine (Trystero/zod/manifest) so it stays out of the
       // initial bundle. The UI has already painted; rooms connect a moment later.
-      const engine = await import('../p2p/session')
-      // Read from the engine rather than restated here, so the one cause the failure copy
-      // names stops being named the moment a relay is configured.
-      relayConfigured = engine.hasTurnRelay
-      const s = await engine.joinRoomSession({
+      const mod = await import('../p2p/session')
+      // Before the first room is joined, so its first connection already has the relay.
+      if (!engine) mod.setTurnServers(turnServers)
+      engine = mod
+      const s = await mod.joinRoomSession({
         ...room,
         displayName,
         relayOnly: false,
@@ -3622,6 +3642,13 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
         if (key && !coveredMedia.has(t.media)) coverTile(t, key)
       }
     notifyStage()
+  })
+  // From Settings: this device's relay changed (null: removed). Rooms already joined use it
+  // for every connection they build from now on; see ICE_SERVERS in session.ts.
+  window.addEventListener('wt:turn', (e) => {
+    const d = (e as CustomEvent<unknown>).detail
+    turnServers = Array.isArray(d) ? (d as RTCIceServer[]) : null
+    engine?.setTurnServers(turnServers)
   })
   window.addEventListener('wt:nearby', (e) => {
     nearbyWanted = !!(e as CustomEvent).detail

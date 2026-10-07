@@ -1218,6 +1218,13 @@ video.tile {
 .stage-tile.covered video.tile {
   filter: blur(48px) brightness(0.35);
 }
+/* a blur paints about twice its radius past the video's box, over the neighbouring tiles;
+   the tile clips it, and its black backing keeps the faded edges dark */
+.stage-tile.covered {
+  overflow: hidden;
+  border-radius: var(--radius-sm);
+  background: #000;
+}
 .stage-tile.covered .tile-pip,
 .stage-tile.covered .tile-mute,
 .stage-tile.covered .tile-sound,

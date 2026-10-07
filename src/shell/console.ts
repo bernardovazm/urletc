@@ -1656,6 +1656,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
       tile.wrap.removeAttribute('data-cover-key')
       tile.relabel = relabel
       if (tile.kind === 'screen' && stageTiles.includes(tile)) screenTookStage(tile)
+      notifyStage() // Studio offers recording once a source is shown
       if (soundHeld.has(media)) return // the autoplay notice gives the sound back
       media.muted = false
       startRemote(media)
@@ -3622,6 +3623,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
         const key = t.peerId === null ? null : needsCover(t.peerId)
         if (key && !coveredMedia.has(t.media)) coverTile(t, key)
       }
+    notifyStage()
   })
   window.addEventListener('wt:nearby', (e) => {
     nearbyWanted = !!(e as CustomEvent).detail

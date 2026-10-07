@@ -4799,6 +4799,9 @@ with sync_playwright() as p:
         cv_show.click()
     cv_open = poll(lambda: (lambda st: st and not st['covered'] and not st['blur'] and not st['muted'])(cv_b.evaluate(CV_STATE)), 5)
     check('cover: the second press shows it with its sound', bool(cv_open), str(cv_b.evaluate(CV_STATE)))
+    check('cover: Studio offers recording once the source is shown',
+          bool(poll(lambda: cv_b.locator('details.card[data-tool="studio"] button[title^="Covered:"]').count() == 0, 5)),
+          '%d still covered' % cv_b.locator('details.card[data-tool="studio"] button[title^="Covered:"]').count())
     check("cover: showing one source shows the device's other one, and the screen then takes the stage",
           bool(poll(lambda: cv_b.locator('.tiles .stage-tile.covered').count() == 0 and theater(cv_b), 5)),
           'covered=%d stage-max=%s' % (cv_b.locator('.tiles .stage-tile.covered').count(), theater(cv_b)))

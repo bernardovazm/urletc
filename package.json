@@ -40,13 +40,13 @@
     "e2e": "bash scripts/e2e.sh"
   },
   "dependencies": {
-    "@huggingface/transformers": "4.3.0",
-    "compromise": "14.17.0",
+    "@huggingface/transformers": "4.3.1",
+    "compromise": "14.18.0",
     "idb-keyval": "6.3.0",
     "kokoro-js": "1.2.1",
-    "nanostores": "1.5.3",
+    "nanostores": "1.5.5",
     "tesseract.js": "7.0.0",
-    "trystero": "0.25.2",
+    "trystero": "0.25.3",
     "zod": "4.6.5"
   },
   "devDependencies": {

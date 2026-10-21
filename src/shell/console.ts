@@ -20,7 +20,7 @@
 
 import type { CryptoCaps } from '../core/crypto'
 import { detectItems, detectText, kindLabel, type Detected } from '../core/clipboard'
-import { CryptoUnsupportedError } from '../core/identity'
+import { CryptoUnsupportedError, loadOrCreateIdentity } from '../core/identity'
 import { randomNickname } from '../core/nickname'
 import { getOcrMode } from '../core/prefs'
 import { getItem, removeItem, setItem } from '../core/store'
@@ -1627,12 +1627,21 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   // device for the rest of the page, keyed by its identity key so a reconnect under a new
   // peerId does not cover it again.
   const shownFrom = new Set<string>()
+  // This device's identity key. A #/stage tab in the same browser profile meets the main tab
+  // as a code-room peer under this key, and what it shows is this device's own. Only a
+  // holder of the private key can present it, since the handshake signature is bound to
+  // the connection it is made on.
+  let ownKeyHex = ''
+  if (p2pReady)
+    void loadOrCreateIdentity()
+      .then((i) => (ownKeyHex = i.publicKeyHex))
+      .catch(() => {})
   const coveredMedia = new Map<HTMLMediaElement, () => void>() // covered media to its reveal
   function needsCover(peerId: string): string | null {
     if (!coverVideo) return null
     const hit = mergedPeers().find((x) => x.peer.peerId === peerId)
     const key = hit?.peer.pubKeyHex ?? `peer:${peerId}`
-    if (hit && (hit.tier === 'personal' || verified.has(hit.peer.pubKeyHex))) return null
+    if (hit && (hit.tier === 'personal' || (ownKeyHex && hit.peer.pubKeyHex === ownKeyHex) || verified.has(hit.peer.pubKeyHex))) return null
     return shownFrom.has(key) ? null : key
   }
   function coverTile(tile: StageTile, key: string): void {

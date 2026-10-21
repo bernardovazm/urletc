@@ -4856,6 +4856,15 @@ with sync_playwright() as p:
     cv_again = poll(lambda: cv_b.locator(CV_TILE).count() == 1, 90)
     check('cover: a device already shown is not covered again',
           bool(cv_again) and (cv_b.evaluate(CV_STATE) or {}).get('covered') is False, str(cv_b.evaluate(CV_STATE)))
+    # A #/stage tab in the same profile, a second screen or an OBS source on this machine,
+    # meets the main tab under this device's own key, so its own camera shows there uncovered.
+    cv_st = cctx_a.new_page()
+    cv_st.goto(f'{BASE}/#/stage/{CV_CODE}')
+    cv_st.wait_for_selector('.app-shell', timeout=20000)
+    cv_own = poll(lambda: cv_st.locator(CV_TILE).count() == 1, 90)
+    check("cover: a stage tab in the same profile shows this device's own camera uncovered",
+          bool(cv_own) and (cv_st.evaluate(CV_STATE) or {}).get('covered') is False, str(cv_st.evaluate(CV_STATE)))
+    cv_st.close()
     cctx_a.close()
     cctx_b.close()
     # --- whiteboard: a board every connected device shares ---

@@ -180,6 +180,8 @@ const MAX_NAME_CHARS = 32 // peer display name, inbound
 const MAX_FILENAME_CHARS = 80 // received file name, inbound
 const MAX_MIME_CHARS = 100 // received file MIME type, inbound
 const MAX_INCOMING_FILES = 16 // concurrent in-flight receives
+const CHANNEL_WAIT_MS = 5000 // how long a sealed frame waits for a handshake still deriving
+const MAX_OPEN_FAILURES = 8 // frames from one peer that fail to open before it is dropped
 // A receive is held in memory until it completes. Sixteen offers at the per-file ceiling
 // would ask for 32 GiB, so everything in flight together is held to one maximal file.
 const MAX_INCOMING_BYTES = MAX_FILE_CHUNKS * CHUNK
@@ -534,6 +536,13 @@ interface PeerState {
   // the join race sends two hs, and without this both would derive concurrently and the
   // later one would overwrite the channel the earlier one already built.
   hsTaken: boolean
+  // Resolves once `channel` is set. The faster side of a handshake can seal its first
+  // message before this side has derived the channel, and dropping it lost that message.
+  channelReady: Promise<void>
+  markReady: () => void
+  // Frames from this peer that failed to open. Each one costs a ratchet search, so a peer
+  // that keeps sending them is dropped instead of being decrypted forever.
+  openFailures: number
   info: RosterPeer
 }
 
@@ -875,11 +884,16 @@ export async function joinRoomSession(opts: {
   async function newPeerState(peerId: string): Promise<PeerState> {
     const kp = (await crypto.subtle.generateKey({ name: 'X25519' }, false, ['deriveBits'])) as CryptoKeyPair
     const ephPubRaw = new Uint8Array(await crypto.subtle.exportKey('raw', kp.publicKey))
+    let markReady = () => {}
+    const channelReady = new Promise<void>((r) => (markReady = r))
     return {
       eph: kp,
       ephPubB64: bytesToB64(ephPubRaw),
       channel: null,
       hsTaken: false,
+      channelReady,
+      markReady,
+      openFailures: 0,
       info: { peerId, deviceId: '', name: '...', pubKeyHex: '', ready: false, safety: '' },
     }
   }
@@ -948,12 +962,8 @@ export async function joinRoomSession(opts: {
     void ensurePeer(peerId)
   }
 
-  room.onPeerLeave = (peerId: string) => {
-    const st = peers.get(peerId)
-    // Read before the entry goes: Trystero drops a peer whose transport broke exactly as
-    // it drops one that left, and this is the only thing that tells the two apart.
-    const broke = transportState.get(peerId) === 'disconnected' || transportState.get(peerId) === 'failed'
-    transportState.delete(peerId)
+  /** Forget everything held for a peer. Shared by a peer leaving and a peer being dropped. */
+  function forgetPeer(peerId: string): void {
     peers.delete(peerId)
     // Their half-sent files can never complete, since nobody is left to ask. Report and
     // free the slot rather than holding it against MAX_INCOMING_FILES for the page's life.
@@ -964,6 +974,21 @@ export async function joinRoomSession(opts: {
     historyTaken.delete(peerId)
     mediaChain.delete(peerId)
     emitRoster()
+  }
+
+  // Peers dropped on this connection for frames that keep failing to open. Held until the
+  // connection goes: a fresh hs on the same connection would otherwise re-admit the peer
+  // with a clean count, and it could repeat the cycle at will.
+  const droppedPeers = new Set<string>()
+
+  room.onPeerLeave = (peerId: string) => {
+    const st = peers.get(peerId)
+    // Read before the entry goes: Trystero drops a peer whose transport broke exactly as
+    // it drops one that left, and this is the only thing that tells the two apart.
+    const broke = transportState.get(peerId) === 'disconnected' || transportState.get(peerId) === 'failed'
+    transportState.delete(peerId)
+    droppedPeers.delete(peerId)
+    forgetPeer(peerId)
     // A peer dropped while its transport was already in trouble lost its connection rather
     // than leaving, so it is reported as a failure instead of "left". Only an authenticated
     // peer: one that had not finished the handshake had a connection that was built, which
@@ -977,6 +1002,7 @@ export async function joinRoomSession(opts: {
 
   hs.onMessage = async (data, ctx) => {
     const peerId = ctx.peerId
+    if (droppedPeers.has(peerId)) return
     const st = await ensurePeer(peerId)
     // One hs completes the channel. A second hs for the same state is dropped before any
     // await, so two runs cannot both derive and race to assign st.channel.
@@ -1004,6 +1030,7 @@ export async function joinRoomSession(opts: {
     // channel and a doubled post-handshake run behind it.
     if (peers.get(peerId) !== st) return
     st.channel = channel
+    st.markReady()
     const theirPubHex = toHex(theirIdPub)
     st.info = {
       peerId,
@@ -1103,15 +1130,40 @@ export async function joinRoomSession(opts: {
     }
   }
 
+  /** Open a sealed frame from a peer, waiting briefly for a channel its handshake is still
+   *  deriving. 'none' when the peer has no channel, 'fail' when the frame does not open. */
+  async function openFrom(peerId: string, data: SealedMessage): Promise<{ st: PeerState; plain: Uint8Array } | 'none' | 'fail'> {
+    const st = peers.get(peerId)
+    if (!st) return 'none'
+    if (!st.channel) await Promise.race([st.channelReady, new Promise((r) => setTimeout(r, CHANNEL_WAIT_MS))])
+    if (!st.channel || peers.get(peerId) !== st) return 'none'
+    try {
+      return { st, plain: await st.channel.open(data) }
+    } catch {
+      if (++st.openFailures >= MAX_OPEN_FAILURES && peers.get(peerId) === st) {
+        droppedPeers.add(peerId)
+        forgetPeer(peerId)
+        ev.onPeerLeave?.(peerId) // the app drops its media and per-peer state as on a leave
+        ev.onSystem?.(`⚠ Stopped listening to ${st.info.name}: its messages keep failing to decrypt.`)
+      }
+      return 'fail'
+    }
+  }
+
   msg.onMessage = async (data, ctx) => {
     if (opts.presenceOnly) return // presence tiers neither send nor receive messages
-    const st = peers.get(ctx.peerId)
-    if (!st?.channel) return
+    const opened = await openFrom(ctx.peerId, data)
+    if (opened === 'none') return
+    if (opened === 'fail') {
+      // Once per peer: every failure used to add a card, which a peer could repeat at will.
+      if (peers.get(ctx.peerId)?.openFailures === 1) ev.onSystem?.('⚠ Failed to decrypt a message (out of order or tampered).')
+      return
+    }
+    const { st } = opened
     let env: Envelope
     try {
-      env = JSON.parse(dec.decode(await st.channel.open(data))) as Envelope
+      env = JSON.parse(dec.decode(opened.plain)) as Envelope
     } catch {
-      ev.onSystem?.('⚠ Failed to decrypt a message (out of order or tampered).')
       return
     }
     if (env.t === 'chat') {
@@ -1307,16 +1359,17 @@ export async function joinRoomSession(opts: {
   // else, and it never acts. It hands the signal to the app, which must ask the user.
   inv.onMessage = async (data, ctx) => {
     if (!opts.presenceOnly) return // the channel does not exist on content-carrying tiers
-    const st = peers.get(ctx.peerId)
-    if (!st?.channel) return // handshake-authenticated peers only
+    // Handshake-authenticated peers only. Sealed, so this also rejects a replayed invite,
+    // because the ratchet refuses a counter it has already consumed.
+    const opened = await openFrom(ctx.peerId, data)
+    if (typeof opened === 'string') return
     let env: InviteEnvelope
     try {
-      // Sealed, so this also rejects a replayed invite, because the ratchet refuses a
-      // counter it has already consumed.
-      env = JSON.parse(dec.decode(await st.channel.open(data))) as InviteEnvelope
+      env = JSON.parse(dec.decode(opened.plain)) as InviteEnvelope
     } catch {
       return // a malformed or replayed invite is dropped in silence, not reported
     }
+    const { st } = opened
     const who = { peerId: ctx.peerId, deviceId: st.info.deviceId, name: st.info.name, pubKeyHex: st.info.pubKeyHex }
     if (env.t === 'offer') {
       // Bounded and normalised here at the trust boundary, like every other inbound
@@ -1369,12 +1422,13 @@ export async function joinRoomSession(opts: {
   // peers, only records, and only as an answer to a request we made.
   hist.onMessage = async (data, ctx) => {
     if (!historyOk) return // nearby, presence, any tier not opted in: no such stream here
-    const st = peers.get(ctx.peerId)
-    if (!st?.channel) return // handshake-authenticated peers only
+    // Handshake-authenticated peers only. Sealed, so a replayed request is refused by the
+    // ratchet before it is parsed.
+    const opened = await openFrom(ctx.peerId, data)
+    if (typeof opened === 'string') return
     let env: HistEnvelope
     try {
-      // Sealed, so a replayed request is refused by the ratchet before it is parsed.
-      env = JSON.parse(dec.decode(await st.channel.open(data))) as HistEnvelope
+      env = JSON.parse(dec.decode(opened.plain)) as HistEnvelope
     } catch {
       return // malformed or replayed, dropped in silence
     }
@@ -1744,8 +1798,12 @@ export async function joinRoomSession(opts: {
       const sent: string[] = []
       for (const [peerId, st] of peers) {
         if (!st.channel || skipKeys?.has(st.info.pubKeyHex)) continue
-        await msg.send(await st.channel.seal(enc.encode(JSON.stringify({ t: 'chat', id, text } satisfies Envelope))), { target: peerId })
-        sent.push(st.info.pubKeyHex)
+        try {
+          await msg.send(await st.channel.seal(enc.encode(JSON.stringify({ t: 'chat', id, text } satisfies Envelope))), { target: peerId })
+          sent.push(st.info.pubKeyHex)
+        } catch {
+          // gone mid-send; one peer must not keep the message from everyone after it
+        }
       }
       return sent
     },
@@ -1759,7 +1817,9 @@ export async function joinRoomSession(opts: {
       await Promise.all(
         [...peers.entries()]
           .filter(([, st]) => st.channel)
-          .map(async ([peerId, st]) => msg.send(await st.channel!.seal(enc.encode(JSON.stringify({ t: 'name', name: displayName } satisfies Envelope))), { target: peerId })),
+          .map(async ([peerId, st]) =>
+            msg.send(await st.channel!.seal(enc.encode(JSON.stringify({ t: 'name', name: displayName } satisfies Envelope))), { target: peerId }).catch(() => {}),
+          ),
       )
     },
 

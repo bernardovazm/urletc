@@ -551,6 +551,11 @@ interface Outgoing {
   // meaningful: a transfer longer than the TTL must not read as expired while it is running.
   sending: boolean
   expires: number
+  // Who the file went to, and the repair asks served to each. The receiver stops after
+  // MAX_REPAIR_ROUNDS on its own, but a modified one would not, and every served ask makes
+  // this device re-read, re-encrypt and upload up to MAX_REPAIR_CHUNKS chunks again.
+  recipients: Set<string>
+  repairs: Map<string, number>
 }
 
 function concat(a: Uint8Array, b: Uint8Array): Uint8Array<ArrayBuffer> {
@@ -1151,7 +1156,12 @@ export async function joinRoomSession(opts: {
       // be answered, only to the peer that asked, and only for in-range indices.
       const out = outgoing.get(String(env.fileId ?? ''))
       if (!out || (!out.sending && out.expires < Date.now())) return
-      const missing = Array.isArray(env.missing) ? env.missing.slice(0, MAX_REPAIR_CHUNKS) : []
+      if (!out.recipients.has(ctx.peerId)) return
+      const served = out.repairs.get(ctx.peerId) ?? 0
+      if (served >= MAX_REPAIR_ROUNDS) return
+      out.repairs.set(ctx.peerId, served + 1)
+      // Deduplicated, or one ask repeating index 0 is MAX_REPAIR_CHUNKS uploads of one chunk.
+      const missing = Array.isArray(env.missing) ? [...new Set(env.missing.slice(0, MAX_REPAIR_CHUNKS))] : []
       for (const i of missing) {
         if (!Number.isInteger(i) || i < 0 || i >= out.total) continue
         try {
@@ -1717,7 +1727,7 @@ export async function joinRoomSession(opts: {
         const oldest = [...outgoing.entries()].filter(([, o]) => !o.sending).sort((a, b) => a[1].expires - b[1].expires)[0]
         if (oldest) outgoing.delete(oldest[0])
       }
-      outgoing.set(fileId, { file, key: aesKey, total, sending: true, expires: 0 })
+      outgoing.set(fileId, { file, key: aesKey, total, sending: true, expires: 0, recipients: new Set(recipients.map(([p]) => p)), repairs: new Map() })
 
       // Chunks are encrypted once with the per-file key and targeted at the recipients
       // only. Peers we skipped (already reached via another tier) get nothing.

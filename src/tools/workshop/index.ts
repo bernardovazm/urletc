@@ -27,6 +27,19 @@ function permLabel(p: Permission): string {
   return typeof p === 'string' ? p : `net: ${p.net.join(', ')}`
 }
 
+/** Order two version strings part by part, numerically where both parts are numbers. */
+function cmpVersion(a: string, b: string): number {
+  const pa = a.split(/[.+-]/)
+  const pb = b.split(/[.+-]/)
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const x = pa[i] ?? '0'
+    const y = pb[i] ?? '0'
+    const c = /^\d+$/.test(x) && /^\d+$/.test(y) ? Number(x) - Number(y) : x.localeCompare(y)
+    if (c) return Math.sign(c)
+  }
+  return 0
+}
+
 function sandboxPerms(perms: Permission[]): SandboxPermissions {
   return {
     clipboardRead: perms.some((p) => p === 'clipboard-read'),
@@ -110,8 +123,33 @@ const tool: ToolModule = {
       })
       if (!ok) return
       const before = installed.slice()
-      const i = installed.findIndex((x) => x.id === m.id)
-      if (i >= 0) {
+      let i = installed.findIndex((x) => x.id === m.id)
+      // The id is a content hash, so a new version is a new id and the check below never saw
+      // it. A tool is known across versions by its name and type: another key under the same
+      // name is a different author, and the same key is an update, refused when it goes back.
+      const named = (x: Manifest) => x.name === m.name && x.type === m.type
+      const same = i < 0 ? installed.findIndex((x) => named(x) && x.author.pubkey === m.author.pubkey) : -1
+      const other = i < 0 && same < 0 ? installed.find(named) : undefined
+      let migrateFrom: string | null = null
+      if (
+        other &&
+        !confirm(
+          `"${m.name}" is already installed, signed by another key.\nfrom ${other.author.pubkey.slice(0, 28)}...\nto   ${m.author.pubkey.slice(0, 28)}...\nInstall this one beside it?`,
+        )
+      )
+        return
+      if (same >= 0) {
+        const c = cmpVersion(m.version, installed[same].version)
+        if (c < 0 && !confirm(`"${m.name}" ${m.version} is older than the installed ${installed[same].version}. Install the older version anyway?`)) return
+        // Same author, another version: it replaces the installed one and takes its data.
+        if (c !== 0) {
+          migrateFrom = installed[same].id
+          i = same
+        }
+      }
+      if (migrateFrom) {
+        installed[i] = m
+      } else if (i >= 0) {
         // Enforce same-key updates (section 7). A different author key for the same id
         // requires an explicit override, so it can never overwrite silently.
         if (
@@ -125,6 +163,15 @@ const tool: ToolModule = {
         installed.push(m)
       }
       if (!(await persist(() => installed.splice(0, installed.length, ...before), 'Install'))) return
+      if (migrateFrom) {
+        // Data is keyed by the tool's id, which every version changes. Old copy out first, so
+        // the move never holds both in a namespace near its quota.
+        for (const k of await dataKeys(migrateFrom)) {
+          const v = await ctx.storage.get(k)
+          await ctx.storage.remove(k).catch(() => {})
+          await ctx.storage.set(k.replace(`:${migrateFrom}:`, `:${m.id}:`), v).catch(() => {})
+        }
+      }
       verifiedMap.set(m.id, true) // install() inputs are verified: signed self, verified import or gossip
       renderList()
       toast('Installed')

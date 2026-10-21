@@ -1786,6 +1786,62 @@ with sync_playwright() as p:
     check('workshop sandbox: the app itself still renders and runs', bool(_ftxt) and _fframe.locator('#legit').count() == 1, _ftxt)
     fc.close()
 
+    # A tool is known across versions by name and type, since its id is a content hash and
+    # every version is a new one. The same key's newer version replaces the old and keeps its
+    # data, an older one asks first, and another key under the same name asks first too.
+    UAPP = """<pre id=o>wait</pre><script>
+    host.storage.get('n').then((v) => { document.getElementById('o').textContent = 'n=' + v; if (!v) host.storage.set('n', 'kept') })
+    </script>"""
+    uc, up = rf_open()
+    up.evaluate("location.hash = '#/t/workshop'")
+    uws = up.locator('details.card[data-tool="workshop"]')
+    uws.locator('button', has_text='Sign & install').wait_for(timeout=15000)
+    _urow = uws.locator('.card', has_text='Upd')
+
+    def u_install(version):
+        uws.locator('select[aria-label="Tool type"]').select_option('html')
+        uws.locator('input[placeholder="Tool name"]').fill('Upd')
+        uws.locator('input[placeholder="Version"]').fill(version)
+        uws.locator('textarea').fill(UAPP)
+        uws.locator('button', has_text='Sign & install').click()
+        up.locator('.modal button', has_text='Install').click()
+        up.wait_for_timeout(800)
+
+    def u_run():
+        _urow.first.locator('button', has_text=re.compile(r'^Run$')).click()
+        _ugo = up.locator('.modal button', has_text=re.compile('Run|Open'))
+        if rpoll(up, lambda: _ugo.count() > 0, 5):
+            _ugo.first.click()
+        _uout = up.frame_locator('iframe.ws-app-frame').locator('#o')
+        return rpoll(up, lambda: (lambda t: t if t.startswith('n=') else None)(_uout.inner_text(timeout=1000)), 15) or ''
+
+    u_install('1.0.0')
+    _ufirst = u_run()
+    check('workshop update: the first version starts empty and stores its data', _ufirst in ('n=null', 'n=undefined'), _ufirst)
+    up.wait_for_timeout(500)
+    u_install('2.0.0')
+    check('workshop update: a newer version from the same key replaces the old one',
+          _urow.count() == 1 and 'v2.0.0' in _urow.first.inner_text(), _urow.first.inner_text()[:80])
+    _udata = u_run()
+    check('workshop update: the newer version keeps the data the old one saved', _udata == 'n=kept', _udata)
+    _udlg = []
+    up.once('dialog', lambda d: (_udlg.append(d.message), d.dismiss()))
+    u_install('1.5.0')
+    check('workshop update: an older version from the same key asks first, and No keeps the newer',
+          len(_udlg) == 1 and 'older than the installed' in _udlg[0] and _urow.count() == 1 and 'v2.0.0' in _urow.first.inner_text(),
+          f'{_udlg} {_urow.first.inner_text()[:60]!r}')
+    _uother = up.evaluate(RSIGN, ['html', 'html', 'Upd'])
+    _udlg.clear()
+    up.once('dialog', lambda d: (_udlg.append(d.message), d.dismiss()))
+    uws.locator('input[type=file]').set_input_files(files=[{'name': 'u.wtool.json', 'mimeType': 'application/json', 'buffer': _uother.encode()}])
+    _uimp = up.locator('.modal button', has_text='Install')
+    if rpoll(up, lambda: _uimp.count() > 0, 5):
+        _uimp.click()
+    up.wait_for_timeout(800)
+    check('workshop update: the same name from another key asks first, and No installs nothing',
+          len(_udlg) == 1 and 'signed by another key' in _udlg[0] and _urow.count() == 1, f'{_udlg} rows={_urow.count()}')
+    uc.close()
+
     # --- 13n. Studio (VDO.ninja-style A/V): publish controls, labeled source, layouts, stage link ---
     page.evaluate("location.hash = '#/t/studio'")
     studio = page.locator('details.card').last

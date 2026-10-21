@@ -637,7 +637,10 @@ consent UI shows the full source plus its SHA-256.
 ### Trust and consent
 - **Author signing:** verify the Ed25519 signature before any display, not only before a run.
   Updates must be signed by the same key, and downgrades are rejected unless the user
-  overrides.
+  overrides. A tool is matched across versions by name and type, since its id is a content
+  hash that every version changes: a newer version from the same key replaces the installed
+  one and inherits its stored data, and the same name under another key asks before it is
+  installed beside the original.
 - **Trust tiers and badges:** unsigned (red), self-signed and unverified (yellow),
   peer-vouched (green), where vouches count only from your manually trusted peers, the real
   Sybil defense from section 5.5. TOFU on first sight of an author key, with a loud

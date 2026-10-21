@@ -5050,6 +5050,61 @@ with sync_playwright() as p:
     nctx_a.close()
     nctx_b.close()
 
+    # --- handshake replay: an hs is valid only on the connection it was signed for ---
+    # M, a room member, keeps the hs A sent it and replays it from a second context M2. The
+    # signature used to cover only A's ephemeral key and the room, so it verified on any
+    # connection in the room and B marked M2 ready, verified and named as A, uncovering its
+    # video. It covers the connection's DTLS certificates now. Captured and substituted at
+    # the JSON layer, below Trystero's framing: M records hs payloads it parses, and M2
+    # serialises A's in place of its own.
+    HS_HOOK = r"""(() => {
+      window.__hsIn = []
+      const isHs = (v) => v && typeof v === 'object' && typeof v.eph === 'string' && typeof v.idPub === 'string' && typeof v.sig === 'string'
+      const parse = JSON.parse
+      JSON.parse = function (...a) { const v = parse.apply(this, a); try { if (isHs(v)) window.__hsIn.push(v) } catch {} return v }
+      const str = JSON.stringify
+      JSON.stringify = function (v, ...r) { return str.call(this, window.__replayHs && isHs(v) ? window.__replayHs : v, ...r) }
+    })()"""
+    hroom = 'h' + os.urandom(3).hex()
+    hctxs = []
+
+    def hs_boot(init=''):
+        c = browser.new_context()
+        c.add_init_script(init + HS_HOOK)
+        pg = c.new_page()
+        hctxs.append(c)
+        # Each starts alone and drops nearby before entering the room, so the only hs M
+        # records is A's for this room, and B meets the others on this room alone.
+        pg.goto(f'{BASE}/#/join/x{os.urandom(3).hex()}')
+        pg.wait_for_selector('.composer', timeout=30000)
+        pg.wait_for_timeout(1500)
+        pg.evaluate("() => window.dispatchEvent(new CustomEvent('wt:nearby', { detail: false }))")
+        pg.wait_for_timeout(1500)
+        pg.evaluate('window.__hsIn = []')
+        return pg
+
+    hpa, hpm = hs_boot(), hs_boot()
+    hpa.evaluate(f"location.hash = '#/join/{hroom}'")
+    hpm.evaluate(f"location.hash = '#/join/{hroom}'")
+    _hcap = poll(lambda: hpm.evaluate('window.__hsIn.length') >= 1, 120)
+    check('hs replay: M records the hs A sent it', bool(_hcap))
+    if _hcap:
+        _hsa = hpm.evaluate('window.__hsIn[0]')
+        _hname = _hsa['name']
+        hpb = hs_boot()
+        hpb.evaluate(f"location.hash = '#/join/{hroom}'")
+        _hmet = poll(lambda: bfeed(hpb).count(f'Secure channel established with {_hname}.') >= 1, 120)
+        check('hs replay: B meets A', bool(_hmet), bfeed(hpb)[-160:])
+        hp2 = hs_boot(f'window.__replayHs = {json.dumps(_hsa)};')
+        hp2.evaluate(f"location.hash = '#/join/{hroom}'")
+        _hrej = poll(lambda: 'Rejected a peer with an invalid signature' in bfeed(hpb), 90)
+        hpb.wait_for_timeout(3000)
+        _hn = bfeed(hpb).count(f'Secure channel established with {_hname}.')
+        check('hs replay: B turns away the hs replayed from a second peer', bool(_hrej), bfeed(hpb)[-200:])
+        check('hs replay: B holds A once, not a second peer posing as A', _hn == 1, f'{_hn} channels named {_hname}')
+    for c in hctxs:
+        c.close()
+
     # --- relay: a TURN relay set per device in Settings, used by every connection after ---
     # turn.invalid never resolves, so nothing is relayed and no real credential is involved.
     # The init script records the ICE list of every RTCPeerConnection the page builds, and of

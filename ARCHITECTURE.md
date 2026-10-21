@@ -423,8 +423,14 @@ admission exists.
   That is a fully client-side live roster with no server.
 - Private connection is an opaque `crypto.randomUUID()` room id shared out of band by QR or
   copy-paste only, never broadcast.
-- Admission gate: Trystero `onPeerJoin` triggers a challenge-response. The peer signs a fresh
-  nonce, verified against the claimed pubkey before the peer is app-visible.
+- Admission gate: Trystero `onPeerJoin` triggers the `hs` exchange. Each side signs its fresh
+  X25519 ephemeral key, the room, and the DTLS certificate fingerprints of the connection it
+  is sent on (its own first), verified against the claimed pubkey before the peer is
+  app-visible. The certificates tie the signature to that one connection: a member who
+  keeps another member's `hs` and presents it from a second peer names certificates that
+  connection does not carry, since the far end of a DTLS connection cannot present a
+  certificate it holds no key for. An `hs` without `v: 2` signed less than that and is
+  turned away.
   Timestamp-freshness plus a per-window rate limit are the spam defenses. On proof of work,
   see section 5.5; it is a speed-bump and no part of the Sybil answer.
 - Key backup is a user-downloaded JSON file: public key plus private key wrapped with a

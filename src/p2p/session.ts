@@ -501,7 +501,10 @@ export function getAllSessions(): RoomSession[] {
   return [...liveSessions]
 }
 
-type HsPayload = { eph: string; idPub: string; sig: string; name: string }
+// v names what `sig` covers. A peer sending anything else signed over its ephemeral key and
+// the room alone, which verifies on any connection in the room, so it is turned away.
+const HS_VERSION = 2
+type HsPayload = { v?: number; eph: string; idPub: string; sig: string; name: string }
 type FileChunk = { fileId: string; i: number; iv: string; ct: string }
 type Envelope =
   | { t: 'chat'; id: string; text: string }
@@ -863,10 +866,34 @@ export async function joinRoomSession(opts: {
     }
   }
 
+  /** The DTLS certificate fingerprints of this session's connection to a peer, as its SDP
+   *  states them, this side's first. Trystero lists a connection, and runs onPeerJoin and
+   *  any action handler for it, only once its data channel is open, so both descriptions
+   *  are set by then; null means the peer has gone or its connection was replaced. */
+  function dtlsFingerprints(peerId: string): [string, string] | null {
+    const pc = currentPc(peerId)
+    const fp = (d: RTCSessionDescription | null | undefined) =>
+      [...new Set([...(d?.sdp ?? '').matchAll(/^a=fingerprint:(\S+) ([0-9A-Fa-f:]+)/gm)].map((m) => `${m[1].toLowerCase()} ${m[2].toUpperCase()}`))].sort().join(',')
+    const mine = fp(pc?.currentLocalDescription)
+    const theirs = fp(pc?.currentRemoteDescription)
+    return mine && theirs ? [mine, theirs] : null
+  }
+
+  // What the handshake signature covers: the signer's ephemeral key, the room, and the DTLS
+  // certificates of the connection it is sent on, the signer's first. Without the
+  // certificates a captured hs verifies on any connection in the room, so a second peer
+  // of a room member could present another member's hs and be marked ready, verified and
+  // named as that member, and the video it sends would be shown as theirs. The far end of a
+  // DTLS connection cannot present a certificate it holds no key for, so an hs replayed or
+  // relayed onto another connection names certificates that connection does not carry.
+  const hsTranscript = (eph: Uint8Array, signerFp: string, otherFp: string) => concat(concat(eph, roomSalt), enc.encode(`|dtls|${signerFp}|${otherFp}`))
+
   async function sendHandshake(peerId: string, st: PeerState) {
+    const fps = dtlsFingerprints(peerId)
+    if (!fps) throw new Error('the connection has no negotiated certificates')
     const ephRaw = b64ToBytes(st.ephPubB64)
-    const sig = await signEd25519(id.sign.privateKey, concat(ephRaw, roomSalt))
-    await hs.send({ eph: st.ephPubB64, idPub: bytesToB64(idPubRaw), sig: bytesToB64(sig), name: displayName }, { target: peerId })
+    const sig = await signEd25519(id.sign.privateKey, hsTranscript(ephRaw, fps[0], fps[1]))
+    await hs.send({ v: HS_VERSION, eph: st.ephPubB64, idPub: bytesToB64(idPubRaw), sig: bytesToB64(sig), name: displayName }, { target: peerId })
   }
 
   // Reserve a peer synchronously so onPeerJoin and the first inbound hs cannot each create a
@@ -938,15 +965,19 @@ export async function joinRoomSession(opts: {
     if (st.channel || st.hsTaken) return
     st.hsTaken = true
 
-    const theirEph = b64ToBytes(data.eph)
-    const theirIdPub = b64ToBytes(data.idPub)
-    const ok = await verifyEd25519(theirIdPub, b64ToBytes(data.sig), concat(theirEph, roomSalt))
-    if (!ok) {
-      ev.onSystem?.('⚠ Rejected a peer with an invalid signature.')
+    // A peer that left or was replaced while this hs waited is not a rejection.
+    const reject = (why: string) => {
+      if (peers.get(peerId) !== st) return
+      ev.onSystem?.(why)
       peers.delete(peerId)
       emitRoster()
-      return
     }
+    if (data.v !== HS_VERSION) return reject('⚠ Rejected a peer running an older version of the app. Reloading the app on that device fixes it.')
+    const fps = dtlsFingerprints(peerId)
+    if (!fps) return
+    const theirEph = b64ToBytes(data.eph)
+    const theirIdPub = b64ToBytes(data.idPub)
+    if (!(await verifyEd25519(theirIdPub, b64ToBytes(data.sig), hsTranscript(theirEph, fps[1], fps[0])))) return reject('⚠ Rejected a peer with an invalid signature.')
 
     const shared = await deriveSharedSecret(st.eph.privateKey, theirEph)
     const initiator = st.ephPubB64 < data.eph

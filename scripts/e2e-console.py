@@ -2345,6 +2345,14 @@ with sync_playwright() as p:
         check('url-check: a live OpenPhish URL is reported as listed', 'listed by openphish' in listed, listed[:200])
         check('url-check: an exact URL hit is named as an exact URL hit',
               'this exact url is listed' in listed, listed[:200])
+        # The usual phishing-kit link is the listed host's root with a query. The query used
+        # to be read as part of the host, so the host and domain lookups both missed.
+        if sample_host:
+            uc_run(f'https://{sample_host}/?utm_source=mail')
+            _qlisted = us.locator('.url-check-feedresult').inner_text().lower()
+            check('url-check: a listed host is found when its root URL carries a query',
+                  'listed by openphish' in _qlisted, _qlisted[:200])
+            uc_run(sample)
         check('url-check: the listing states the age of the feed',
               ' old' in listed and 'entries' in listed, listed[:200])
         check('url-check: a listing reads as a fact, not a score',

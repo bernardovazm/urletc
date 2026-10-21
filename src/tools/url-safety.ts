@@ -812,6 +812,13 @@ function cleanFeed(body: string, kind: FeedSpec['kind']): string {
   return out.join('\n')
 }
 
+/** The host of a normalizeUrl result: what comes before its port, path or query. A root
+ *  path is dropped there, so "evil.example/?q=1" became "evil.example?q=1", and splitting
+ *  on '/' and ':' alone read the query as part of the host and missed every listed host. */
+function hostOfNorm(norm: string): string {
+  return norm.startsWith('[') ? norm.slice(0, norm.indexOf(']') + 1) : norm.split(/[/?:]/)[0]
+}
+
 function buildIndex(spec: FeedSpec, cached: CachedFeed): FeedState {
   const urls = new Set<string>()
   const hosts = new Set<string>()
@@ -821,7 +828,7 @@ function buildIndex(spec: FeedSpec, cached: CachedFeed): FeedState {
     if (!line) continue
     if (spec.kind === 'urls') {
       urls.add(line)
-      const h = line.split('/')[0].split(':')[0]
+      const h = hostOfNorm(line)
       hosts.add(h)
       domains.add(registrableDomain(h))
     } else {
@@ -922,7 +929,7 @@ export async function checkFeeds(input: string): Promise<FeedOutcome> {
   const out: FeedOutcome = { hits: [], consulted: [], absent: [], errors: [] }
   const norm = normalizeUrl(input)
   if (!norm) return out
-  const host = norm.split('/')[0].split(':')[0]
+  const host = hostOfNorm(norm)
   const domain = registrableDomain(host)
 
   for (const spec of FEEDS) {

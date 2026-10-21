@@ -1,4 +1,5 @@
 import { detectItems, detectText, kindLabel, type Detected } from '../../core/clipboard'
+import { toHex } from '../../core/crypto'
 import { OCR_MODE_EVENT, getOcrMode, setOcrMode } from '../../core/prefs'
 import type { ToolContext, ToolModule } from '../../shell/registry'
 import { button, copyButton, el } from '../../shell/ui'
@@ -85,8 +86,20 @@ const tool: ToolModule = {
     window.addEventListener(OCR_MODE_EVENT, onOcrMode)
     local.push(() => window.removeEventListener(OCR_MODE_EVENT, onOcrMode))
 
+    // What is on screen, so a refocus with the same clipboard does not run OCR and the
+    // whole render again for nothing. Images are told apart by content: two screenshots of
+    // one size can share a byte count. A failed read clears it, so refocus retries.
+    let shown = ''
+    const signature = async (items: Detected[]) =>
+      (
+        await Promise.all(
+          items.map(async (d) => (d.blob ? `${d.kind}:${toHex(new Uint8Array(await crypto.subtle.digest('SHA-256', await d.blob.arrayBuffer())))}` : `${d.kind}:${d.text}`)),
+        )
+      ).join('\n')
     const render = (items: Detected[]) => {
-      results.replaceChildren(...items.map((d) => renderItem(d, ctx)))
+      shown = ''
+      void signature(items).then((sig) => (shown = sig))
+      results.replaceChildren(...items.map((d) => renderItem(d, ctx, () => (shown = ''))))
       status.textContent = items.length ? '' : 'Clipboard is empty or holds an unsupported type.'
     }
 
@@ -118,8 +131,8 @@ const tool: ToolModule = {
     // leaves the routed results alone instead of wiping them.
     const onFocus = () => {
       if (!watch.checked) return
-      void readClipboardIfGranted(ctx.clipboard.read).then((items) => {
-        if (items.length) render(items)
+      void readClipboardIfGranted(ctx.clipboard.read).then(async (items) => {
+        if (items.length && (await signature(items)) !== shown) render(items)
       })
     }
     window.addEventListener('focus', onFocus)
@@ -172,15 +185,15 @@ async function handlePaste(dt: DataTransfer): Promise<Detected[]> {
   return detectText(dt.getData('text/plain'))
 }
 
-function renderItem(d: Detected, ctx: ToolContext): HTMLElement {
+function renderItem(d: Detected, ctx: ToolContext, failed: () => void): HTMLElement {
   const card = el('div', { class: 'card stack' }, [el('strong', { text: kindLabel(d.kind) })])
   const body = el('div', { class: 'stack' })
   card.append(body)
-  void buildActions(d, body, ctx)
+  void buildActions(d, body, ctx, failed)
   return card
 }
 
-async function buildActions(d: Detected, body: HTMLElement, ctx: ToolContext): Promise<void> {
+async function buildActions(d: Detected, body: HTMLElement, ctx: ToolContext, failed: () => void): Promise<void> {
   switch (d.kind) {
     case 'image': {
       const img = el('img', { class: 'preview', alt: 'clipboard image' }) as HTMLImageElement
@@ -207,11 +220,12 @@ async function buildActions(d: Detected, body: HTMLElement, ctx: ToolContext): P
               await ctx.clipboard.write(clean)
               ctx.toast('Image text copied')
             } catch {
-              /* clipboard blocked; the text is on the card either way */
+              failed() // clipboard blocked, often by the tab losing focus; the text is on the card
             }
           }
         } catch (e) {
           out.textContent = `OCR failed: ${(e as Error).message}`
+          failed()
         }
       }
       // Same three modes the feed's image cards use, read from the one preference owner.

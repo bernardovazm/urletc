@@ -378,7 +378,38 @@ const BRAND_OWNED: Record<string, readonly string[]> = {
   outlook: ['office.com', 'office365.com', 'live.com', 'microsoft.com'],
   onedrive: ['live.com', 'office.com', 'microsoft.com'],
   office365: ['office.com', 'microsoft.com'],
+  // First-party domains that carry the brand as one hyphenated word.
+  google: ['google-analytics.com'],
+  amazon: ['amazon-adsystem.com'],
+  apple: ['apple-dns.net', 'apple-cloudkit.com'],
+  gitlab: ['gitlab-static.net'],
+  steam: ['steam-chat.com'],
 }
+
+// Brands that are also everyday words, so a hyphenated domain with one of them in it
+// (apple-pie-recipes, chase-bank-locator, steam-cleaning) is flagged only next to a word
+// phishing kits pair with brands.
+const WORD_BRANDS = new Set(['apple', 'chase', 'steam', 'caixa', 'discord', 'telegram', 'amazon', 'adobe'])
+const LURE_TOKENS = new Set([
+  'login',
+  'signin',
+  'secure',
+  'security',
+  'verify',
+  'verification',
+  'account',
+  'accounts',
+  'support',
+  'update',
+  'billing',
+  'wallet',
+  'auth',
+  'recovery',
+  'unlock',
+  'confirm',
+  'payment',
+  'id',
+])
 
 const RISKY_EXT = ['exe', 'scr', 'msi', 'bat', 'cmd', 'apk', 'jar', 'vbs', 'hta', 'ps1', 'lnk', 'iso', 'dmg', 'pif']
 
@@ -564,6 +595,21 @@ export function analyzeUrl(input: string): Report | null {
       .join('.')
       .toLowerCase()
     const rest = `${userinfo} ${u.pathname} ${u.search}`.toLowerCase()
+    // A brand as one hyphenated word of a longer domain name (paypal-account-verify,
+    // secure-paypal) is bought for the purpose and scored nothing below, since the loop
+    // skips any brand inside the domain name. A whole token only, so first-party names that
+    // merely contain one (microsoftonline, googleusercontent) stay clear.
+    const sldL = sld.toLowerCase()
+    const tokens = sldL.split('-')
+    const lured = tokens.some((t) => LURE_TOKENS.has(t))
+    const combo = BRANDS.find((b) => sldL !== b && tokens.includes(b) && !BRAND_OWNED[b]?.includes(domain.toLowerCase()) && (lured || !WORD_BRANDS.has(b)))
+    if (combo) {
+      add(
+        'medium',
+        `Brand "${combo}" inside a different domain`,
+        `"${domain}" is not a domain this check knows belongs to ${combo}. Words added around a brand's name are a registration anyone can make, and a common way to borrow the brand's trust.`,
+      )
+    }
     for (const brand of BRANDS) {
       if (sld.toLowerCase().includes(brand)) continue
       if (BRAND_OWNED[brand]?.includes(domain.toLowerCase())) continue

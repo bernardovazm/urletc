@@ -1689,6 +1689,57 @@ with sync_playwright() as p:
           bool(rpoll(rp, lambda: 'Nothing installed yet.' in rws.inner_text(), 5)), rws.inner_text()[:300])
     rc.close()
 
+    # An app's storage shares the Workshop's 1 MiB namespace. Sets fired without awaiting
+    # each passed the quota check against the same stale total, so 30 of 100 KB all landed,
+    # and the Workshop could then not write its own list, not even to remove the app.
+    QAPP = """<pre id=o>run</pre><script>
+    const puts = []
+    for (let i = 0; i < 30; i++) puts.push(host.storage.set('k' + i, 'x'.repeat(100000)).then(() => 1, () => 0))
+    Promise.all(puts).then(async (r) => {
+      let long = 'ok'
+      try { await host.storage.set('k'.repeat(1000), 1) } catch (e) { long = 'refused' }
+      document.getElementById('o').textContent = 'stored=' + r.reduce((a, b) => a + b, 0) + ' long=' + long
+    })
+    </script>"""
+    qc, qp = rf_open()
+    qp.evaluate("location.hash = '#/t/workshop'")
+    qws = qp.locator('details.card[data-tool="workshop"]')
+    qws.locator('button', has_text='Sign & install').wait_for(timeout=15000)
+    qws.locator('select[aria-label="Tool type"]').select_option('html')
+    qws.locator('input[placeholder="Tool name"]').fill('Filler')
+    qws.locator('textarea').fill(QAPP)
+    qws.locator('button', has_text='Sign & install').click()
+    qp.locator('.modal button', has_text='Install').click()
+    _qrow = qws.locator('.card', has_text='Filler')
+    _qrow.wait_for(timeout=10000)
+    _qrow.locator('button', has_text='Run').click()
+    _qgo = qp.locator('.modal button', has_text=re.compile('Run|Open'))
+    if rpoll(qp, lambda: _qgo.count() > 0, 5):
+        _qgo.first.click()
+    _qframe = qp.frame_locator('iframe.ws-app-frame')
+    _qtxt = rpoll(qp, lambda: (lambda t: t if 'stored=' in t else None)(_qframe.locator('#o').inner_text(timeout=1000)), 30) or ''
+    _qn = int(_qtxt.split('stored=')[1].split()[0]) if 'stored=' in _qtxt else -1
+    check('workshop quota: sets in flight together cannot pass the cap', 0 <= _qn <= 10, _qtxt)
+    check('workshop quota: an oversized storage key is refused', 'long=refused' in _qtxt, _qtxt)
+    # Its data goes with it, so the removal asks first; declined, nothing changes.
+    _qdlg = []
+    qp.once('dialog', lambda d: (_qdlg.append(d.message), d.dismiss()))
+    _qrow.locator('button', has_text='Remove').click()
+    qp.wait_for_timeout(1000)
+    check('workshop quota: removing an app with saved data asks first, and No keeps it',
+          len(_qdlg) == 1 and 'data it saved' in _qdlg[0] and _qrow.count() == 1, str(_qdlg))
+    qp.once('dialog', lambda d: d.accept())
+    _qrow.locator('button', has_text='Remove').click()
+    check('workshop quota: an app that filled the quota can be removed', bool(rpoll(qp, lambda: _qrow.count() == 0, 10)),
+          ' | '.join(qp.locator('.toast').all_inner_texts()))
+    qws.locator('input[placeholder="Tool name"]').fill('After')
+    qws.locator('textarea').fill('<p>after</p>')
+    qws.locator('button', has_text='Sign & install').click()
+    qp.locator('.modal button', has_text='Install').click()
+    check('workshop quota: its data goes with it, so the next install fits',
+          bool(rpoll(qp, lambda: qws.locator('.card', has_text='After').count() == 1, 10)), ' | '.join(qp.locator('.toast').all_inner_texts()))
+    qc.close()
+
     # --- 13n. Studio (VDO.ninja-style A/V): publish controls, labeled source, layouts, stage link ---
     page.evaluate("location.hash = '#/t/studio'")
     studio = page.locator('details.card').last

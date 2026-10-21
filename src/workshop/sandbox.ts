@@ -24,7 +24,7 @@ export interface SandboxCallbacks {
   clipboardWrite(text: string): Promise<void>
   storageGet(key: string): Promise<unknown>
   storageSet(key: string, value: unknown): Promise<void>
-  netFetch(url: string, init: { method?: string; body?: string; headers?: Record<string, string> }): Promise<{ status: number; body: string }>
+  netFetch(url: string, init: { method?: string; body?: string; headers?: Record<string, string> }, signal: AbortSignal): Promise<{ status: number; body: string }>
   log(msg: string): void
 }
 
@@ -40,6 +40,46 @@ const GUEST_SCRIPT_URL = `${import.meta.env.BASE_URL}sandbox/script.html`
 const GUEST_APP_URL = `${import.meta.env.BASE_URL}sandbox/app.html`
 
 const NET_MAX_BYTES = 2_000_000
+// net.fetch calls one guest may have in flight. Each holds up to NET_MAX_BYTES on the host
+// side until it settles, and a guest can issue them without awaiting.
+const NET_MAX_INFLIGHT = 4
+// Storage keys are guest-chosen and land in the host's store as key names. Checked on set
+// only: a lookup stores nothing, and data kept under a longer key stays readable.
+const STORAGE_KEY_MAX = 256
+
+function storageKey(v: unknown): string {
+  const k = String(v)
+  if (k.length > STORAGE_KEY_MAX) throw new Error(`storage key too long (${k.length} > ${STORAGE_KEY_MAX})`)
+  return k
+}
+
+/** One guest's net.fetch calls: at most NET_MAX_INFLIGHT at a time, the rest waiting their
+ *  turn, and all aborted together when the guest is torn down, so none keeps downloading
+ *  for a sandbox that is gone. A waiting call holds no response, so waiting is free. */
+function netGate() {
+  const abort = new AbortController()
+  const waiting: Array<() => void> = []
+  let inFlight = 0
+  return {
+    async run<T>(f: (signal: AbortSignal) => Promise<T>): Promise<T> {
+      while (inFlight >= NET_MAX_INFLIGHT) {
+        await new Promise<void>((r) => waiting.push(r))
+        if (abort.signal.aborted) throw new Error('sandbox closed')
+      }
+      inFlight++
+      try {
+        return await f(abort.signal)
+      } finally {
+        inFlight--
+        waiting.shift()?.()
+      }
+    },
+    close: () => {
+      abort.abort()
+      for (const r of waiting.splice(0)) r()
+    },
+  }
+}
 
 export function runInSandbox(source: string, perms: SandboxPermissions, cb: SandboxCallbacks, timeoutMs = 30000): Promise<SandboxResult> {
   return new Promise((resolve) => {
@@ -50,10 +90,12 @@ export function runInSandbox(source: string, perms: SandboxPermissions, cb: Sand
 
     let done = false
     let started = false
+    const net = netGate()
     const finish = (r: SandboxResult) => {
       if (done) return
       done = true
       clearTimeout(timer)
+      net.close()
       window.removeEventListener('message', onMsg)
       iframe.remove()
       resolve(r)
@@ -78,14 +120,14 @@ export function runInSandbox(source: string, perms: SandboxPermissions, cb: Sand
             return reply(true, await cb.storageGet(String(d.args[0])))
           case 'storage.set':
             if (!perms.storage) throw new Error('storage not granted')
-            await cb.storageSet(String(d.args[0]), d.args[1])
+            await cb.storageSet(storageKey(d.args[0]), d.args[1])
             return reply(true, null)
           case 'net.fetch': {
             const u = String(d.args[0])
             const origin = new URL(u).origin
             if (!perms.net.includes(origin)) throw new Error(`net origin not allowed: ${origin}`)
             const init = (d.args[1] ?? {}) as { method?: string; body?: string; headers?: Record<string, string> }
-            return reply(true, await cb.netFetch(u, init))
+            return reply(true, await net.run((signal) => cb.netFetch(u, init, signal)))
           }
           default:
             throw new Error(`unknown method: ${d.method}`)
@@ -115,7 +157,11 @@ export function runInSandbox(source: string, perms: SandboxPermissions, cb: Sand
 }
 
 /** Host-mediated fetch for a sandboxed tool. Credential-free, size-capped, no off-list redirects. */
-export async function hostFetch(url: string, init: { method?: string; body?: string; headers?: Record<string, string> }): Promise<{ status: number; body: string }> {
+export async function hostFetch(
+  url: string,
+  init: { method?: string; body?: string; headers?: Record<string, string> },
+  signal?: AbortSignal,
+): Promise<{ status: number; body: string }> {
   const res = await fetch(url, {
     method: init.method ?? 'GET',
     body: init.body,
@@ -123,9 +169,33 @@ export async function hostFetch(url: string, init: { method?: string; body?: str
     credentials: 'omit',
     redirect: 'error',
     referrerPolicy: 'no-referrer',
+    signal,
   })
-  const buf = await res.arrayBuffer()
-  return { status: res.status, body: new TextDecoder().decode(buf.slice(0, NET_MAX_BYTES)) }
+  // Read only up to the cap. arrayBuffer() held the whole body before the cap applied, so a
+  // guest fetching a large file several times over could exhaust the tab.
+  const parts: Uint8Array[] = []
+  let n = 0
+  const reader = res.body?.getReader()
+  if (reader) {
+    try {
+      while (n < NET_MAX_BYTES) {
+        const { done, value } = await reader.read()
+        if (done) break
+        const take = value.subarray(0, NET_MAX_BYTES - n)
+        parts.push(take)
+        n += take.length
+      }
+    } finally {
+      void reader.cancel().catch(() => {})
+    }
+  }
+  const buf = new Uint8Array(n)
+  let at = 0
+  for (const p of parts) {
+    buf.set(p, at)
+    at += p.length
+  }
+  return { status: res.status, body: new TextDecoder().decode(buf) }
 }
 
 // ---------------------------------------------------------------------------
@@ -170,6 +240,7 @@ export function runHtmlApp(source: string, perms: SandboxPermissions, cb: AppCal
   let closed = false
   let started = false
   let lastRoomSend = 0
+  const net = netGate()
   const post = (msg: unknown) => iframe.contentWindow?.postMessage(msg, '*')
 
   const handleCap = async (d: { id: number; method: string; args: unknown[] }) => {
@@ -188,14 +259,14 @@ export function runHtmlApp(source: string, perms: SandboxPermissions, cb: AppCal
           return reply(true, await cb.storageGet(String(d.args[0])))
         case 'storage.set':
           if (!perms.storage) throw new Error('storage not granted')
-          await cb.storageSet(String(d.args[0]), d.args[1])
+          await cb.storageSet(storageKey(d.args[0]), d.args[1])
           return reply(true, null)
         case 'net.fetch': {
           const u = String(d.args[0])
           const origin = new URL(u).origin
           if (!perms.net.includes(origin)) throw new Error(`net origin not allowed: ${origin}`)
           const init = (d.args[1] ?? {}) as { method?: string; body?: string; headers?: Record<string, string> }
-          return reply(true, await cb.netFetch(u, init))
+          return reply(true, await net.run((signal) => cb.netFetch(u, init, signal)))
         }
         case 'room.send': {
           if (!perms.p2pRoom) throw new Error('p2p-room not granted')
@@ -240,6 +311,7 @@ export function runHtmlApp(source: string, perms: SandboxPermissions, cb: AppCal
     close() {
       if (closed) return
       closed = true
+      net.close()
       window.removeEventListener('message', onMsg)
       iframe.remove()
     },

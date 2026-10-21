@@ -70,6 +70,7 @@ const tool: ToolModule = {
     const incomingBox = el('div', { class: 'stack' })
     const appBox = el('div', { class: 'stack' })
     let closeApp: (() => void) | null = null // this card's one running html app (exclusive)
+    let openAppId: string | null = null
     let clearToolHandler: (() => void) | null = null
     const incoming: Manifest[] = []
     const out = el('pre', { class: 'muted', text: 'run output' })
@@ -87,6 +88,14 @@ const tool: ToolModule = {
         return false
       }
     }
+
+    // A sandboxed tool's own data lives in this namespace under its id and counts against the
+    // same quota as the installed list, so it goes when the tool does. Left behind, a tool
+    // that filled the quota kept every later install failing after it was removed.
+    const dataKeys = async (id: string) => (await ctx.storage.keys()).filter((k) => k.startsWith(`script:${id}:`) || k.startsWith(`app:${id}:`))
+    // A tool still running when it is removed (a script inside its deadline) must not write
+    // its data back after it is deleted, where nothing would ever remove it again.
+    const toolSet = (id: string, k: string, val: unknown) => (installed.some((x) => x.id === id) ? ctx.storage.set(k, val) : Promise.reject(new Error('tool removed')))
 
     const install = async (m: Manifest, tier: ReturnType<typeof trustTier>) => {
       const ok = await consent({
@@ -170,8 +179,8 @@ const tool: ToolModule = {
         clipboardRead: () => ctx.clipboard.readText(),
         clipboardWrite: (t) => ctx.clipboard.write(t),
         storageGet: (k) => ctx.storage.get(`script:${m.id}:${k}`),
-        storageSet: (k, val) => ctx.storage.set(`script:${m.id}:${k}`, val),
-        netFetch: (u, init) => hostFetch(u, init),
+        storageSet: (k, val) => toolSet(m.id, `script:${m.id}:${k}`, val),
+        netFetch: (u, init, signal) => hostFetch(u, init, signal),
         log: (msg) => {
           if (logs.length < 200) logs.push(msg)
         },
@@ -208,8 +217,8 @@ const tool: ToolModule = {
           clipboardRead: () => ctx.clipboard.readText(),
           clipboardWrite: (t) => ctx.clipboard.write(t),
           storageGet: (k) => ctx.storage.get(`app:${m.id}:${k}`),
-          storageSet: (k, val) => ctx.storage.set(`app:${m.id}:${k}`, val),
-          netFetch: (u, init) => hostFetch(u, init),
+          storageSet: (k, val) => toolSet(m.id, `app:${m.id}:${k}`, val),
+          netFetch: (u, init, signal) => hostFetch(u, init, signal),
           log: appLog,
           // Tagged with the content hash, so peers only hear it inside the app with the
           // exact body they consented to, the same trust rule as install itself.
@@ -225,11 +234,13 @@ const tool: ToolModule = {
             if (p && p.ws === 1 && p.id === m.contentHash) handle.postRoom(from, p.d)
           })
         : null
+      openAppId = m.id
       closeApp = () => {
         handle.close()
         offRelay?.()
         appBox.replaceChildren()
         closeApp = null
+        openAppId = null
       }
     }
 
@@ -250,10 +261,19 @@ const tool: ToolModule = {
             button(
               'Remove',
               () => {
-                const i = installed.findIndex((x) => x.id === m.id)
-                if (i < 0) return
-                const [gone] = installed.splice(i, 1)
-                void persist(() => installed.splice(i, 0, gone), 'Remove').then((ok) => ok && renderList())
+                void (async () => {
+                  const i = installed.findIndex((x) => x.id === m.id)
+                  if (i < 0) return
+                  // Reinstalling the same manifest used to bring its data back, so deleting
+                  // it is said out loud.
+                  const keys = await dataKeys(m.id)
+                  if (keys.length && !confirm(`Remove "${m.name}" and the data it saved on this device?`)) return
+                  if (openAppId === m.id) closeApp?.()
+                  const [gone] = installed.splice(i, 1)
+                  // Data first: in a namespace at its quota, the shorter list is what fits after it.
+                  for (const k of keys) await ctx.storage.remove(k).catch(() => {})
+                  if (await persist(() => installed.splice(i, 0, gone), 'Remove')) renderList()
+                })()
               },
               'danger',
             ),

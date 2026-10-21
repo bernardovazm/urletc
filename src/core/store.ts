@@ -382,15 +382,33 @@ async function wipeStore(): Promise<void> {
   ])
 }
 
-/** Sum the ciphertext bytes already stored under a namespace (no decryption). */
+/** Bytes one stored entry takes: its key within the namespace as well as its ciphertext, or
+ *  a tool could park unbounded data in key names next to empty values. */
+const entryBytes = (key: string, blob: AesGcmBlob) => encoder.encode(key).length + blob.ct.length + blob.iv.length
+
+/** Sum the bytes already stored under a namespace (no decryption). */
 async function namespaceBytes(ns: string): Promise<number> {
   let total = 0
   for (const k of await allKeys()) {
     if (!k.startsWith(ns)) continue
     const blob = await get<AesGcmBlob>(k, dataStore)
-    if (blob) total += blob.ct.length + blob.iv.length
+    if (blob) total += entryBytes(k.slice(ns.length), blob)
   }
   return total
+}
+
+// The quota check reads the stored total and the write lands after it, so sets in flight
+// together each passed against the same stale total: a sandboxed guest firing them without
+// awaiting wrote hundreds of MiB past the cap. Writes and removes run one at a time per
+// namespace, so a remove also lands after the sets queued before it.
+const namespaceQueue = new Map<string, Promise<unknown>>()
+function enqueue<T>(ns: string, f: () => Promise<T>): Promise<T> {
+  const done = (namespaceQueue.get(ns) ?? Promise.resolve()).then(f, f)
+  namespaceQueue.set(
+    ns,
+    done.catch(() => {}),
+  )
+  return done
 }
 
 /** Per-tool, key-prefix-isolated storage handed to a tool via its ToolContext. */
@@ -398,18 +416,23 @@ export function toolStorage(toolId: string): ToolStorage {
   const ns = `tool:${toolId}:`
   return {
     get: <T = unknown>(k: string) => getItem<T>(ns + k),
-    set: async (k: string, v: unknown) => {
+    set: (k: string, v: unknown) => {
       // Bound a tool's footprint so a `storage`-granted tool can't exhaust origin IDB. The
       // value being overwritten is released by this write, so it is not counted twice.
-      const incoming = encoder.encode(JSON.stringify(v)).length + 28 // ~AES-GCM overhead
-      const prev = await get<AesGcmBlob>(ns + k, dataStore)
-      const released = prev ? prev.ct.length + prev.iv.length : 0
-      if ((await namespaceBytes(ns)) - released + incoming > TOOL_QUOTA_BYTES) {
-        throw new Error('tool storage quota exceeded (1 MiB)')
+      const write = async () => {
+        const incoming = encoder.encode(k).length + encoder.encode(JSON.stringify(v)).length + 28 // ~AES-GCM overhead
+        const prev = await get<AesGcmBlob>(ns + k, dataStore)
+        const released = prev ? entryBytes(k, prev) : 0
+        // A write that does not grow the namespace always passes, so data stored before key
+        // bytes were counted can still be overwritten even when the recount is over.
+        if (incoming > released && (await namespaceBytes(ns)) - released + incoming > TOOL_QUOTA_BYTES) {
+          throw new Error('tool storage quota exceeded (1 MiB)')
+        }
+        await setItem(ns + k, v)
       }
-      await setItem(ns + k, v)
+      return enqueue(ns, write)
     },
-    remove: (k: string) => removeItem(ns + k),
+    remove: (k: string) => enqueue(ns, () => removeItem(ns + k)),
     keys: async () => (await allKeys()).filter((x) => x.startsWith(ns)).map((x) => x.slice(ns.length)),
   }
 }

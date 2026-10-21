@@ -180,6 +180,10 @@ const MAX_NAME_CHARS = 32 // peer display name, inbound
 const MAX_FILENAME_CHARS = 80 // received file name, inbound
 const MAX_MIME_CHARS = 100 // received file MIME type, inbound
 const MAX_INCOMING_FILES = 16 // concurrent in-flight receives
+// A receive is held in memory until it completes. Sixteen offers at the per-file ceiling
+// would ask for 32 GiB, so everything in flight together is held to one maximal file.
+const MAX_INCOMING_BYTES = MAX_FILE_CHUNKS * CHUNK
+const MAX_PENDING_BYTES = 16 * 1024 * 1024 // ciphertext buffered for a not-yet-announced fileId
 
 // --- Finishing a file -----------------------------------------------------------------
 // Chunks are fire-and-forget. Trystero stops feeding a channel that will not drain within
@@ -504,9 +508,15 @@ export function getAllSessions(): RoomSession[] {
 
 // v names what `sig` covers. A peer sending anything else signed over its ephemeral key and
 // the room alone, which verifies on any connection in the room, so it is turned away.
-const HS_VERSION = 2
+// 3: file chunks travel as binary (FileChunk). A v2 peer would handshake and then fail
+// every file, so it is turned away with the reload message instead.
+const HS_VERSION = 3
 type HsPayload = { v?: number; eph: string; idPub: string; sig: string; name: string }
-type FileChunk = { fileId: string; i: number; iv: string; ct: string }
+// The ciphertext rides as the binary payload and the rest as Trystero metadata: base64
+// inside JSON cost a third more bytes on the wire, relay quota included, and about a
+// millisecond of main-thread string work per 64 KiB chunk.
+type FileChunk = { fileId: string; i: number; iv: Uint8Array<ArrayBuffer>; ct: Uint8Array<ArrayBuffer> }
+type FileChunkMeta = { fileId: string; i: number; iv: string }
 type Envelope =
   | { t: 'chat'; id: string; text: string }
   | { t: 'name'; name: string }
@@ -544,6 +554,7 @@ interface Incoming {
 /** Chunks that arrived before their offer opened, held until it does or FILE_STALL_MS passes. */
 interface PendingFile {
   chunks: FileChunk[]
+  bytes: number
   timer: ReturnType<typeof setTimeout> | null
 }
 /** A file we sent, kept briefly so a recipient can ask for pieces that never landed. */
@@ -672,7 +683,8 @@ export async function joinRoomSession(opts: {
 
   const hs = room.makeAction<HsPayload>('hs')
   const msg = room.makeAction<SealedMessage>('msg')
-  const fdata = room.makeAction<FileChunk>('fdata')
+  const fdata = room.makeAction<Uint8Array<ArrayBuffer>>('fdata')
+  const sendChunk = (c: FileChunk, target: string | string[]) => fdata.send(c.ct, { target, metadata: { fileId: c.fileId, i: c.i, iv: bytesToB64(c.iv) } satisfies FileChunkMeta })
   const wshop = room.makeAction('wshop')
   const gameAction = room.makeAction('game')
   // Its own action rather than another Envelope case on 'msg', so the presenceOnly drop
@@ -1058,7 +1070,7 @@ export async function joinRoomSession(opts: {
     const buf = new Uint8Array(await out.file.slice(i * CHUNK, (i + 1) * CHUNK).arrayBuffer())
     const iv = randomBytes(12)
     const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: enc.encode(`${fileId}:${i}`) }, out.key, buf))
-    await fdata.send({ fileId, i, iv: bytesToB64(iv), ct: bytesToB64(ct) }, { target: peerId })
+    await sendChunk({ fileId, i, iv, ct }, peerId)
   }
 
   async function handleChunk(fileId: string, chunk: FileChunk) {
@@ -1068,7 +1080,8 @@ export async function joinRoomSession(opts: {
     try {
       // Bind (fileId, index) as AEAD additional data so chunks can't be transposed/substituted.
       const aad = enc.encode(`${fileId}:${chunk.i}`)
-      const pt = new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64ToBytes(chunk.iv), additionalData: aad }, inc.key, b64ToBytes(chunk.ct)))
+      const pt = new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: chunk.iv, additionalData: aad }, inc.key, chunk.ct))
+      if (pt.byteLength > CHUNK) return // no sender of ours puts more in one chunk
       if (inc.chunks[chunk.i]) return // a filled index is never overwritten, so a resend or a forged chunk cannot replace an accepted piece
       inc.received++
       inc.chunks[chunk.i] = pt
@@ -1135,12 +1148,22 @@ export async function joinRoomSession(opts: {
         ev.onSystem?.('⚠ Rejected an oversized or malformed file offer.')
         return
       }
+      // Imported before the caps below, so they and incoming.set run with no await between
+      // them: two offers checked across this await each saw the other's room as free.
+      const key = await aesKeyFromBytes(b64ToBytes(env.key))
       // Without this cap one authenticated peer can announce unlimited files, each
       // allocating a 32768-slot backing array. MAX_PENDING_FILES gates `pendingChunks`,
       // which is a different map and does not bound this one.
       if (incoming.size >= MAX_INCOMING_FILES) {
         closeFile(pendKey(ctx.peerId, env.fileId))
         ev.onSystem?.('⚠ Too many files in flight from peers. Rejected one.')
+        return
+      }
+      let held = env.total * CHUNK
+      for (const other of incoming.values()) held += other.total * CHUNK
+      if (held > MAX_INCOMING_BYTES) {
+        closeFile(pendKey(ctx.peerId, env.fileId))
+        ev.onSystem?.('⚠ Too much file data in flight from peers. Rejected one; it can be sent again once the others finish.')
         return
       }
       // A second offer reusing a fileId already in flight is dropped rather than allowed to
@@ -1157,7 +1180,6 @@ export async function joinRoomSession(opts: {
           .slice(0, MAX_FILENAME_CHARS) || 'file'
       const ftype = String(env.ftype ?? '').slice(0, MAX_MIME_CHARS)
       const fsize = Number.isFinite(env.size) && env.size >= 0 ? env.size : 0
-      const key = await aesKeyFromBytes(b64ToBytes(env.key))
       incoming.set(env.fileId, {
         id: env.fileId,
         from: st.info.deviceId,
@@ -1215,12 +1237,17 @@ export async function joinRoomSession(opts: {
     }
   }
 
-  fdata.onMessage = async (data, ctx) => {
+  fdata.onMessage = async (ct, ctx) => {
     if (opts.presenceOnly) return
     // Only handshake-authenticated peers may send file data (the per-file key was
     // delivered over their ratchet anyway). This and the caps below bound the buffer.
     if (!peers.get(ctx.peerId)?.channel) return
-    if (!HISTORY_ID_RE.test(String(data.fileId ?? ''))) return // same bound as the offer above
+    const meta = (ctx.metadata ?? {}) as Partial<Record<keyof FileChunkMeta, unknown>>
+    if (!(ct instanceof Uint8Array) || ct.byteLength > CHUNK + 16) return // one chunk plus its GCM tag
+    if (!HISTORY_ID_RE.test(String(meta.fileId ?? ''))) return // same bound as the offer above
+    const iv = b64ToBytes(String(meta.iv ?? ''))
+    if (iv.byteLength !== 12 || !Number.isInteger(meta.i)) return
+    const data: FileChunk = { fileId: String(meta.fileId), i: meta.i as number, iv, ct }
     const inc = incoming.get(data.fileId)
     if (inc) {
       // Every recipient of a broadcast file holds the same fileId and per-file key, so a
@@ -1238,15 +1265,16 @@ export async function joinRoomSession(opts: {
       // An offer normally lands within milliseconds of its first chunk. One that has not
       // arrived after FILE_STALL_MS failed to open or never will, so the buffer is freed
       // and the id closed rather than held until leave().
-      const entry: PendingFile = { chunks: [], timer: null }
+      const entry: PendingFile = { chunks: [], bytes: 0, timer: null }
       entry.timer = setTimeout(() => {
         if (pendingChunks.get(key) === entry) closeFile(key)
       }, FILE_STALL_MS)
       pendingChunks.set(key, entry)
       pend = entry
     }
-    if (pend.chunks.length >= MAX_PENDING_CHUNKS) return
+    if (pend.chunks.length >= MAX_PENDING_CHUNKS || pend.bytes + ct.byteLength > MAX_PENDING_BYTES) return
     pend.chunks.push(data)
+    pend.bytes += ct.byteLength
   }
 
   // Workshop tool gossip. Integrity and signature are verified before surfacing (section 7).
@@ -1782,14 +1810,14 @@ export async function joinRoomSession(opts: {
           const iv = randomBytes(12)
           const aad = enc.encode(`${fileId}:${i}`)
           const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: aad }, aesKey, buf))
-          const payload = { fileId, i, iv: bytesToB64(iv), ct: bytesToB64(ct) }
+          const payload: FileChunk = { fileId, i, iv, ct }
           try {
-            await fdata.send(payload, { target: live })
+            await sendChunk(payload, live)
           } catch {
             live = live.filter((peerId) => peers.get(peerId)?.channel)
             if (!live.length) break
             try {
-              await fdata.send(payload, { target: live })
+              await sendChunk(payload, live)
             } catch {
               /* the recipient's repair round covers what this pass could not place */
             }

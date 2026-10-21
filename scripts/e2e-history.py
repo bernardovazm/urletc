@@ -218,6 +218,30 @@ with sync_playwright() as p:
                       str(dict(zip(labels, boxes))))
                 close_connect(A)
 
+        # --- a code room is answered with that room's history alone ---
+        # "Always in code rooms" is on by now, so a joiner of another room is answered
+        # without a question. It used to get every stored record, from every room and from
+        # this person's own devices; the room it joins has had nothing said in it.
+        CODE2 = 'hist' + os.urandom(3).hex()
+        A.evaluate(f"location.hash = '#/join/{CODE2}'")
+        wait_for(lambda: f'/join/{CODE2}' in A.evaluate('location.hash'), 15, step=0.5)
+        time.sleep(3)
+        D_ctx = browser.new_context()
+        D = D_ctx.new_page()
+        D.goto(f'{BASE}/#/join/{CODE2}')
+        D.wait_for_selector('.composer', timeout=30000)
+        a_name = A.locator('.sidebar input[aria-label="This device name"]').input_value()
+        if not wait_for(lambda: handshaked(D), HANDSHAKE_TIMEOUT):
+            check('a joiner of another room is replayed nothing from this one', False, 'D never handshaked')
+        else:
+            # Same machine, so D can meet A on nearby first, which carries no history. Wait
+            # for the code-room channel as well, then for an answer that would follow it.
+            wait_for(lambda: feed(D).count(f'Secure channel established with {a_name}') >= 2, 60)
+            time.sleep(10)
+            check('a joiner of another room is replayed nothing from this one', replay_card(D).count() == 0
+                  and not any(m in feed(D) for m in MSGS), feed(D)[:200])
+        D_ctx.close()
+
         # --- deleting the store retracts what it put on screen ---
         # Last, because it empties the store the replay checks above depend on. A holds two
         # cards by now (one restored on load, one from "Show what is stored"), so this also

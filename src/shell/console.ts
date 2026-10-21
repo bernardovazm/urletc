@@ -114,7 +114,9 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   //   replayed  set on anything a peer handed us. Those are never re-served, so history
   //             cannot launder through a chain of peers and one holder's opt-out cannot
   //             be undone by the next holder along. You only ever share what you saw live.
-  type StoredRecord = HistoryRecord & { tier: Tier | 'me'; replayed?: boolean }
+  // `room` is where a received record was witnessed and `rooms` where this device's own
+  // message went, so a code room is answered with what was said in that room alone.
+  type StoredRecord = HistoryRecord & { tier: Tier | 'me'; replayed?: boolean; room?: string; rooms?: string[] }
   let transcript: StoredRecord[] = []
   try {
     const raw = await getItem<StoredRecord[]>(HISTORY_KEY)
@@ -574,11 +576,20 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   /** Enforce every cap, oldest first, newest last. Count and age are the stated policy;
    *  the byte ceiling is the backstop, since 500 messages at the 4000-character inbound
    *  limit would be 2 MB in one encrypted value. */
+  // Records a peer replayed go first, whatever their timestamps: one answer of 500 records
+  // dated just now, or 65 at the size cap, otherwise pushed everything this device saw
+  // itself out of the store.
   const pruneHistory = () => {
     const cutoff = Date.now() - HISTORY_MAX_AGE_MS
-    transcript = transcript.filter((r) => r.ts >= cutoff).sort((a, b) => a.ts - b.ts)
-    if (transcript.length > HISTORY_MAX) transcript = transcript.slice(-HISTORY_MAX)
-    while (transcript.length > 1 && JSON.stringify(transcript).length > HISTORY_MAX_BYTES) transcript = transcript.slice(Math.ceil(transcript.length / 10))
+    const byTs = (a: StoredRecord, b: StoredRecord) => a.ts - b.ts
+    const fresh = transcript.filter((r) => r.ts >= cutoff)
+    let own = fresh.filter((r) => !r.replayed).sort(byTs)
+    let rep = fresh.filter((r) => r.replayed).sort(byTs)
+    const fits = () => own.length + rep.length <= HISTORY_MAX && JSON.stringify(own).length + JSON.stringify(rep).length <= HISTORY_MAX_BYTES
+    while (rep.length && !fits()) rep = rep.slice(Math.max(1, own.length + rep.length - HISTORY_MAX, Math.ceil(rep.length / 10)))
+    if (own.length > HISTORY_MAX) own = own.slice(-HISTORY_MAX)
+    while (own.length > 1 && !fits()) own = own.slice(Math.ceil(own.length / 10))
+    transcript = [...own, ...rep].sort(byTs)
   }
   /** Debounced, because a burst of backfill chunks must not re-encrypt the whole store
    *  once per chunk. Failures are swallowed: a message that reached the feed is not lost
@@ -622,12 +633,28 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     syncJumpLatest()
   }
 
+  /** The history room a tier is in right now, if it may carry history. */
+  const roomOf = (tier: Tier): string | null => (tier === 'personal' ? 'personal' : tier === 'code' && codeLabel ? `code:${codeLabel}` : null)
+  /** The history rooms this device's own message belongs to: its own devices, and the code
+   *  room it is in, joined yet or not, since the outbox delivers there once peers arrive. */
+  const openRooms = (): string[] => HISTORY_TIERS.flatMap((t) => roomOf(t) ?? [])
+
   /** What this device is willing to hand over: entries it witnessed live (never ones a
-   *  peer replayed to it) whose origin tier may be replayed at all. */
-  const shareableHistory = (): HistoryRecord[] =>
-    transcript
+   *  peer replayed to it) whose origin tier may be replayed at all. Paired devices are this
+   *  person's own and get all of it. A code room gets only what was said in that room:
+   *  answering a stranger with every stored record handed over the chat with other rooms
+   *  and the clipboard text auto-shared between this person's own devices. A paired
+   *  device's line reaches this one over the personal room and stays out too, even when
+   *  that device also said it in the code room: auto-shared clipboard text arrives the
+   *  same way and cannot be told apart from it. */
+  const shareableHistory = (tier: Tier): HistoryRecord[] => {
+    const room = roomOf(tier)
+    if (!room) return []
+    return transcript
       .filter((r) => !r.replayed && (r.tier === 'me' || HISTORY_TIERS.includes(r.tier)))
+      .filter((r) => tier === 'personal' || r.room === room || !!r.rooms?.includes(room))
       .map(({ id, deviceId, name, text, ts, kind, size }) => ({ id, deviceId, name, text, ts, kind, size }))
+  }
 
   /** Whether we answer history requests in this tier. Two switches, two defaults. */
   const sharesTo = (tier: Tier) => (tier === 'personal' ? shareToDevices : tier === 'code' ? shareToCode : false)
@@ -638,10 +665,11 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     for (const tier of HISTORY_TIERS) {
       const s = sessions.get(tier)
       if (!s) continue
+      const room = roomOf(tier) ?? undefined // fixed now, so a late answer is filed under its own room
       s.setHistory({
-        provide: sharesTo(tier) ? shareableHistory : null,
+        provide: sharesTo(tier) ? () => shareableHistory(tier) : null,
         request: askOnJoin,
-        onRecords: (recs, fromPeerId) => queueBackfill(recs, fromPeerId, tier),
+        onRecords: (recs, fromPeerId) => queueBackfill(recs, fromPeerId, tier, room),
       })
     }
   }
@@ -649,8 +677,8 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   // A backfill arrives as N chunks. Buffer them per peer and render once, so 200 replayed
   // messages are one card and not eight.
   const backfillBuf = new Map<string, { recs: HistoryRecord[]; timer: number }>()
-  function queueBackfill(recs: HistoryRecord[], fromPeerId: string, tier: Tier): void {
-    const fresh = recs.filter((r) => remember({ ...r, tier, replayed: true }))
+  function queueBackfill(recs: HistoryRecord[], fromPeerId: string, tier: Tier, room: string | undefined): void {
+    const fresh = recs.filter((r) => remember({ ...r, tier, replayed: true, room }))
     if (!fresh.length) return
     const hit = backfillBuf.get(fromPeerId)
     if (hit) {
@@ -688,7 +716,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   }
   function askToShareHistory(peerId: string, tier: Tier): void {
     if (historyPrompts.has(peerId) || historyPrompts.size >= MAX_HISTORY_PROMPTS) return
-    const records = shareableHistory()
+    const records = shareableHistory(tier)
     if (!records.length) return // nothing to offer: never nag about an empty store
     const who = mergedPeers().find((x) => x.peer.peerId === peerId)?.peer.name ?? 'a device'
     const n = records.length
@@ -706,7 +734,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
         // stored at the moment of consent rather than when the question was asked.
         void sessions
           .get(tier)
-          ?.answerHistory(peerId, shareableHistory())
+          ?.answerHistory(peerId, shareableHistory(tier))
           .then((ok) => sys(ok ? `Sent ${n} earlier message${n === 1 ? '' : 's'} to ${who}.` : `Could not send earlier messages to ${who}.`))
       },
       'ghost small',
@@ -750,6 +778,14 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   /** Replayed entries render as one collapsed card, never as loose bubbles, so what was
    *  said before you arrived is never mistaken for what just arrived. Each line also
    *  carries its own date, which a live message keeps in a hover title. */
+  /** The stored transcript as feed cards: what this device saw itself, and apart from it
+   *  what peers replayed here, which carries names and times only those peers vouch for. */
+  const storedCards = () => {
+    const replayed = transcript.filter((r) => r.replayed)
+    if (replayed.length) addCard(historyCard(replayed, 'replayed here by other devices'), undefined, 'top')
+    const own = transcript.filter((r) => !r.replayed)
+    if (own.length) addCard(historyCard(own, 'stored on this device'), undefined, 'top')
+  }
   const historyCard = (recs: HistoryRecord[], from: string): HTMLElement => {
     const items = [...recs].sort((a, b) => a.ts - b.ts)
     const { card, body } = collapsibleCard([el('strong', { text: `Earlier messages (${items.length})` }), el('span', { class: 'card-from', text: from })], false)
@@ -1054,6 +1090,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
           'Send to devices',
           () => {
             const f = file()
+            const rooms = openRooms() // where it was sent from, not where this ends up when the send settles
             void sendFileAll(f)
               .catch((e: unknown) => {
                 // A peer dropping mid-file rejects the whole send, and without this the
@@ -1066,7 +1103,18 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
                 toast(n ? `Sending to ${n}...` : 'No one connected')
                 // A reference only. Bytes are never persisted: a blob URL does not survive
                 // a reload, and re-sending megabytes to every late joiner is not history.
-                if (n) remember({ id: crypto.randomUUID(), deviceId: selfDeviceId(), name: displayName, text: f.name, ts: Date.now(), kind: 'file', size: f.size, tier: 'me' })
+                if (n)
+                  remember({
+                    id: crypto.randomUUID(),
+                    deviceId: selfDeviceId(),
+                    name: displayName,
+                    text: f.name,
+                    ts: Date.now(),
+                    kind: 'file',
+                    size: f.size,
+                    tier: 'me',
+                    rooms,
+                  })
               })
           },
           'ghost',
@@ -2299,7 +2347,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     const id = crypto.randomUUID()
     const ts = Date.now()
     const node = chatCard({ id, peerId: 'self', deviceId: selfDeviceId(), name: `${displayName} (you)`, text, ts, mine: true })
-    remember({ id, deviceId: selfDeviceId(), name: displayName, text, ts, kind: 'chat', tier: 'me' })
+    remember({ id, deviceId: selfDeviceId(), name: displayName, text, ts, kind: 'chat', tier: 'me', rooms: openRooms() })
     const found = p2pReady ? chatCodeCandidate(text) : null
     const c = found && found.code !== codeLabel ? found : null
     // Never switch rooms under people who are in the current one: they would lose you
@@ -2455,7 +2503,9 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   }
 
   // ---------- sessions ----------
-  const makeEvents = (tier: Tier): SessionEvents => ({
+  // The history room is fixed when the session is made: an event arriving late from a code
+  // room already left would otherwise be filed under the room joined after it.
+  const makeEvents = (tier: Tier, histRoom = roomOf(tier) ?? undefined): SessionEvents => ({
     onRoster: (list) => {
       if (!sessions.has(tier)) return // late event from a session we already left
       rosters.set(tier, list)
@@ -2470,7 +2520,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     },
     onChat: (m) => {
       if (dropped.has(m.deviceId)) return
-      remember({ id: m.id, deviceId: m.deviceId, name: m.name, text: m.text, ts: m.ts, kind: 'chat', tier })
+      remember({ id: m.id, deviceId: m.deviceId, name: m.name, text: m.text, ts: m.ts, kind: 'chat', tier, room: histRoom })
       const node = chatCard(m)
       // A code that arrives in a peer's message always requires an explicit click,
       // never the auto-join branch the composer uses for text you typed yourself.
@@ -2493,7 +2543,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     onSystem: (t) => sys(t),
     onFileReceived: (f) => {
       if (dropped.has(f.from)) return
-      remember({ id: f.id, deviceId: f.from, name: senderLabel(f.from), text: f.name, ts: Date.now(), kind: 'file', size: f.size, tier })
+      remember({ id: f.id, deviceId: f.from, name: senderLabel(f.from), text: f.name, ts: Date.now(), kind: 'file', size: f.size, tier, room: histRoom })
       // The card owns the blob URL: the session hands it over and never revokes it, so a
       // Download link keeps working after the room that delivered the file is left.
       addCard(fileCard(f), () => URL.revokeObjectURL(f.url))
@@ -3079,7 +3129,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
                 return
               }
               close()
-              addCard(historyCard(transcript, 'stored on this device'), undefined, 'top')
+              storedCards()
             },
             'ghost',
             'Open the stored messages in the feed',
@@ -3319,7 +3369,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   }
   // What this device already holds, restored on load, so closing the tab is not the same
   // as losing the thread. Collapsed and at the top, exactly like a peer's backfill.
-  if (!stageView && transcript.length) addCard(historyCard(transcript, 'stored on this device'), undefined, 'top')
+  if (!stageView && transcript.length) storedCards()
 
   // ---------- Studio controller ----------
   // Implements the seam declared in studio.ts so the Studio tool (a lazy module) can drive

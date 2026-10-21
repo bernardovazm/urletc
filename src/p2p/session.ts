@@ -691,7 +691,9 @@ export async function joinRoomSession(opts: {
   let historyRecords: ((records: HistoryRecord[], fromPeerId: string) => void) | null = null
   const historyServed = new Set<string>() // peers already answered; one answer each, ever
   const historyPending = new Set<string>() // peers that asked while no provider existed
-  const historyAsked = new Set<string>() // peers we asked; only these may hand us records
+  // Peers we asked, and when. Only these may hand us records, and only records from before
+  // the question: history is what was said before we arrived.
+  const historyAsked = new Map<string, number>()
   const historyTaken = new Map<string, number>() // records accepted per peer, capped
 
   const emitRoster = () => ev.onRoster?.([...peers.values()].map((p) => p.info))
@@ -1363,7 +1365,8 @@ export async function joinRoomSession(opts: {
     if (env.t !== 'hres') return
     // A pull and never a push. Records from a peer we did not ask are dropped, so no peer
     // can seed our feed, or our own future replays, on its own initiative.
-    if (!historyRecords || !historyAsked.has(ctx.peerId)) return
+    const askedAt = historyAsked.get(ctx.peerId)
+    if (!historyRecords || askedAt === undefined) return
     const taken = historyTaken.get(ctx.peerId) ?? 0
     if (taken >= MAX_HISTORY_ITEMS) return
     const raw = Array.isArray(env.items) ? env.items.slice(0, MAX_HISTORY_CHUNK) : []
@@ -1371,7 +1374,9 @@ export async function joinRoomSession(opts: {
     for (const item of raw) {
       if (taken + clean.length >= MAX_HISTORY_ITEMS) break
       const rec = sanitizeHistory(item)
-      if (rec) clean.push(rec)
+      // The two clocks differ, so the same slack sanitizeHistory allows. A record within it
+      // that was also seen live is a duplicate by id, and remember() drops it.
+      if (rec && rec.ts <= askedAt + MAX_HISTORY_FUTURE_MS) clean.push(rec)
     }
     if (!clean.length) return
     historyTaken.set(ctx.peerId, taken + clean.length)
@@ -1400,7 +1405,7 @@ export async function joinRoomSession(opts: {
   async function askHistory(peerId: string, st: PeerState): Promise<void> {
     if (!historyOk || !historyRequest || !st.channel) return
     if (historyAsked.has(peerId)) return
-    historyAsked.add(peerId) // set before the send; it is also the "may answer us" gate
+    historyAsked.set(peerId, Date.now()) // set before the send; it is also the "may answer us" gate
     await hist.send(await st.channel.seal(enc.encode(JSON.stringify({ t: 'hreq' } satisfies HistEnvelope))), { target: peerId })
   }
 

@@ -68,7 +68,15 @@ const TAG_SPAN = /<[a-zA-Z][^>]*>/g
 // namespaced forms such as `xlink:style` in inline SVG.
 const STYLE_ATTR = /([\s"'])(?:[a-zA-Z_][\w.-]*:)?style(\s*=)/gi
 
-const neutralize = (html: string) => html.replace(/<(\/?)(script|style)\b/gi, '<$1x-strip-$2').replace(TAG_SPAN, (tag) => tag.replace(STYLE_ATTR, '$1x-strip-style$2'))
+// The input is remote (mail bodies, clipboard text/html), so both passes stay linear. A
+// TAG_SPAN attempt with no '>' after it scans to the end of the input, once per '<', which
+// took seconds on "<a<a<a...". No span can close past the last '>', so that tail is left
+// out of the pass and every remaining attempt matches.
+const neutralize = (html: string) => {
+  const s = html.replace(/<(\/?)(script|style)\b/gi, '<$1x-strip-$2')
+  const end = s.lastIndexOf('>') + 1
+  return s.slice(0, end).replace(TAG_SPAN, (tag) => tag.replace(STYLE_ATTR, '$1x-strip-style$2')) + s.slice(end)
+}
 
 // textContent joins elements with nothing between them, so minified markup such as
 // "<td>Your code</td><td>483920</td>" read as "Your code483920". The inert document has no
@@ -113,8 +121,10 @@ export function stripHtml(html: string): string {
   const doc = new DOMParser().parseFromString(source, 'text/html')
   for (const node of doc.body.querySelectorAll(NON_TEXT)) node.remove()
   breakBlocks(doc.body)
+  // The lookbehind starts a match only at the head of a run. Without it a long run that
+  // does not end a line is rescanned from every one of its characters.
   return (doc.body.textContent ?? '')
-    .replace(/[ \t]+$/gm, '')
+    .replace(/(?<![ \t])[ \t]+$/gm, '')
     .replace(/\n{3,}/g, '\n\n')
     .trim()
 }

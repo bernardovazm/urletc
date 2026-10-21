@@ -569,6 +569,15 @@ with sync_playwright() as p:
     hs_csp = [l for l in logs[hs_before:] if 'content security policy' in l.lower()]
     check('html-strip: style attributes do not reach the style-src sink', not hs_csp,
           ' | '.join(hs_csp[:2])[:200])
+    # Mail bodies and clipboard text/html reach stripHtml uncapped, so its regex passes must
+    # stay linear. A whitespace run that does not end a line and a '<' with no '>' after it
+    # each took seconds at 40k characters, and minutes at this size.
+    hs.locator('textarea').evaluate("(t) => { t.value = '<p>' + ' '.repeat(200000) + 'x</p>' + '<a'.repeat(100000) }")
+    hs_t = page.evaluate('performance.now()')
+    hs.locator('button', has_text='Strip to text').click()
+    hs_big = hs.locator('pre').inner_text().strip()
+    hs_ms = page.evaluate('performance.now()') - hs_t
+    check('html-strip: hostile 400 KB input strips in linear time', hs_big == 'x' and hs_ms < 3000, f'{hs_ms:.0f} ms, {hs_big[:40]!r}')
 
     # --- 12. sidebar groups collapsible (sidebar starts collapsed, so open it first) ---
     page.locator('.topbar button[title*="devices & people"]').click()

@@ -3386,6 +3386,13 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
         tile.recUrl = URL.createObjectURL(blob)
         const a = el('a', { href: tile.recUrl, download: `studio-${tile.kind}-${new Date().toISOString().replace(/[:.]/g, '-')}.webm` }) as HTMLAnchorElement
         a.click()
+        // A recording ended by the tile going away stops after removeStageTile revoked the
+        // old URL, and nothing would revoke this one. Held long enough for the download.
+        if (!stageTiles.includes(tile)) {
+          const url = tile.recUrl
+          tile.recUrl = ''
+          window.setTimeout(() => URL.revokeObjectURL(url), 60_000)
+        }
         notifyStage()
       }
       rec.start()

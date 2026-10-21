@@ -27,6 +27,9 @@ const MAX_PTS = 1200 // flat numbers, meaning 600 points per stroke
 // Points across the whole document. MAX_OPS strokes at MAX_PTS each would be 3.6M numbers
 // repainted every frame, so peers' oldest marks go first once this is passed.
 const MAX_DOC_PTS = 400_000
+// Text across the whole document, measured and filled on every repaint. MAX_OPS text marks
+// at MAX_TEXT were 900k characters a frame, outside the point budget above.
+const MAX_DOC_CHARS = 30_000
 // A full state answer is up to MAX_OPS ops; a peer gets at most one per window, so a
 // repeated hello cannot make this device serialise and queue the document again and again.
 const STATE_ANSWER_MS = 5000
@@ -152,12 +155,21 @@ function sanitizeOp(v: unknown): Op | null {
  *  peer filling the board cannot erase what was drawn here while any of theirs is left. */
 function trim(): void {
   let pts = 0
-  for (const op of ops.values()) if (op.kind === 'stroke') pts += op.pts.length
+  let chars = 0
+  for (const op of ops.values()) {
+    if (op.kind === 'stroke') pts += op.pts.length
+    else chars += op.text.length
+  }
   for (const own of [false, true]) {
     for (const [id, op] of ops) {
-      if (ops.size <= MAX_OPS && pts <= MAX_DOC_PTS) return
+      const overOps = ops.size > MAX_OPS
+      if (!overOps && pts <= MAX_DOC_PTS && chars <= MAX_DOC_CHARS) return
       if ((authors.get(id) === SELF) !== own) continue
+      // Only a mark that brings an exceeded budget down goes: too much text must not take
+      // strokes with it, and too many points must not take text.
+      if (!overOps && (op.kind === 'stroke' ? pts <= MAX_DOC_PTS : chars <= MAX_DOC_CHARS)) continue
       if (op.kind === 'stroke') pts -= op.pts.length
+      else chars -= op.text.length
       ops.delete(id)
       authors.delete(id)
     }

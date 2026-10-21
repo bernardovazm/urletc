@@ -2197,11 +2197,21 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     // ask whether a Clipboard card is already open before it considers opening another.
     card.dataset.tool = m.id
     body.append(container)
-    addCard(card, () => mod?.deactivate?.(container))
+    // A card removed while its chunk loads or its activate awaits has nothing to deactivate
+    // yet, so the module is held only once it is live, and a late removal is caught after.
+    // Activating regardless left the Whiteboard subscribed and polling on a detached card.
+    let removed = false
+    addCard(card, () => {
+      removed = true
+      mod?.deactivate?.(container)
+    })
     try {
       const loaded = await m.load()
-      mod = 'default' in loaded ? loaded.default : loaded
-      await mod.activate(container, createContext(m))
+      if (removed) return
+      const tool = 'default' in loaded ? loaded.default : loaded
+      await tool.activate(container, createContext(m))
+      if (removed) tool.deactivate?.(container)
+      else mod = tool
     } catch (e) {
       container.append(el('pre', { text: `Failed: ${(e as Error).message}` }))
     }

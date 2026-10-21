@@ -273,11 +273,20 @@ function postal(region: Region): string {
 const postalLabel = (region: Region) => (region === 'br' ? 'CEP' : region === 'us' ? 'ZIP' : region === 'uk' ? 'Postcode' : 'Postal code')
 
 // --- universal dev values ---
+/** A uniform index below n from the CSPRNG. Rejection sampling: `b % n` over bytes favours
+ *  the first 256 % n values whenever n does not divide 256. */
+function cryptoIndex(n: number): number {
+  const limit = 2 ** 32 - (2 ** 32 % n)
+  const buf = new Uint32Array(1)
+  do crypto.getRandomValues(buf)
+  while (buf[0] >= limit)
+  return buf[0] % n
+}
 function password(len = 16): string {
   const pool = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789!@#$%&*-_+='
-  return [...crypto.getRandomValues(new Uint8Array(len))].map((b) => pool[b % pool.length]).join('')
+  return Array.from({ length: len }, () => pool[cryptoIndex(pool.length)]).join('')
 }
-const pin = () => String(crypto.getRandomValues(new Uint32Array(1))[0] % 1000000).padStart(6, '0')
+const pin = () => String(cryptoIndex(1000000)).padStart(6, '0')
 
 /** 16-digit test card (Visa-style prefix 4) with a valid Luhn check digit. */
 function creditCard(): string {

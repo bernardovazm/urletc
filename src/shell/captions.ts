@@ -130,6 +130,7 @@ export function startCaptions(stream: MediaStream, onLine: (text: string) => voi
   const run = async (blob: Blob) => {
     try {
       const audio = await decodeToMono16k(blob)
+      if (stopped) return // ended while decoding: transcribing now would respawn the worker
       let rms = 0
       for (let i = 0; i < audio.length; i++) rms += audio[i] * audio[i]
       rms = Math.sqrt(rms / Math.max(1, audio.length))

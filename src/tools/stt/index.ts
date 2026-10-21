@@ -109,6 +109,7 @@ const tool: ToolModule = {
       status.textContent = 'Decoding audio...'
       try {
         const audio = await decodeToMono16k(blob)
+        if (torn) return // closed while decoding: transcribing now would respawn the worker
         const text = await transcribe(audio, modelSel.value, langSel.value, (s) => {
           status.textContent = s
         })

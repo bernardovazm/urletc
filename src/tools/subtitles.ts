@@ -88,9 +88,13 @@ export function parseSubtitles(input: string): Parsed {
     while (head < lines.length && lines[head].trim() !== '') head++ // the header block ends at the first blank line
     // NOTE / STYLE / REGION blocks carry no cue. Blanked in place rather than removed, so
     // the line numbers reported back still point at the same lines of the input file.
+    // Only at the start of a block: a cue text line that begins with upper-case NOTE, STYLE
+    // or REGION ("NOTE TO SELF") is text, and blanking from it ran through its timing line
+    // into the cues after it. A timing line
+    // is never consumed, so a block missing its closing blank line stops there too.
     for (let i = head; i < lines.length; i++) {
-      if (!/^(NOTE|STYLE|REGION)\b/.test(lines[i].trim())) continue
-      while (i < lines.length && lines[i].trim() !== '') lines[i++] = ''
+      if (lines[i - 1]?.trim() !== '' || !/^(NOTE|STYLE|REGION)\b/.test(lines[i].trim())) continue
+      while (i < lines.length && lines[i].trim() !== '' && !lines[i].includes(SEP)) lines[i++] = ''
     }
   }
 

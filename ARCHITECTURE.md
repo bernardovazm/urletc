@@ -1050,8 +1050,17 @@ self-hosted coturn; Double-Ratchet upgrade if the threat model escalates.
   sections 2 and 10, applied to the *guest*. Fixed: the guest bootstrap poisons
   `RTCPeerConnection`, `webkitRTCPeerConnection`, `mozRTCPeerConnection` and `RTCDataChannel`,
   which is browser-enforced and CSP-independent, before any untrusted source runs
-  (`src/workshop/sandbox.ts`). Per-tool IndexedDB is also quota-capped at 1 MiB so a
-  `storage`-granted tool cannot exhaust origin storage.
+  (`src/workshop/sandbox.ts`). Poisoning reaches one realm only, and a child frame is a realm
+  of its own: an `<iframe srcdoc>` the guest inserts gets a working `RTCPeerConnection`, and
+  CSP stops neither srcdoc nor `about:`/`javascript:` navigations (Chromium also ignores the
+  CSP3 `webrtc` directive). So the guest gets no frames: a `MutationObserver` detaches any
+  inserted `iframe`/`frame`/`object`/`embed` before its navigation can commit, using DOM
+  methods captured before untrusted code runs. Every shadow root `attachShadow` creates is
+  watched the same way, so web components keep working; `setHTMLUnsafe`, `parseHTMLUnsafe`
+  (declarative shadow roots) and `document.open/write` are refused because they would place
+  an insertion where the observer does not look. Apps lose `<object>`/`<embed>` with it.
+  Per-tool IndexedDB is also quota-capped at 1 MiB, counting key bytes, with writes
+  serialised per namespace, so a `storage`-granted tool cannot exhaust origin storage.
 - **COEP interaction is real.** `require-corp` breaks cross-origin embeds, so the default is
   `credentialless`. ffmpeg.wasm multithread needs cross-origin isolation, so the app ships its
   singlethread core and STT and OCR survive COEP relaxation `[v]`. Trusted Types is

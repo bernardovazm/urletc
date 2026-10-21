@@ -1740,6 +1740,52 @@ with sync_playwright() as p:
           bool(rpoll(qp, lambda: qws.locator('.card', has_text='After').count() == 1, 10)), ' | '.join(qp.locator('.toast').all_inner_texts()))
     qc.close()
 
+    # The guest's own RTCPeerConnection is poisoned, but a child frame is a realm of its own
+    # and CSP stops no srcdoc navigation, so a frame the app inserts used to open WebRTC
+    # with no net permission. Inserted by every route, none may load; the app still runs.
+    RCHILD = "<scr\" + \"ipt>try{new RTCPeerConnection();parent.postMessage('rtc-open','*')}catch(e){}</scr\" + \"ipt>"
+    RAPP = """<pre id=o>wait</pre><p id=legit>legit</p><script>
+    const res = { open: 0 }
+    addEventListener('message', (e) => { if (e.data === 'rtc-open') res.open++ })
+    const CH = "RCHILD", q = (s) => s.replace(/"/g, '&quot;')
+    const tries = {
+      create: () => { const f = document.createElement('iframe'); f.srcdoc = CH; document.body.append(f) },
+      inner: () => { const d = document.createElement('div'); d.innerHTML = '<iframe srcdoc="' + q(CH) + '"></iframe>'; document.body.append(d) },
+      tamper: () => { Object.defineProperty(NodeList.prototype, 'length', { get: () => 0 }); Element.prototype.remove = function () {}; const f = document.createElement('iframe'); f.srcdoc = CH; document.body.append(f) },
+      shadow: () => { document.body.appendChild(document.createElement('div')).attachShadow({ mode: 'closed' }).innerHTML = '<iframe srcdoc="' + q(CH) + '"></iframe>' },
+      dsd: () => { document.body.setHTMLUnsafe('<div><template shadowrootmode="open"><iframe srcdoc="' + q(CH) + '"></iframe></template></div>') },
+      write: () => { document.open(); document.write('<iframe srcdoc="' + q(CH) + '"></iframe>') },
+    }
+    for (const [k, f] of Object.entries(tries)) { try { f(); res[k] = 'ran' } catch (e) { res[k] = 'threw' } }
+    customElements.define('x-card', class extends HTMLElement { connectedCallback() { this.attachShadow({ mode: 'open' }).innerHTML = '<b>web component</b>' } })
+    document.body.append(document.createElement('x-card'))
+    setTimeout(() => { res.wc = document.querySelector('x-card')?.shadowRoot?.textContent || ''; document.getElementById('o').textContent = 'R ' + JSON.stringify(res) }, 4000)
+    </script>""".replace('RCHILD', RCHILD)
+    fc, fp = rf_open()
+    fp.evaluate("location.hash = '#/t/workshop'")
+    fws = fp.locator('details.card[data-tool="workshop"]')
+    fws.locator('button', has_text='Sign & install').wait_for(timeout=15000)
+    fws.locator('select[aria-label="Tool type"]').select_option('html')
+    fws.locator('input[placeholder="Tool name"]').fill('Framer')
+    fws.locator('textarea').fill(RAPP)
+    fws.locator('button', has_text='Sign & install').click()
+    fp.locator('.modal button', has_text='Install').click()
+    _frow = fws.locator('.card', has_text='Framer')
+    _frow.wait_for(timeout=10000)
+    _frow.locator('button', has_text='Run').click()
+    _fgo = fp.locator('.modal button', has_text=re.compile('Run|Open'))
+    if rpoll(fp, lambda: _fgo.count() > 0, 5):
+        _fgo.first.click()
+    _fframe = fp.frame_locator('iframe.ws-app-frame')
+    _ftxt = rpoll(fp, lambda: (lambda t: t if t.startswith('R ') else None)(_fframe.locator('#o').inner_text(timeout=1000)), 20) or ''
+    _fres = json.loads(_ftxt[2:]) if _ftxt else {}
+    check('workshop sandbox: no frame the app inserts gets WebRTC', _fres.get('open') == 0, _ftxt)
+    check('workshop sandbox: declarative shadow roots and document.write are refused',
+          _fres.get('dsd') == 'threw' and _fres.get('write') == 'threw', _ftxt)
+    check('workshop sandbox: a web component still attaches its shadow root', _fres.get('wc') == 'web component', _ftxt)
+    check('workshop sandbox: the app itself still renders and runs', bool(_ftxt) and _fframe.locator('#legit').count() == 1, _ftxt)
+    fc.close()
+
     # --- 13n. Studio (VDO.ninja-style A/V): publish controls, labeled source, layouts, stage link ---
     page.evaluate("location.hash = '#/t/studio'")
     studio = page.locator('details.card').last

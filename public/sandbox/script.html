@@ -20,6 +20,37 @@
       try { Object.defineProperty(window, n, { configurable:false, get:function(){ throw new Error('network is blocked in the sandbox'); } }); } catch(e){}
     });
   } catch(e){}
+  // A child frame is a realm of its own with an unpoisoned RTCPeerConnection, and CSP
+  // governs neither srcdoc nor about:blank navigations, so the guest gets no frames: one
+  // inserted by any route is detached at the next microtask checkpoint, before its
+  // navigation can commit. Every shadow root is watched the same way as the document.
+  // Declarative shadow roots and document.open/write would put an insertion where the
+  // observer does not look, so those are refused. Everything the observer calls is captured
+  // here, before untrusted code can redefine it.
+  try {
+    var apply = Reflect.apply, gd = Object.getOwnPropertyDescriptor;
+    var addedNodes = gd(MutationRecord.prototype, 'addedNodes').get, listLen = gd(NodeList.prototype, 'length').get;
+    var listItem = NodeList.prototype.item, nodeType = gd(Node.prototype, 'nodeType').get;
+    var matches = Element.prototype.matches, qsa = Element.prototype.querySelectorAll, detach = Element.prototype.remove;
+    var observe = MutationObserver.prototype.observe, attachShadow = Element.prototype.attachShadow;
+    var FRAMES = 'iframe,frame,object,embed,portal,fencedframe', WATCH = { childList: true, subtree: true };
+    var each = function(list, f){ for (var i = apply(listLen, list, []) - 1; i >= 0; i--) f(apply(listItem, list, [i])); };
+    var strip = function(n){
+      if (apply(nodeType, n, []) !== 1) return;
+      if (apply(matches, n, [FRAMES])) return void apply(detach, n, []);
+      each(apply(qsa, n, [FRAMES]), function(f){ apply(detach, f, []); });
+    };
+    var watcher = new MutationObserver(function(recs){ for (var r = 0; r < recs.length; r++) each(apply(addedNodes, recs[r], []), strip); });
+    apply(observe, watcher, [document, WATCH]);
+    var lock = function(o, n, v){ try { Object.defineProperty(o, n, { configurable: false, writable: false, value: v }); } catch(e){} };
+    // A new shadow root is empty, so watching it from here on covers everything put in it.
+    lock(Element.prototype, 'attachShadow', function(){ var root = apply(attachShadow, this, arguments); apply(observe, watcher, [root, WATCH]); return root; });
+    var refuse = function(o, names){ names.forEach(function(n){ lock(o, n, function(){ throw new Error(n + ' is not available in the sandbox'); }); }); };
+    refuse(Element.prototype, ['setHTMLUnsafe']);
+    if (typeof ShadowRoot !== 'undefined') refuse(ShadowRoot.prototype, ['setHTMLUnsafe']);
+    refuse(Document.prototype, ['open', 'write', 'writeln']);
+    refuse(Document, ['parseHTMLUnsafe']);
+  } catch(e){}
   var seq=0, pending={};
   function call(method, args){ return new Promise(function(res,rej){ var id=++seq; pending[id]={res:res,rej:rej}; parent.postMessage({k:'cap', id:id, method:method, args:args}, '*'); }); }
   var host = {

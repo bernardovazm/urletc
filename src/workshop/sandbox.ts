@@ -202,8 +202,8 @@ export async function hostFetch(
 // HTML apps (Workshop `type:'html'`) use the same boundary, made visible and durable.
 // The app executes in the same null-origin iframe configuration as scripts
 // (public/sandbox/app.html, `sandbox="allow-scripts"`, CSP with no network, WebRTC
-// poisoned before any untrusted code) behind the same enumerated postMessage capability
-// API, plus an opt-in `room` channel the host relays over the authenticated best-effort
+// poisoned and nested frames refused before any untrusted code) behind the same
+// enumerated postMessage capability API, plus an opt-in `room` channel the host relays over the authenticated best-effort
 // `game` channel (ARCHITECTURE section 5.4 semantics: state and scores,
 // transport-encrypted, never secrets and never the ratchet). Differences from runInSandbox, kept minimal:
 //   - the iframe is visible, mounted where the caller says, and has no deadline; teardown

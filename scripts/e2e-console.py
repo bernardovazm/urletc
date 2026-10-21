@@ -5050,6 +5050,33 @@ with sync_playwright() as p:
     nctx_a.close()
     nctx_b.close()
 
+    # --- stage view: a #/stage tab only watches ---
+    # Often opened as an OBS browser source in the same profile. Joining its room used to
+    # store it as the room this device rejoins and add it to the recent rooms.
+    def sv_chip(pg):
+        c = pg.locator('.code-chip')
+        return c.inner_text().strip() if c.count() else ''
+
+    svc = browser.new_context()
+    sv_home = 'sh' + os.urandom(3).hex()
+    sv_a = svc.new_page()
+    sv_a.goto(f'{BASE}/#/join/{sv_home}')
+    sv_a.wait_for_selector('.composer', timeout=20000)
+    poll(lambda: sv_chip(sv_a) == sv_home.upper(), 15)
+    sv_a.wait_for_timeout(1000)
+    sv_a.close()
+    sv_s = svc.new_page()
+    sv_s.goto(f'{BASE}/#/stage/sv{os.urandom(3).hex()}')
+    sv_s.wait_for_selector('.app-shell', timeout=20000)
+    sv_s.wait_for_timeout(4000)
+    sv_s.close()
+    sv_b = svc.new_page()
+    sv_b.goto(f'{BASE}/')
+    sv_b.wait_for_selector('.composer', timeout=20000)
+    _sv_got = poll(lambda: sv_chip(sv_b) or None, 15)
+    check('stage view: the room this device rejoins is left as it was', _sv_got == sv_home.upper(), repr(_sv_got))
+    svc.close()
+
     # --- handshake replay: an hs is valid only on the connection it was signed for ---
     # M, a room member, keeps the hs A sent it and replays it from a second context M2. The
     # signature used to cover only A's ephemeral key and the room, so it verified on any

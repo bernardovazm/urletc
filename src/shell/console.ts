@@ -2668,10 +2668,12 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
       codeLabel = code
       if (!(await joinTier('code', await codeRoom(code)))) codeLabel = ''
     }
-    await (codeLabel ? setItem('join-code', codeLabel) : removeItem('join-code'))
+    // A #/stage view (an OBS browser source, often in the same profile) only watches, so
+    // it leaves the room this device rejoins and its recent-rooms list as they were.
+    if (!stageView) await (codeLabel ? setItem('join-code', codeLabel) : removeItem('join-code'))
     updateCodeChip()
     syncCodeUrl()
-    if (codeLabel) await rememberRoom(codeLabel).catch(() => {}) // the list is a convenience; the join stands without it
+    if (codeLabel && !stageView) await rememberRoom(codeLabel).catch(() => {}) // the list is a convenience; the join stands without it
     return !!codeLabel
   }
 

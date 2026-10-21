@@ -1,5 +1,5 @@
 import { OCR_MODE_EVENT, getOcrMode, setOcrMode, type OcrMode } from '../core/prefs'
-import { disablePassphrase, enablePassphrase, getItem, getStoreMode, lock, removeItem, setItem, wipeAll } from '../core/store'
+import { disablePassphrase, enablePassphrase, getItem, getStoreMode, lockAll, removeItem, setItem, wipeAll } from '../core/store'
 import { checkRelay, deploymentRelay, describeRelay, parseIceServers, validateIceServers, type RelayCheck } from '../p2p/turn'
 import type { ToolModule } from '../shell/registry'
 import { currentTheme, toggleTheme } from '../shell/theme'
@@ -87,7 +87,7 @@ const tool: ToolModule = {
             button(
               'Lock now',
               () => {
-                lock()
+                lockAll()
                 location.reload()
               },
               'primary',

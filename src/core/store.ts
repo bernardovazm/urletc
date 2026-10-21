@@ -13,7 +13,7 @@
 // Primary XSS controls remain CSP and Trusted Types. Encrypted-at-rest is secondary and
 // is not an XSS control in device mode.
 
-import { clear, createStore, del, get, keys, set } from 'idb-keyval'
+import { clear, createStore, del, get, getMany, keys, set } from 'idb-keyval'
 import { aesGcmDecrypt, aesGcmEncrypt, randomBytes, type AesGcmBlob } from './crypto'
 import type { ToolStorage } from '../shell/registry'
 
@@ -160,22 +160,26 @@ async function bootStore(): Promise<{ locked: boolean }> {
  * `fromKey` may be null only when every remaining item is already under `toKey`.
  */
 async function finishSwitch(target: StoreMode, toKey: CryptoKey, fromKey: CryptoKey | null): Promise<void> {
-  for (const k of await allKeys()) {
-    const blob = await get<AesGcmBlob>(k, dataStore)
-    if (!blob) continue
-    let pt: Uint8Array<ArrayBuffer>
-    try {
-      await aesGcmDecrypt(toKey, blob)
-      continue // already re-wrapped under the target key
-    } catch {
-      if (!fromKey) throw new Error('store migration is unrecoverable (missing source key)')
+  // Twice, as a backstop for a browser without Web Locks, where sharedWrite cannot hold a
+  // write back: the second pass re-wraps one that landed during the first. Idempotent.
+  for (let pass = 0; pass < 2; pass++) {
+    for (const k of await allKeys()) {
+      const blob = await get<AesGcmBlob>(k, dataStore)
+      if (!blob) continue
+      let pt: Uint8Array<ArrayBuffer>
+      try {
+        await aesGcmDecrypt(toKey, blob)
+        continue // already re-wrapped under the target key
+      } catch {
+        if (!fromKey) throw new Error('store migration is unrecoverable (missing source key)')
+      }
+      try {
+        pt = await aesGcmDecrypt(fromKey, blob)
+      } catch {
+        continue // sealed under neither key; left in place, and getItem answers undefined for it
+      }
+      await set(k, await aesGcmEncrypt(toKey, pt), dataStore)
     }
-    try {
-      pt = await aesGcmDecrypt(fromKey, blob)
-    } catch {
-      continue // sealed under neither key; left in place, and getItem answers undefined for it
-    }
-    await set(k, await aesGcmEncrypt(toKey, pt), dataStore)
   }
   await set(MODE_ID, target, keyStore) // durable commit; `MODE` now matches every item
   if (target === 'passphrase') {
@@ -254,6 +258,13 @@ export function lock(): void {
   locked = true
 }
 
+/** Lock every tab of the app, not only this one. The others drop their key and reload onto
+ *  the unlock screen; each held the passphrase key, and the plaintext it had rendered. */
+export function lockAll(): void {
+  lock()
+  rekeyChannel?.postMessage('locked')
+}
+
 /**
  * Switch to passphrase mode, re-wrapping every stored item under a passphrase-derived
  * key. Guarded by the MIGRATION marker so an interruption is finished or rolled back on
@@ -262,8 +273,11 @@ export function lock(): void {
  */
 export function enablePassphrase(passphrase: string): Promise<void> {
   return rekey(async () => {
+    // Before the rewrite, not after it: a write another tab makes meanwhile, under the key
+    // about to be deleted, was lost. The other tabs lock and reload, and their boot waits
+    // on the store lock this switch holds.
+    rekeyChannel?.postMessage('rekeying')
     await switchToPassphrase(passphrase)
-    rekeyChannel?.postMessage('rekeyed')
   })
 }
 
@@ -287,8 +301,8 @@ async function switchToPassphrase(passphrase: string): Promise<void> {
  */
 export function disablePassphrase(): Promise<void> {
   return rekey(async () => {
+    rekeyChannel?.postMessage('rekeying') // see enablePassphrase
     await switchToDevice()
-    rekeyChannel?.postMessage('rekeyed')
   })
 }
 
@@ -303,11 +317,20 @@ async function switchToDevice(): Promise<void> {
   locked = false
 }
 
+/** Run a write holding the cross-tab store lock shared: writes in every tab run side by
+ *  side, while a key switch in any tab, which takes it exclusively, waits for the writes
+ *  already sealed under the old key to land, and every later one waits for the switch. */
+function sharedWrite(fn: () => Promise<void>): Promise<void> {
+  return 'locks' in navigator ? navigator.locks.request('wt-store', { mode: 'shared' }, fn) : fn()
+}
+
 export function setItem(key: string, value: unknown): Promise<void> {
-  return access(async () => {
-    const blob = await aesGcmEncrypt(requireKey(), encoder.encode(JSON.stringify(value)))
-    await set(key, blob, dataStore)
-  })
+  return access(() =>
+    sharedWrite(async () => {
+      const blob = await aesGcmEncrypt(requireKey(), encoder.encode(JSON.stringify(value)))
+      await set(key, blob, dataStore)
+    }),
+  )
 }
 
 /**
@@ -386,14 +409,16 @@ async function wipeStore(): Promise<void> {
  *  a tool could park unbounded data in key names next to empty values. */
 const entryBytes = (key: string, blob: AesGcmBlob) => encoder.encode(key).length + blob.ct.length + blob.iv.length
 
-/** Sum the bytes already stored under a namespace (no decryption). */
+/** Sum the bytes already stored under a namespace (no decryption). One transaction for
+ *  the namespace rather than one per key, since a growing tool write recounts it. */
 async function namespaceBytes(ns: string): Promise<number> {
+  const ks = (await allKeys()).filter((k) => k.startsWith(ns))
+  const blobs = await getMany<AesGcmBlob>(ks, dataStore)
   let total = 0
-  for (const k of await allKeys()) {
-    if (!k.startsWith(ns)) continue
-    const blob = await get<AesGcmBlob>(k, dataStore)
+  ks.forEach((k, i) => {
+    const blob = blobs[i]
     if (blob) total += entryBytes(k.slice(ns.length), blob)
-  }
+  })
   return total
 }
 

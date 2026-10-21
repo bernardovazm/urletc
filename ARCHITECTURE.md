@@ -799,7 +799,8 @@ non-extractable key in place. What each mode buys:
   XSS control is therefore CSP plus Trusted Types plus the DOMParser strip, and the threat-model table
   reflects that ordering. Encrypted IDB is not claimed to stop XSS.
 - Phase 4 passphrase-lock mode: the wrapping key is derived on unlock via PBKDF2>=600k from a
-  user passphrase and held only in memory, zeroised on lock or idle timeout. This is the mode
+  user passphrase and held only in memory, zeroised on lock, which reaches every open tab
+  (there is no idle timeout yet). This is the mode
   that raises the bar against both offline attackers and a later XSS, since a locked vault
   holds no key in memory. It is opt-in because it trades convenience, meaning re-unlock, for
   that protection.

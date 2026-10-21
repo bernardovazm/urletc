@@ -46,17 +46,22 @@ async function createIdentity(): Promise<DeviceIdentity> {
   const caps = await probeCrypto()
   if (!caps.ed25519 || !caps.x25519) throw new CryptoUnsupportedError()
 
-  let sign = await get<CryptoKeyPair>(SIGN_ID, keyStore)
-  if (!sign) {
-    sign = (await crypto.subtle.generateKey({ name: 'Ed25519' }, false, ['sign', 'verify'])) as CryptoKeyPair
-    await set(SIGN_ID, sign, keyStore)
+  // Read-or-create under a lock shared by every tab: two tabs of a fresh install would each
+  // find nothing, each store a keypair, and run under different identities until reload.
+  const loadOrMake = async (): Promise<[CryptoKeyPair, CryptoKeyPair]> => {
+    let sign = await get<CryptoKeyPair>(SIGN_ID, keyStore)
+    if (!sign) {
+      sign = (await crypto.subtle.generateKey({ name: 'Ed25519' }, false, ['sign', 'verify'])) as CryptoKeyPair
+      await set(SIGN_ID, sign, keyStore)
+    }
+    let ecdh = await get<CryptoKeyPair>(ECDH_ID, keyStore)
+    if (!ecdh) {
+      ecdh = (await crypto.subtle.generateKey({ name: 'X25519' }, false, ['deriveBits'])) as CryptoKeyPair
+      await set(ECDH_ID, ecdh, keyStore)
+    }
+    return [sign, ecdh]
   }
-
-  let ecdh = await get<CryptoKeyPair>(ECDH_ID, keyStore)
-  if (!ecdh) {
-    ecdh = (await crypto.subtle.generateKey({ name: 'X25519' }, false, ['deriveBits'])) as CryptoKeyPair
-    await set(ECDH_ID, ecdh, keyStore)
-  }
+  const [sign, ecdh] = await ('locks' in navigator ? navigator.locks.request('wt-identity', loadOrMake) : loadOrMake())
 
   const pubRaw = await crypto.subtle.exportKey('raw', sign.publicKey)
   return {

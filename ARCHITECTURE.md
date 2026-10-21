@@ -458,8 +458,12 @@ tiers that all derive the room name client-side (implemented in `src/p2p/discove
    - *Trust cost, mitigated:* CGNAT and café networks put strangers in your nearby room. They
      render as unverified peers and get no auto-shared clipboard and no local media, ever;
      explicit sends and verification remain available.
-2. **Join code (a short ID with no allocator).** A 6-char code from an unambiguous 31-letter
-   alphabet (about 2^29); both sides derive the room as `H(code)`. Speak it aloud, the other
+2. **Join code (a short ID with no allocator).** An 8-char code from an unambiguous 31-letter
+   alphabet (about 2^39.6); both sides derive the room with PBKDF2-SHA256 at 200k iterations.
+   The room id is published, hashed, as a topic on public Nostr relays, so codes face offline
+   guessing from anyone watching them, and the slow derivation is what makes that costly
+   (a full table is about a GPU-year; 6 chars behind two fast hashes took one CPU core under
+   two hours). Speak it aloud, the other
    person types it: the same effort as a TeamViewer-style ID, zero servers, sparse instead of
    enumerable. Ephemeral; leaving discards it.
 3. **Personal room (pair once, works cross-network).** A 32-byte secret shared via a one-time
@@ -880,7 +884,7 @@ short list to check a change against.
 - **Feed history is a tier capability, pulled and never pushed.** It is an allow-list of
   personal and code, never nearby and never presence, and a presenceOnly session is
   structurally incapable of carrying it. Sending into a code room is opt in and off by
-  default, because a six character code reaches whoever it was forwarded to. Records are
+  default, because a code reaches whoever it was forwarded to. Records are
   only ever accepted from a peer this device asked, so nobody can seed another device's feed, and a
   record replayed to you is never re-served, so one holder's opt-out cannot be laundered
   through the next peer along.

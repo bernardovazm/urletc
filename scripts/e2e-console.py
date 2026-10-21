@@ -27,14 +27,14 @@ def check(name, cond, extra=''):
 # stray tab on the same network, join the same room; the "0 peers" assertions then see
 # real peers and fail intermittently. Section 2b closes the other half of that hole.
 OWN_CODE = 'e2e' + os.urandom(3).hex()
-# The code typed into the composer in 13j: six characters of the generated-code alphabet
+# The code typed into the composer in 13j: eight characters of the generated-code alphabet
 # with a digit, the only shape the composer auto-joins. Random for the same reason as
 # OWN_CODE. CI runs each push to main in parallel, and with a fixed literal every
 # concurrent run met in one room, where one run's camera arrived as a tile in another
 # run's page. The alphabet is parsed from discovery.ts so the two cannot drift apart.
 CODE_ALPHABET = re.search(r"const CODE_ALPHABET = '([a-z0-9]+)'", io.open(
     os.path.join(os.path.dirname(__file__), '..', 'src', 'p2p', 'discovery.ts'), encoding='utf-8').read()).group(1)
-TYPED_CODE = 'q7' + ''.join(CODE_ALPHABET[b % len(CODE_ALPHABET)] for b in os.urandom(4))
+TYPED_CODE = 'q7' + ''.join(CODE_ALPHABET[b % len(CODE_ALPHABET)] for b in os.urandom(6))
 
 
 def tool_ids():
@@ -266,7 +266,7 @@ with sync_playwright() as p:
     try:
         page.wait_for_selector('button.code-chip:not(.hidden)', timeout=15000)
         code_text = page.locator('button.code-chip').inner_text().strip()
-        check('code chip shows auto-generated code', re.fullmatch(r'[2-9A-Z]{6}', code_text) is not None, code_text)
+        check('code chip shows auto-generated code', re.fullmatch(r'[2-9A-Z]{8}', code_text) is not None, code_text)
         page.locator('button.code-chip').click()
         clip = clip_after(page, lambda t: t.upper() == code_text)
         check('code chip click copies code', clip.upper() == code_text, clip)

@@ -16,7 +16,7 @@ Live: [urletc.vercel.app](https://urletc.vercel.app)
   channel. Everything runs on the device except the disposable email and the link
   shortener, which are labelled as such in the tool list; model weights and blocklist
   feeds download from their sources and never carry anything you typed.
-- Discovery works over same-network peers, a six character code for anyone anywhere, or a
+- Discovery works over same-network peers, an eight character code for anyone anywhere, or a
   permanent pairing between your own devices. The presence list is opt-in.
 - Text and files are end to end encrypted with a per-session HKDF ratchet for forward
   secrecy. Audio, video and screen use the browser's own DTLS-SRTP transport.

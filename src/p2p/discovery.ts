@@ -81,15 +81,21 @@ export function presenceRoom(): Promise<{ roomId: string; password: string }> {
   return derivedRoom('global', 'v1')
 }
 
-// No 0/1/o/i/l, so a code is unambiguous read aloud or typed. 6 chars give about 2^29
-// combinations, sparse enough for an ephemeral rendezvous at this user count, and the
-// content layer is protected by the authenticated E2EE handshake regardless.
+// No 0/1/o/i/l, so a code is unambiguous read aloud or typed. The room a code names is
+// published, hashed, as a topic on public Nostr relays, so anyone watching them can test
+// candidate codes offline: 6 characters (2^29.7) behind two fast hashes fell to one core
+// in under two hours, or to a lookup table for every room at once. 8 characters (2^39.6)
+// behind PBKDF2 at CODE_KDF_ITERATIONS put a table at about a GPU-year.
 const CODE_ALPHABET = '23456789abcdefghjkmnpqrstuvwxyz'
+export const CODE_LENGTH = 8
+const CODE_KDF_ITERATIONS = 200_000
 
 export function generateJoinCode(): string {
-  const bytes = randomBytes(6)
   let code = ''
-  for (const b of bytes) code += CODE_ALPHABET[b % CODE_ALPHABET.length]
+  while (code.length < CODE_LENGTH) {
+    // Rejection sampling: 256 is not a multiple of 31, so b % 31 favoured the first letters.
+    for (const b of randomBytes(CODE_LENGTH)) if (b < 248 && code.length < CODE_LENGTH) code += CODE_ALPHABET[b % CODE_ALPHABET.length]
+  }
   return code
 }
 
@@ -97,6 +103,25 @@ export function normalizeJoinCode(raw: string): string {
   return raw.toLowerCase().replace(/[^a-z0-9]/g, '')
 }
 
+// One derivation per code per page: every rejoin of the same room would otherwise pay the
+// KDF again.
+const codeRooms = new Map<string, Promise<{ roomId: string; password: string }>>()
+
+/** The room a join code names, derived slowly on purpose (see CODE_ALPHABET). Codes chosen
+ *  by hand, often words, are the weakest, and get the same cost per guess. */
 export function codeRoom(code: string): Promise<{ roomId: string; password: string }> {
-  return derivedRoom('code', normalizeJoinCode(code))
+  const seed = normalizeJoinCode(code)
+  let room = codeRooms.get(seed)
+  if (!room) {
+    room = (async () => {
+      const base = await crypto.subtle.importKey('raw', enc.encode(seed), 'PBKDF2', false, ['deriveBits'])
+      // One 256-bit block: a second block doubles the cost here and not for an attacker,
+      // who needs only the room id to test a guess.
+      const bits = new Uint8Array(await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt: enc.encode('wt|code|v2'), iterations: CODE_KDF_ITERATIONS }, base, 256))
+      return { roomId: `wt-code2-${toHex(bits.slice(0, 12))}`, password: bytesToB64(bits.slice(12)) }
+    })()
+    room.catch(() => codeRooms.delete(seed))
+    codeRooms.set(seed, room)
+  }
+  return room
 }

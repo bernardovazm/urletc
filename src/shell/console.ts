@@ -24,7 +24,7 @@ import { CryptoUnsupportedError, loadOrCreateIdentity } from '../core/identity'
 import { randomNickname } from '../core/nickname'
 import { getOcrMode } from '../core/prefs'
 import { getItem, removeItem, setItem } from '../core/store'
-import { codeRoom, generateJoinCode, nearbyRoom, normalizeJoinCode, publicIp } from '../p2p/discovery'
+import { CODE_LENGTH, codeRoom, generateJoinCode, nearbyRoom, normalizeJoinCode, publicIp } from '../p2p/discovery'
 import { ensurePersonalSecret, pairLink, personalRoom, resetPersonalSecret } from '../p2p/personal'
 import type { ChatMessage, HistoryRecord, InviteSignal, PeerTransport, ReceivedFile, RoomSession, RosterPeer, SessionEvents, TransportState } from '../p2p/session'
 import { setTransientGuard } from '../tools/close-guard'
@@ -126,8 +126,8 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   }
   const seenIds = new Set<string>(transcript.map((r) => r.id))
   // Sending and receiving are separate decisions with separate defaults. Paired devices
-  // are your own machines, so sending defaults on there. A code room defaults off: a six
-  // character code travels, and whoever it was forwarded to would otherwise get everything
+  // are your own machines, so sending defaults on there. A code room defaults off: a code
+  // travels, and whoever it was forwarded to would otherwise get everything
   // said before they arrived.
   let shareToDevices = (await getItem<boolean>('history-share-devices')) ?? true
   let shareToCode = (await getItem<boolean>('history-share-code')) ?? false
@@ -276,14 +276,14 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   }
 
   // A bare alphanumeric token in chat may be a join code ("k4mn2x"). Only the shape
-  // generateJoinCode() mints, six characters of its alphabet including a digit, may
+  // generateJoinCode() mints, CODE_LENGTH characters of its alphabet including a digit, may
   // auto-join: ordinary replies such as "10min", "1080p" or "win11" also carry a digit,
   // and auto-joining one leaves the room for a guessable one. Any other digit-bearing
   // token, and a digit-less one of the generated shape, gets an explicit Join button.
   const chatCodeCandidate = (text: string): { code: string; auto: boolean } | null => {
     const t = text.trim().toLowerCase()
     if (!/^[a-z0-9]{4,20}$/.test(t)) return null
-    const generated = /^[2-9a-hj-km-np-z]{6}$/.test(t)
+    const generated = t.length === CODE_LENGTH && /^[2-9a-hj-km-np-z]+$/.test(t)
     if (/\d/.test(t)) return { code: t, auto: generated }
     return generated ? { code: t, auto: false } : null
   }
@@ -2342,8 +2342,9 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
       autosize()
       return
     }
-    // The placeholder invites typing a join code right here: digit-bearing codes
-    // auto-join; 6-letter code-alphabet words get a Join button (could be a word).
+    // The placeholder invites typing a join code right here: a generated-shape code
+    // (CODE_LENGTH characters with a digit) auto-joins; any other digit-bearing token, and
+    // a digit-less one of that shape, gets a Join button (could be a word).
     const id = crypto.randomUUID()
     const ts = Date.now()
     const node = chatCard({ id, peerId: 'self', deviceId: selfDeviceId(), name: `${displayName} (you)`, text, ts, mine: true })

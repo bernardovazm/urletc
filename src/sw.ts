@@ -91,10 +91,16 @@ self.addEventListener('fetch', (event) => {
   // they are used rather than all being precached up front. Everything else keeps its URL
   // across deploys (public/tesseract, the icon), so it is network-first and the cached copy
   // only answers offline.
+  // Only the app's own files, by their exact path. Any other same-origin URL, and any URL
+  // with a query, passes through unstored: the host answers a query on an asset with the
+  // asset, so a Workshop tool fetching one large file under endless queries filled origin
+  // storage with copies of it.
   const url = new URL(req.url)
-  if (url.origin !== self.location.origin) return
+  if (url.origin !== self.location.origin || url.search || !STORABLE_PATH.test(url.pathname)) return
   event.respondWith(url.pathname.startsWith('/assets/') ? cacheFirst(req) : networkFirst(req))
 })
+
+const STORABLE_PATH = /^\/(?:assets|tesseract)\/[\w.-]+$|^\/(?:icon(?:-alert)?\.svg|manifest\.webmanifest)$/
 
 // Vercel answers a path it no longer has with index.html (the SPA rewrite), so a chunk an
 // old tab asks for after a deploy comes back 200 text/html. Stored under the .js URL, that

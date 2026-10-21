@@ -125,7 +125,9 @@ export function runInSandbox(source: string, perms: SandboxPermissions, cb: Sand
           case 'net.fetch': {
             const u = String(d.args[0])
             const origin = new URL(u).origin
-            if (!perms.net.includes(origin)) throw new Error(`net origin not allowed: ${origin}`)
+            // The app's own origin is never a grant: nothing there is an API for a tool, and
+            // its large assets are the cheapest way to use up the user's bandwidth.
+            if (origin === location.origin || !perms.net.includes(origin)) throw new Error(`net origin not allowed: ${origin}`)
             const init = (d.args[1] ?? {}) as { method?: string; body?: string; headers?: Record<string, string> }
             return reply(true, await net.run((signal) => cb.netFetch(u, init, signal)))
           }
@@ -264,7 +266,9 @@ export function runHtmlApp(source: string, perms: SandboxPermissions, cb: AppCal
         case 'net.fetch': {
           const u = String(d.args[0])
           const origin = new URL(u).origin
-          if (!perms.net.includes(origin)) throw new Error(`net origin not allowed: ${origin}`)
+          // The app's own origin is never a grant: nothing there is an API for a tool, and
+          // its large assets are the cheapest way to use up the user's bandwidth.
+          if (origin === location.origin || !perms.net.includes(origin)) throw new Error(`net origin not allowed: ${origin}`)
           const init = (d.args[1] ?? {}) as { method?: string; body?: string; headers?: Record<string, string> }
           return reply(true, await net.run((signal) => cb.netFetch(u, init, signal)))
         }

@@ -6322,11 +6322,17 @@ with sync_playwright() as p:
     check('cache: a chunk the server no longer has comes back as the HTML fallback', 'text/html' in (rc_ct or ''),
           str(rc_ct))
     # The store is fire-and-forget, so a later request that is stored marks the point by
-    # which the earlier one would have been.
-    rc_mark = f'/icon.svg?e2e={os.urandom(3).hex()}'
+    # which the earlier one would have been. The same file under a query is never stored:
+    # the host answers it with the file, so a tool could fill the cache with copies.
+    rc_q = f'/icon-alert.svg?e2e={os.urandom(3).hex()}'
+    rc_pg.evaluate('(u) => fetch(u).then((r) => r.text())', rc_q)
+    rc_mark = '/icon-alert.svg'
+    rc_pg.evaluate('(u) => caches.keys().then(async (ks) => { for (const k of ks) await (await caches.open(k)).delete(u) })', rc_mark)
     rc_pg.evaluate('(u) => fetch(u).then((r) => r.text())', rc_mark)
     check('cache: a later public/ response is stored',
           bool(poll(lambda: rc_pg.evaluate('(u) => caches.match(u).then((r) => !!r)', rc_mark), 5)))
+    check('cache: a URL with a query is passed through, never stored',
+          rc_pg.evaluate('(u) => caches.match(u).then((r) => !r)', rc_q))
     check('cache: that HTML is never stored under the .js URL',
           rc_pg.evaluate('(u) => caches.match(u).then((r) => !r)', rc_gone))
     rc_ctx.set_offline(True)

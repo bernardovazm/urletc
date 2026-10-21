@@ -779,8 +779,11 @@ Footguns do not become safety properties by being documented, so these are absol
   per-session HKDF ratchet for forward secrecy (section 6). 64 KiB file chunks with a fresh
   nonce and index each. Double-Ratchet, for post-compromise security, is the Phase 4 upgrade
   (section 12).
-- Peer auth: TOFU plus safety numbers (`SHA-256(min(pkA,pkB)||max)`, shown as 20 hex digits in
-  5x4 groups) with QR exchange, and a loud warning on key change.
+- Peer auth: TOFU plus safety numbers: an 80-bit fingerprint per key
+  (`SHA-256("urletc/safety-number|" || pk)`), the two sorted and shown as 40 hex digits in
+  10x4 groups, with QR exchange and a loud warning on key change. Per key, so a MITM needs
+  a second preimage for each side; one digest over both keys fell to a ~2^40 collision
+  search between two keys the MITM chooses.
 
 ### Key lifecycle for encrypted-at-rest IDB
 Encrypting IDB does not defend against an in-page XSS attacker who can use the

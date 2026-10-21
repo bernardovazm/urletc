@@ -120,12 +120,14 @@ export function hexToBytes(hex: string): Uint8Array<ArrayBuffer> {
 }
 
 /**
- * Signal-style safety number for two device public keys (ARCHITECTURE section 9). Inputs
- * are sorted, so both peers derive the same code and can compare it out-of-band to detect
- * a man-in-the-middle on the TOFU key exchange.
+ * Signal-style safety number for two device public keys (ARCHITECTURE section 9). Both
+ * peers derive the same code and compare it out-of-band to detect a man-in-the-middle on
+ * the TOFU key exchange. Each key is fingerprinted on its own, 80 bits apiece, so a MITM
+ * must forge a second preimage for each side. One 80-bit digest over both keys let it pick
+ * both of its own keys and search for a collision between them, about 2^40 work.
  */
 export async function safetyNumber(aHex: string, bHex: string): Promise<string> {
-  const [lo, hi] = aHex < bHex ? [aHex, bHex] : [bHex, aHex]
-  const digest = toHex(await sha256(new TextEncoder().encode(lo + hi)))
-  return (digest.slice(0, 20).match(/.{1,4}/g) ?? []).join('-')
+  const fp = async (hex: string) => toHex(await sha256(new TextEncoder().encode(`urletc/safety-number|${hex}`))).slice(0, 20)
+  const both = [await fp(aHex), await fp(bHex)].sort().join('')
+  return (both.match(/.{4}/g) ?? []).join('-')
 }

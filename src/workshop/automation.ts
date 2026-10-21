@@ -64,7 +64,7 @@ function safeRegexReplace(input: string, pattern: string, flags: string, replace
       }
       resolve(result)
     }
-    w.postMessage({ input, pattern, flags, replacement })
+    w.postMessage({ input, pattern, flags, replacement, max: MAX_INPUT })
   })
 }
 

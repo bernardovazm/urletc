@@ -16,6 +16,17 @@ let workerPromise: ReturnType<typeof createWorker> | null = null
 let progressCb: ((p: number) => void) | null = null
 let inFlight = 0
 let liveCards = 0
+// The worker is also started by the clipboard card and the feed with no OCR card open, and
+// a dispose skipped while a recognition ran was never retried, so the WASM heap stayed for
+// the page's life. With no card holding it, it is freed once idle this long.
+const IDLE_DISPOSE_MS = 60_000
+let idleTimer = 0
+function disposeWhenIdle(): void {
+  window.clearTimeout(idleTimer)
+  idleTimer = window.setTimeout(() => {
+    if (inFlight === 0 && liveCards === 0) void disposeOcr()
+  }, IDLE_DISPOSE_MS)
+}
 
 /** Traineddata to load, from the browser's own languages.
  *
@@ -133,7 +144,7 @@ export async function recognizeImage(image: Blob | string, onProgress?: (p: numb
     const { data } = await worker.recognize(prepared ?? image)
     return { text: data.text }
   } finally {
-    inFlight--
+    if (--inFlight === 0 && liveCards === 0) disposeWhenIdle()
   }
 }
 
@@ -151,6 +162,7 @@ export async function disposeOcr(): Promise<void> {
 const tool: ToolModule = {
   activate(container: HTMLElement, ctx: ToolContext) {
     liveCards++
+    window.clearTimeout(idleTimer)
     const file = el('input', { type: 'file', accept: 'image/*' }) as HTMLInputElement
     const status = el('div', { class: 'muted' })
     const preview = el('img', { class: 'preview', alt: 'OCR input preview' }) as HTMLImageElement
@@ -209,7 +221,8 @@ const tool: ToolModule = {
   deactivate() {
     if (--liveCards > 0) return // another card is still open, so keep the worker warm
     liveCards = 0
-    void disposeOcr()
+    if (inFlight > 0) disposeWhenIdle()
+    else void disposeOcr()
   },
 }
 

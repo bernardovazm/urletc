@@ -179,6 +179,7 @@ const tool: ToolModule = {
       const CHECK_SAYS: Record<RelayCheck, string> = {
         ok: 'The relay answered. A device that cannot be reached directly connects through it.',
         auth: 'The relay refused the username or password.',
+        error: 'The relay answered but declined to relay. Check the account and its plan.',
         unreachable: 'The relay did not answer from this network.',
       }
       const runCheck = async () => {

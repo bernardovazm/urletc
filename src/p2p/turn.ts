@@ -241,14 +241,16 @@ export function describeRelay(servers: RTCIceServer[]): string {
   return `${hosts.join(', ')} (${transports.join(', ')})`
 }
 
-export type RelayCheck = 'ok' | 'auth' | 'unreachable'
+export type RelayCheck = 'ok' | 'auth' | 'error' | 'unreachable'
 
 /**
  * Ask the relay for an allocation and report what came back. A relay-only connection
  * gathers candidates from these servers alone, so a 'relay' candidate means a working
  * allocation. A 401 is remembered rather than final: the first Allocate of a working
  * exchange is also challenged, so 'auth' is reported only when gathering ends without
- * a relay candidate.
+ * a relay candidate. Any other STUN error code (403, 437, 486, 508 and the like) means the
+ * relay answered and declined, which 'error' keeps apart from one that never answered;
+ * codes from 700 up are the browser's own, for a server it could not reach.
  */
 export function checkRelay(servers: RTCIceServer[], timeoutMs = 8000): Promise<RelayCheck> {
   let pc: RTCPeerConnection
@@ -259,6 +261,7 @@ export function checkRelay(servers: RTCIceServer[], timeoutMs = 8000): Promise<R
   }
   return new Promise((resolve) => {
     let refused = false
+    let declined = false
     let done = false
     const finish = (r: RelayCheck) => {
       if (done) return
@@ -271,14 +274,17 @@ export function checkRelay(servers: RTCIceServer[], timeoutMs = 8000): Promise<R
       }
       resolve(r)
     }
-    const timer = setTimeout(() => finish(refused ? 'auth' : 'unreachable'), timeoutMs)
+    const verdict = (): RelayCheck => (refused ? 'auth' : declined ? 'error' : 'unreachable')
+    const timer = setTimeout(() => finish(verdict()), timeoutMs)
     pc.addEventListener('icecandidate', (e) => {
       const c = e.candidate
-      if (!c) finish(refused ? 'auth' : 'unreachable')
+      if (!c) finish(verdict())
       else if (c.type === 'relay' || / typ relay( |$)/.test(c.candidate)) finish('ok')
     })
     pc.addEventListener('icecandidateerror', (e) => {
-      if ((e as RTCPeerConnectionIceErrorEvent).errorCode === 401) refused = true
+      const code = (e as RTCPeerConnectionIceErrorEvent).errorCode
+      if (code === 401) refused = true
+      else if (code >= 300 && code < 700) declined = true
     })
     pc.createDataChannel('relay-check')
     pc.createOffer()

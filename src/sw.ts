@@ -11,8 +11,8 @@ declare const self: ServiceWorkerGlobalScope & {
 const manifest = self.__WB_MANIFEST
 
 // Named after the build (FNV-1a over the precache revisions), so each deploy fills a fresh
-// cache and activate drops the previous one along with every chunk it collected. Only
-// names under this prefix are ours: transformers.js keeps its downloaded models in
+// cache; activate keeps it and the one it replaced, and drops anything older. Only names
+// under this prefix are ours: transformers.js keeps its downloaded models in
 // 'transformers-cache' on the same origin.
 const PREFIX = 'wt-precache-'
 let hash = 0x811c9dc5
@@ -52,12 +52,25 @@ self.addEventListener('install', (event) => {
   event.waitUntil(precache().then(() => self.skipWaiting()))
 })
 
+// The build this one replaced is kept, and anything older dropped. A tab with a call or a
+// share stays on the old bundle until it is idle (main.ts), and the lazy chunks and
+// workers already fetched under that build live in its cache; deleting it at activate
+// failed them. A tool no tab opened under that build is in no cache and still falls over to
+// the preloadError notice. Which build is current lives in a one-entry cache of its own,
+// read by main.ts as well.
+const META = 'wt-meta'
+const META_KEY = '/__wt-current-build'
+
 self.addEventListener('activate', (event) => {
   event.waitUntil(
-    caches
-      .keys()
-      .then((names) => Promise.all(names.filter((n) => n.startsWith(PREFIX) && n !== CACHE).map((n) => caches.delete(n))))
-      .then(() => self.clients.claim()),
+    (async () => {
+      const meta = await caches.open(META)
+      const prev = await (await meta.match(META_KEY))?.text()
+      const keep = new Set([CACHE, prev ?? CACHE])
+      for (const n of await caches.keys()) if (n.startsWith(PREFIX) && !keep.has(n)) await caches.delete(n)
+      if (prev !== CACHE) await meta.put(META_KEY, new Response(CACHE))
+      await self.clients.claim()
+    })(),
   )
 })
 
@@ -74,9 +87,20 @@ self.addEventListener('fetch', (event) => {
   // Navigations are network-first, so they get the real Vercel headers, falling back
   // offline to the cached shell with COOP/COEP re-injected.
   if (req.mode === 'navigate') {
+    // A factory reset deletes every cache, the shell included, and nothing else puts it
+    // back before the next deploy, so offline start failed until then.
+    // The build marker went with it, and without it the next activate would drop this
+    // build's cache instead of keeping it.
+    event.waitUntil(
+      (async () => {
+        if (!(await caches.match(INDEX_URL, { ...MATCH, cacheName: CACHE }))) await precache()
+        const meta = await caches.open(META)
+        if (!(await meta.match(META_KEY))) await meta.put(META_KEY, new Response(CACHE))
+      })().catch(() => {}),
+    )
     event.respondWith(
       fetch(req).catch(async () => {
-        const cached = await caches.match(INDEX_URL)
+        const cached = await fromCache(INDEX_URL)
         return cached ? withIsolation(cached) : Response.error()
       }),
     )
@@ -122,13 +146,19 @@ async function cacheFirst(req: Request): Promise<Response> {
   return res
 }
 
+/** A cached copy, from this build's cache first. The previous build's cache is kept too,
+ *  and was created first, so a match across all caches answered with the older copy. */
+async function fromCache(req: Request | string): Promise<Response | undefined> {
+  return (await caches.match(req, { ...MATCH, cacheName: CACHE })) ?? (await caches.match(req, MATCH))
+}
+
 async function networkFirst(req: Request): Promise<Response> {
   try {
     const res = await fetch(req)
     void remember(req, res.clone()).catch(() => {})
     return res
   } catch (e) {
-    const cached = await caches.match(req, MATCH)
+    const cached = await fromCache(req)
     if (cached) return cached
     throw e
   }

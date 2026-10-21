@@ -44,7 +44,7 @@ async function afterUnlock(app: HTMLElement, caps: CryptoCaps): Promise<void> {
   }
 
   await mountConsole(app, caps)
-  registerSW({ immediate: true, onNeedReload: updateWhenIdle })
+  registerSW({ immediate: true, onNeedReload: () => void bundleIsCurrent().then((current) => current || updateWhenIdle()) })
 }
 
 // After a deploy the new worker activates and claims every open tab as soon as any tab of
@@ -68,6 +68,17 @@ function reloadIfIdle(): boolean {
   if (document.visibilityState !== 'hidden' && document.querySelector('.peer-state.ok')) return false
   location.reload()
   return true
+}
+
+/** Whether the bundle this page runs is part of the build now active. The first load after a
+ *  deploy already runs the new build from the network, and its worker activating a moment
+ *  later read as an update: the page reloaded itself, or showed a false notice. */
+async function bundleIsCurrent(): Promise<boolean> {
+  const src = document.querySelector<HTMLScriptElement>('script[type="module"][src]')?.src
+  if (!src) return false
+  // sw.ts records the active build's cache name under this key at every activate.
+  const current = await (await (await caches.open('wt-meta')).match('/__wt-current-build'))?.text()
+  return !!current && !!(await (await caches.open(current)).match(src, { ignoreVary: true }))
 }
 
 let noticeShown = false
@@ -95,7 +106,8 @@ function updateWhenIdle(): void {
 
 // A lazy chunk this tab has not loaded yet is gone from the server once a newer build is
 // deployed, and Vite reports the failed import here. Only the notice is shown: an offline
-// tab lands here too, and a reload there would not help.
+// tab lands here too, and a reload there would not help. Reloading on its own would loop
+// when the chunk is missing for another reason, since a #/t/ link reopens the same tool.
 window.addEventListener('vite:preloadError', () => {
   if (navigator.onLine) showUpdateNotice()
 })

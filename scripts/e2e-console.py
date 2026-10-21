@@ -6263,6 +6263,9 @@ with sync_playwright() as p:
         _up_cam = False
     check('update: the camera is live before the update lands', _up_cam)
     up_pg.evaluate('window.__upAlive = 1')
+    # A deploy is a worker swap with this page's bundle missing from the active build. The
+    # script element has already run, so pointing it elsewhere changes nothing but that.
+    up_pg.evaluate("document.querySelector('script[type=module][src]').setAttribute('src', '/assets/index-e2e-stale.js')")
     up_pg.evaluate("() => navigator.serviceWorker.register('/sw.js?e2e=' + Math.random().toString(36).slice(2))")
     _up_toast = poll(lambda: up_pg.locator('.toast.update-ready').count() == 1, 20)
     check('update: a tab with a live camera says an update is ready', bool(_up_toast),
@@ -6285,6 +6288,21 @@ with sync_playwright() as p:
     check('update: once the camera stops, the idle tab reloads onto the update by itself', _up_reloaded)
     check('update: no page error on the update path', not up_errs, ' | '.join(up_errs)[:200])
     up_ctx.close()
+
+    # A worker of the build the page already runs is no update. The first load after a
+    # deploy runs the new build from the network, and its worker activating a moment later
+    # reloaded the idle page, back onto the unlock screen in passphrase mode.
+    cu_ctx = browser.new_context()
+    cu_pg = cu_ctx.new_page()
+    cu_pg.goto(f'{BASE}/#/join/x{os.urandom(3).hex()}')
+    cu_pg.wait_for_selector('.composer', timeout=30000)
+    cu_pg.wait_for_function("() => navigator.serviceWorker.getRegistration().then((r) => !!(r && r.active))", timeout=20000)
+    cu_pg.evaluate('window.__cuAlive = 1')
+    cu_pg.evaluate("() => navigator.serviceWorker.register('/sw.js?e2e=' + Math.random().toString(36).slice(2))")
+    cu_pg.wait_for_timeout(8000)
+    check('update: a worker of the build the page runs neither reloads it nor says an update is ready',
+          cu_pg.evaluate('window.__cuAlive') == 1 and cu_pg.locator('.toast.update-ready').count() == 0)
+    cu_ctx.close()
 
     # --- service worker: the runtime cache follows the build ---
     # One constant cache name meant nothing was ever evicted or revalidated: public/ files

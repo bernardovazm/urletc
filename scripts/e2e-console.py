@@ -2155,6 +2155,11 @@ with sync_playwright() as p:
         ('deep subdomain nesting', 'levels of subdomain'),
     ]:
         check(f'url-check: reports {label}', needle in us_text, f'missing {needle!r}')
+    # The same trick with the username left empty puts the brand in the password half.
+    _pw_text = uc_run('https://:paypal.com' + chr(64) + 'login-verify.example/', want_feeds=False)
+    check('url-check: reports a lure parked in the password half of the userinfo',
+          'login credentials in the url' in _pw_text and 'paypal.com' in _pw_text, _pw_text[:160])
+    us_text = uc_run(NASTY)
     score_badge = us.locator('.url-check-score .badge').first.inner_text().strip()
     check('url-check: scores the nasty URL as high risk',
           score_badge.split('/')[0].isdigit() and int(score_badge.split('/')[0]) >= 45, f'score={score_badge!r}')

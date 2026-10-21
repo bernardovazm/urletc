@@ -481,11 +481,14 @@ export function analyzeUrl(input: string): Report | null {
     )
   }
 
-  if (u.username) {
+  // Either half can carry the lure: in https://:paypal.com@evil.tld the username is empty
+  // and the brand is the password. Decoded, because %70aypal.com reads as paypal.com.
+  const userinfo = decodedUrl(u.password ? `${u.username}:${u.password}` : u.username)
+  if (userinfo) {
     add(
       'high',
       'Login credentials in the URL',
-      `Everything before the @ is a username, not the destination. This link goes to "${u.hostname}", while "${u.username}" is parked in front of it so the address reads like somewhere else.`,
+      `Everything before the @ is login data for the site, not the destination. This link goes to "${u.hostname}", while "${userinfo}" is parked in front of it so the address reads like somewhere else.`,
     )
   }
 
@@ -560,7 +563,7 @@ export function analyzeUrl(input: string): Report | null {
       .slice(0, Math.max(0, labels.length - suffixLen - 1))
       .join('.')
       .toLowerCase()
-    const rest = `${u.pathname} ${u.search}`.toLowerCase()
+    const rest = `${userinfo} ${u.pathname} ${u.search}`.toLowerCase()
     for (const brand of BRANDS) {
       if (sld.toLowerCase().includes(brand)) continue
       if (BRAND_OWNED[brand]?.includes(domain.toLowerCase())) continue

@@ -160,6 +160,9 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
    *  reported, since Settings can change the relay at any moment. */
   let engine: typeof import('../p2p/session') | null = null
   const peerMedia = new Map<string, HTMLMediaElement[]>()
+  // Peers muted from the roster. Showing a covered source is about the picture, so it must
+  // not give their sound back, and a stream they add later starts muted too.
+  const peerMuted = new Set<string>()
   const pendingStreams = new Map<string, Array<[MediaStream, unknown]>>()
   const localStreams = new Map<MediaStream, StreamMeta>() // own published streams and their metadata
 
@@ -914,6 +917,8 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
           if (!audible) return
           const muted = !audible.muted
           for (const m of media) if (muted || !coveredMedia.has(m)) m.muted = muted
+          if (muted) peerMuted.add(p.peerId)
+          else peerMuted.delete(p.peerId)
           showMuted(muted)
         },
         'icon sm',
@@ -1362,7 +1367,8 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     // holds the stage. `autoMaxBy` is null once the control has been pressed by hand, so
     // a share ending never undoes a state the user set.
     if (autoMaxBy === tile.id) {
-      autoMaxBy = stageTiles.find((t) => t.kind === 'screen' && t.hasVideo)?.id ?? null
+      // A covered screen never took the stage, so it cannot hold it either.
+      autoMaxBy = stageTiles.find((t) => t.kind === 'screen' && t.hasVideo && !coveredMedia.has(t.media))?.id ?? null
       if (!autoMaxBy) setStageMax(false)
     }
     // With no video left there is nothing to expand, and the tiles region, which the
@@ -1491,7 +1497,17 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
         ctl.append(pipBtn)
       }
       if (opts.stream.getAudioTracks().length && opts.peerId) {
-        const mb = button('🔊', () => (media.muted = !media.muted), 'icon sm tile-mute')
+        const peerId = opts.peerId
+        const mb = button(
+          '🔊',
+          () => {
+            media.muted = !media.muted
+            // Unmuting one of a peer's sources by hand ends the roster mute too, or the next
+            // source they share would arrive muted while the roster says they are not.
+            if (!media.muted) peerMuted.delete(peerId)
+          },
+          'icon sm tile-mute',
+        )
         // Driven by volumechange rather than by the click, because the roster row and a
         // playback start that had to fall back to muted also change `muted`.
         const syncMb = () => {
@@ -1624,6 +1640,9 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     const media = tile.media
     tile.wrap.classList.add('covered')
     media.muted = true
+    // Covering again (the setting turned back on) must reach a floating window too: it is
+    // outside the tile, so the blur does not, and the tile's PiP control is hidden.
+    if (document.pictureInPictureElement === media) void document.exitPictureInPicture().catch(() => {})
     const text = el('div', { class: 'tile-cover-text' })
     let armed = 0
     const show = button('Show', () => {
@@ -1668,7 +1687,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
       if (tile.kind === 'screen' && stageTiles.includes(tile)) screenTookStage(tile)
       notifyStage() // Studio offers recording once a source is shown
       if (soundHeld.has(media)) return // the autoplay notice gives the sound back
-      media.muted = false
+      media.muted = tile.peerId !== null && peerMuted.has(tile.peerId)
       startRemote(media)
     })
   }
@@ -1682,6 +1701,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     const tile = addStageTile({ peerId, kind, label: sourceLabel(peerId, kind), stream })
     const coverKey = needsCover(peerId)
     if (coverKey) coverTile(tile, coverKey)
+    else if (peerMuted.has(peerId)) tile.media.muted = true
     startRemote(tile.media)
     // A covered screen takes the stage only once shown (coverTile's reveal), so a stranger
     // sharing cannot rearrange the stage, or hide the feed, before anyone chose to see it.

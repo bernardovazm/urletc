@@ -223,7 +223,7 @@ const tool: ToolModule = {
     }) as HTMLInputElement
     const listEl = el('div', { class: 'stack tm-list' })
     const bodyHead = el('div', { class: 'group-label tm-subject' })
-    const bodyEl = el('pre', { class: 'tm-body' })
+    const bodyEl = el('pre', { class: 'tm-body', translate: 'yes' }) // a mail body is prose
 
     const setStatus = (t: string) => {
       status.textContent = t

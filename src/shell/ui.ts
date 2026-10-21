@@ -8,9 +8,17 @@ import type { TrustTier } from './registry'
 
 type Attrs = Record<string, unknown>
 
+// These carry machine output: hashes, base64, JSON, diffs, OCR text, workshop source.
+// html lang="en" makes the browser offer page translation to every other locale, and
+// accepting it rewrites their text in place. Form fields are left out: translation leaves
+// their values alone, and opting out would only keep placeholders untranslated. An
+// explicit `translate` attr still wins, for a pre that holds prose.
+const NO_TRANSLATE = new Set(['PRE', 'CODE', 'KBD', 'SAMP'])
+
 /** Hyperscript helper. `text` sets textContent; `on*` adds a listener. */
 export function el(tag: string, attrs: Attrs = {}, children: (Node | string)[] = []): HTMLElement {
   const node = document.createElement(tag)
+  if (NO_TRANSLATE.has(node.tagName)) node.setAttribute('translate', 'no')
   for (const [k, v] of Object.entries(attrs)) {
     if (v == null) continue
     if (k === 'class') node.className = String(v)

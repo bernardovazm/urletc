@@ -2024,6 +2024,12 @@ with sync_playwright() as p:
         check(f'{tid}: driven input produces output',
               ok, (bad[0][:110] if bad else f'output={text[:70]!r}'))
 
+    # The driven cards are still open. html lang="en" makes the browser offer translation
+    # to any other locale, and accepting it would rewrite hashes, base64 and JSON in place.
+    _mo = page.evaluate("""() => { const all = [...document.querySelectorAll('pre:not(.tm-body), code, kbd, samp')]
+        return [all.length, all.filter((e) => e.translate).map((e) => e.tagName + '.' + e.className).slice(0, 4)] }""")
+    check('machine output opts out of page translation', _mo[0] > 0 and not _mo[1], f'{_mo[0]} nodes; translatable: {_mo[1]}')
+
     # ===================== url check + shorten (driven) =====================
     # Self-contained block; nothing above is restructured. Both tools get real input and
     # are asserted on real output rather than on a card having rendered.

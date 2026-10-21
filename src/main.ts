@@ -3,6 +3,7 @@ import { registerSW } from 'virtual:pwa-register'
 
 import { probeCrypto, type CryptoCaps } from './core/crypto'
 import { initStore, unlock } from './core/store'
+import { updateHeld } from './core/update-hold'
 import { installTrustedTypes } from './core/trusted-types'
 import { importPersonalSecret } from './p2p/personal'
 import { initAttention } from './shell/attention'
@@ -54,7 +55,8 @@ async function afterUnlock(app: HTMLElement, caps: CryptoCaps): Promise<void> {
 // Read off the DOM because the state lives inside the console: a media element on a live
 // track is local or remote media, and an ok peer-state badge is a peer that messages
 // reach. A hidden tab with no media reloads even with peers, since they rejoin on their
-// own. An armed close guard would turn the reload into a prompt nobody asked for.
+// own. An armed close guard would turn the reload into a prompt nobody asked for. Work the
+// DOM does not show, a transfer in a hidden tab or a dictation, holds it via update-hold.ts.
 function liveMedia(): boolean {
   return [...document.querySelectorAll<HTMLMediaElement>('video, audio')].some(
     (m) => m.srcObject instanceof MediaStream && m.srcObject.getTracks().some((t) => t.readyState === 'live'),
@@ -62,7 +64,7 @@ function liveMedia(): boolean {
 }
 
 function reloadIfIdle(): boolean {
-  if (liveMedia() || document.documentElement.dataset.closeGuard === 'on') return false
+  if (updateHeld() || liveMedia() || document.documentElement.dataset.closeGuard === 'on') return false
   if (document.visibilityState !== 'hidden' && document.querySelector('.peer-state.ok')) return false
   location.reload()
   return true

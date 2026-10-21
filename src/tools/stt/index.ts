@@ -1,3 +1,4 @@
+import { holdUpdateWhile } from '../../core/update-hold'
 import type { ToolContext, ToolModule } from '../../shell/registry'
 import { button, consent, el, toast } from '../../shell/ui'
 
@@ -103,10 +104,12 @@ const tool: ToolModule = {
       return consented
     }
 
+    let transcribing = 0
     const runAudio = async (blob: Blob, append: boolean) => {
       if (torn) return // deactivated before or while this fired, so never respawn or prompt
       if (!(await ensureConsent())) return
       status.textContent = 'Decoding audio...'
+      transcribing++
       try {
         const audio = await decodeToMono16k(blob)
         if (torn) return // closed while decoding: transcribing now would respawn the worker
@@ -118,6 +121,8 @@ const tool: ToolModule = {
         status.textContent = 'Done.'
       } catch (e) {
         status.textContent = `Failed: ${(e as Error).message}. Video files may need the ffmpeg add-on, which is not shipped yet.`
+      } finally {
+        transcribing--
       }
     }
 
@@ -234,7 +239,11 @@ const tool: ToolModule = {
       out,
     )
 
+    // A dictation being recorded, heard or transcribed is lost to a reload, so an update
+    // waits for it. Transcribing after Stop can take minutes on a first model download.
+    const releaseUpdate = holdUpdateWhile(() => recorder?.state === 'recording' || recognition !== null || transcribing > 0)
     cleanups.set(container, () => {
+      releaseUpdate()
       torn = true
       try {
         recognition?.stop()

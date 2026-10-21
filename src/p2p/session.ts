@@ -22,6 +22,7 @@
 import { getRelaySockets, joinRoom, selfId, type Room } from 'trystero/nostr'
 import { aesKeyFromBytes, b64ToBytes, bytesToB64, deriveSharedSecret, randomBytes, safetyNumber, sha256, signEd25519, toHex, verifyEd25519 } from '../core/crypto'
 import { loadOrCreateIdentity } from '../core/identity'
+import { holdUpdateWhile } from '../core/update-hold'
 import { ManifestSchema, verifyManifest, type Manifest } from '../workshop/manifest'
 import { normalizeJoinCode } from './discovery'
 import { SecureChannel, type SealedMessage } from './ratchet'
@@ -648,6 +649,9 @@ export async function joinRoomSession(opts: {
   const peers = new Map<string, PeerState>()
   const incoming = new Map<string, Incoming>()
   const outgoing = new Map<string, Outgoing>()
+  // A reload ends every transfer: a receive in progress, or a send still in its first pass
+  // or inside the window where recipients may ask for missing pieces.
+  const releaseUpdate = holdUpdateWhile(() => incoming.size > 0 || [...outgoing.values()].some((o) => o.sending || o.expires > Date.now()))
   // Keyed `${peerId}|${fileId}`, not by fileId alone: every recipient of a broadcast file
   // shares its fileId, so a per-fileId buffer would let one peer seed another peer's entry.
   const pendingChunks = new Map<string, PendingFile>()
@@ -1834,6 +1838,7 @@ export async function joinRoomSession(opts: {
     },
 
     async leave() {
+      releaseUpdate()
       stopAdaptLoop()
       // Before room.leave() closes every connection, so a teardown we asked for is not
       // read back as a pile of failures.

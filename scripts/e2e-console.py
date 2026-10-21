@@ -4988,10 +4988,67 @@ with sync_playwright() as p:
         bcard(pa).locator('button', has_text='Pen').click()  # A was left in Text mode above
     bdraw(pa)
     check('board: the card left open still receives marks', bool(poll(lambda: bops(pb) == '1', 30)), f'B data-ops={bops(pb)!r}')
+
+    def bclose(pg):
+        it = pg.locator('.feed-item', has=pg.locator('canvas.board')).first
+        it.hover()
+        it.locator('button.del').click()
+        it.locator('button.del').click()
+        return poll(lambda: pg.locator('canvas.board').count() == 0, 5)
+
+    def bopen(pg):
+        pg.evaluate("location.hash = ''")
+        pg.evaluate("location.hash = '#/t/board'")
+        return poll(lambda: pg.locator('canvas.board').count() == 1, 15)
+
+    # The document outlives its cards. A device that drew while the peer's card was closed
+    # pushes those marks when it reopens: the peer that opened in between already counts it
+    # as seen, and its hello went nowhere while no card was open here.
+    bclose(pb)
+    bdraw(pa)
+    poll(lambda: bops(pa) == '2', 10)
+    bclose(pa)
+    bopen(pb)
+    pb.wait_for_timeout(2000)
+    bopen(pa)
+    check('board: reopening pushes the marks kept while closed', bool(poll(lambda: bops(pb) == '2', 30)),
+          f'A data-ops={bops(pa)!r} B data-ops={bops(pb)!r}')
+    # An undo the peer missed while its card was closed stays undone when the peer reopens
+    # and sends its copy back: the author repeats the delete instead of taking the mark in
+    # as one nobody may remove.
+    bclose(pb)
+    if bcard(pa).count():
+        bcard(pa).locator('button', has_text='Undo').click()
+    poll(lambda: bops(pa) == '1', 10)
+    bopen(pb)
+    check('board: a missed undo is repeated, not resurrected',
+          bool(poll(lambda: bops(pb) == '1', 30)) and not poll(lambda: bops(pa) != '1', 5),
+          f'A data-ops={bops(pa)!r} B data-ops={bops(pb)!r}')
     check('board: no page errors on A', not berrs_a, ' | '.join(berrs_a)[:200])
     check('board: no page errors on B', not berrs_b, ' | '.join(berrs_b)[:200])
     bctx_a.close()
     bctx_b.close()
+
+    # Nearby peers are anyone behind the same public IP. The board hands its document to
+    # whoever opens it, so it runs on history tiers only: two contexts that meet on nearby
+    # alone, each in a code room of its own, do not share it.
+    nctx_a, nctx_b = browser.new_context(), browser.new_context()
+    na, nb = nctx_a.new_page(), nctx_b.new_page()
+    for _pg in (na, nb):
+        _pg.goto(f'{BASE}/#/join/n{os.urandom(3).hex()}')
+        _pg.wait_for_selector('.composer', timeout=30000)
+    _nmet = poll(lambda: 'Secure channel established' in bfeed(na) and 'Secure channel established' in bfeed(nb), 150)
+    check('board nearby: two contexts meet on nearby only', bool(_nmet), f'{bfeed(na)[-120:]!r}')
+    bopen(na)
+    bdraw(na)
+    poll(lambda: bops(na) == '1', 10)
+    bopen(nb)
+    nb.wait_for_timeout(5000)
+    _nst = bcard(nb).locator('.muted.small').last.inner_text() if bcard(nb).count() else ''
+    check('board nearby: the document is not replayed to a nearby peer', bops(nb) == '0' and 'Not connected' in _nst,
+          f'B data-ops={bops(nb)!r} status={_nst!r}')
+    nctx_a.close()
+    nctx_b.close()
 
     # --- relay: a TURN relay set per device in Settings, used by every connection after ---
     # turn.invalid never resolves, so nothing is relayed and no real credential is involved.

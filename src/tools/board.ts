@@ -2,6 +2,11 @@
 // sees one document and draws or types on it at the same time, and a peer opening the
 // tool later receives the full document through hello and state messages. Transport
 // encrypted by the room password like media, and the payloads carry only coordinates.
+//
+// Handing the document to whoever opens the tool later is a replay of what was drawn
+// before they arrived, including marks relayed from third devices, so the board runs only
+// on sessions that may carry history (personal and code rooms), never on nearby, where
+// anyone behind the same public IP is a peer.
 
 // The document is module-level and shared by every open card on the page, while each
 // card keeps its own canvas, toolbar state, listeners and poll in a WeakMap entry.
@@ -19,6 +24,17 @@ type Op = StrokeOp | TextOp
 
 const MAX_OPS = 3000
 const MAX_PTS = 1200 // flat numbers, meaning 600 points per stroke
+// Points across the whole document. MAX_OPS strokes at MAX_PTS each would be 3.6M numbers
+// repainted every frame, so peers' oldest marks go first once this is passed.
+const MAX_DOC_PTS = 400_000
+// A full state answer is up to MAX_OPS ops; a peer gets at most one per window, so a
+// repeated hello cannot make this device serialise and queue the document again and again.
+const STATE_ANSWER_MS = 5000
+// Highest epoch accepted, and where Clear stops counting. Unbounded, one message at 2^53
+// stopped Clear from advancing it, since 2^53 + 1 === 2^53. A clear at an equal epoch still
+// clears, so Clear keeps working at the ceiling. Absolute rather than relative to what each
+// device has seen, or a peer could lift one device's count past what the others accept.
+const EPOCH_CEIL = 2 ** 52
 const MAX_TEXT = 300
 const MAX_ID = 40
 const STATE_BATCH = 100
@@ -78,7 +94,7 @@ const notify = () => {
 }
 
 function validEpoch(v: unknown): number | null {
-  return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : null
+  return typeof v === 'number' && Number.isSafeInteger(v) && v >= 0 && v <= EPOCH_CEIL ? v : null
 }
 
 /** Fold an inbound epoch in. Clears the local document when the peer is newer. */
@@ -109,7 +125,7 @@ function sanitizeOp(v: unknown): Op | null {
     for (let i = 0; i < r.pts.length; i++) {
       const c = Number(r.pts[i])
       if (!Number.isFinite(c)) return null
-      pts.push(clamp(c, 0, 1))
+      pts.push(round3(clamp(c, 0, 1)))
     }
     return { id: r.id, kind: 'stroke', color: r.color.toLowerCase(), width: clamp(w, MIN_WIDTH, MAX_WIDTH), pts }
   }
@@ -124,32 +140,42 @@ function sanitizeOp(v: unknown): Op | null {
       kind: 'text',
       color: r.color.toLowerCase(),
       size: clamp(s, MIN_SIZE, MAX_SIZE),
-      x: clamp(x, 0, 1),
-      y: clamp(y, 0, 1),
+      x: round3(clamp(x, 0, 1)),
+      y: round3(clamp(y, 0, 1)),
       text: r.text,
     }
   }
   return null
 }
 
-/** Insert an op from a peer, dropping the oldest when the document is full. */
-function storeRemote(op: Op, from: string): void {
-  if (!ops.has(op.id)) {
-    ops.set(op.id, op)
-    authors.set(op.id, from)
-    while (ops.size > MAX_OPS) {
-      const oldest = ops.keys().next().value
-      if (oldest === undefined) break
-      ops.delete(oldest)
-      authors.delete(oldest)
+/** Drop the oldest marks while the document is over either cap, other devices' first, so a
+ *  peer filling the board cannot erase what was drawn here while any of theirs is left. */
+function trim(): void {
+  let pts = 0
+  for (const op of ops.values()) if (op.kind === 'stroke') pts += op.pts.length
+  for (const own of [false, true]) {
+    for (const [id, op] of ops) {
+      if (ops.size <= MAX_OPS && pts <= MAX_DOC_PTS) return
+      if ((authors.get(id) === SELF) !== own) continue
+      if (op.kind === 'stroke') pts -= op.pts.length
+      ops.delete(id)
+      authors.delete(id)
     }
-  } else {
-    ops.set(op.id, op)
   }
 }
 
+/** Insert an op from a peer, dropping the oldest when the document is full. */
+function storeRemote(op: Op, from: string): void {
+  ops.set(op.id, op)
+  if (!authors.has(op.id)) authors.set(op.id, from)
+  trim()
+}
+
+const boardSessions = () => getAllSessions().filter((s) => s.historyCapable())
+const isSelfId = (id: string) => getAllSessions().some((s) => s.selfId === id)
+
 const broadcast = (payload: unknown) => {
-  for (const s of getAllSessions()) {
+  for (const s of boardSessions()) {
     try {
       s.sendGame(payload)
     } catch {
@@ -159,7 +185,7 @@ const broadcast = (payload: unknown) => {
 }
 
 const sendTargeted = (peerId: string, payload: unknown) => {
-  for (const s of getAllSessions()) {
+  for (const s of boardSessions()) {
     try {
       s.sendGame(payload, peerId)
     } catch {
@@ -168,13 +194,16 @@ const sendTargeted = (peerId: string, payload: unknown) => {
   }
 }
 
-function sendState(target?: string): void {
+function sendState(target?: string, by?: string): void {
   // Each op names the device that drew it (`by`, absent for this device's own), so a peer
-  // that learns a mark through a third device still lets only its author change it.
-  const all = [...ops.values()].map((op) => {
-    const a = authors.get(op.id)
-    return a && a !== SELF ? { ...op, by: a } : op
-  })
+  // that learns a mark through a third device still lets only its author change it. With
+  // `by`, only the marks that device drew are sent.
+  const all = [...ops.values()]
+    .filter((op) => by === undefined || authors.get(op.id) === by)
+    .map((op) => {
+      const a = authors.get(op.id)
+      return a && a !== SELF ? { ...op, by: a } : op
+    })
   if (!all.length) return
   for (let i = 0; i < all.length; i += STATE_BATCH) {
     const payload = { t: 'board-state', epoch, ops: all.slice(i, i + STATE_BATCH) }
@@ -212,11 +241,10 @@ function onGame(payload: unknown, from: string): void {
           sendTargeted(from, { t: 'board-hello', epoch })
           return
         }
-        if (ops.size > 0) sendState(from)
+        if (ops.size > 0) answerState(from)
         // An empty board after a clear sends no state, so the clear itself is repeated to a
         // peer still holding marks from before it.
         else if (epoch > e) sendTargeted(from, { t: 'board-clear', epoch })
-        notify()
         return
       }
       case 'board-state': {
@@ -234,6 +262,14 @@ function onGame(payload: unknown, from: string): void {
           // A relayed author is a peer id; SELF names this device and is never accepted from
           // outside, or a peer could plant marks that this device's Undo treats as its own.
           const author = typeof by === 'string' && by.length > 0 && by.length <= MAX_ID && by !== SELF ? by : from
+          // This device's own mark, relayed back. Not held here means it was undone and the
+          // sender missed the delete, so the delete is repeated instead of the mark returning
+          // as one nobody may remove. To everyone: the sender may already have passed it on.
+          // Every holder stored it under this device's id, so each accepts the delete.
+          if (author !== from && isSelfId(author)) {
+            if (!ops.has(o.id)) broadcast({ t: 'board-del', epoch, id: o.id })
+            continue
+          }
           // Taken when new; an op already held changes only when its author sends it.
           if (!ops.has(o.id)) {
             ops.set(o.id, o)
@@ -242,12 +278,7 @@ function onGame(payload: unknown, from: string): void {
             ops.set(o.id, o)
           }
         }
-        while (ops.size > MAX_OPS) {
-          const oldest = ops.keys().next().value
-          if (oldest === undefined) break
-          ops.delete(oldest)
-          authors.delete(oldest)
-        }
+        trim()
         notify()
         return
       }
@@ -296,14 +327,36 @@ function onGame(payload: unknown, from: string): void {
 // so closing one card unsubscribed the board and left the other card deaf.
 const gameSubs = new Map<RoomSession, () => void>()
 let openCards = 0
+// Last full-state answer per peer, and an answer held back until STATE_ANSWER_MS has passed.
+// A hello inside the window is deferred, not dropped: it can be a peer reopening its card,
+// and nothing would ask again. Both are dropped when the last card closes.
+const stateAnswered = new Map<string, number>()
+const stateDeferred = new Map<string, number>()
+function answerState(peerId: string): void {
+  if (stateDeferred.has(peerId)) return
+  const wait = (stateAnswered.get(peerId) ?? -Infinity) + STATE_ANSWER_MS - performance.now()
+  const send = () => {
+    stateDeferred.delete(peerId)
+    stateAnswered.set(peerId, performance.now())
+    sendState(peerId)
+  }
+  if (wait <= 0) send()
+  else stateDeferred.set(peerId, window.setTimeout(send, wait))
+}
 const syncHandlers = () => {
-  const live = getAllSessions()
+  const live = boardSessions()
   for (const [s, off] of gameSubs) {
     if (live.includes(s) && openCards > 0) continue
     off()
     gameSubs.delete(s)
   }
-  if (openCards > 0) for (const s of live) if (!gameSubs.has(s)) gameSubs.set(s, addGameHandler(s, onGame))
+  if (openCards === 0) {
+    stateAnswered.clear()
+    for (const t of stateDeferred.values()) window.clearTimeout(t)
+    stateDeferred.clear()
+    return
+  }
+  for (const s of live) if (!gameSubs.has(s)) gameSubs.set(s, addGameHandler(s, onGame))
 }
 
 const detachers = new WeakMap<HTMLElement, () => void>()
@@ -422,8 +475,7 @@ const tool: ToolModule = {
 
     const peers = (): string[] => {
       const out = new Set<string>()
-      for (const s of getAllSessions()) {
-        if (s.presenceOnly) continue // the online list carries no board messages
+      for (const s of boardSessions()) {
         for (const p of s.roster()) {
           if (!p.ready) continue
           out.add(p.peerId)
@@ -546,7 +598,7 @@ const tool: ToolModule = {
       }
       disarmClear()
       if (epoch > maxSeen) maxSeen = epoch
-      epoch = maxSeen + 1
+      epoch = Math.min(maxSeen + 1, EPOCH_CEIL)
       maxSeen = epoch
       ops.clear()
       authors.clear()
@@ -644,6 +696,13 @@ const tool: ToolModule = {
     syncHandlers()
     for (const id of peers()) seen.add(id)
     broadcast({ t: 'board-hello', epoch })
+    // Peers that said hello while no card was open here got no answer, and they already
+    // count this device as seen, so marks this device drew are pushed rather than waited
+    // for. A mark relayed from another device goes back to that device alone: the copy kept
+    // here while closed can hold marks it has undone since, and it answers those with a
+    // delete to everyone, where passing them on would plant them on third devices.
+    sendState(undefined, SELF)
+    for (const id of peers()) sendState(id, id)
     refreshStatus()
     draw()
     poll = window.setInterval(tick, 1000)

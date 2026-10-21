@@ -20,12 +20,21 @@ async function afterUnlock(app: HTMLElement, caps: CryptoCaps): Promise<void> {
   registerBuiltins()
   void initCloseGuard() // re-arm "Ask when closing tab" if it was left on; never blocks boot
 
-  // Pairing deep-link: import the personal-room secret, then enter the console.
+  // Pairing deep-link: import the personal-room secret, then enter the console. Holding
+  // the secret is all it takes to be an own device (history replay, cam/mic/screen,
+  // clipboard auto-share), and anyone can send a #/pair link, so replacing a secret this
+  // device already has needs a yes. A fresh install has nothing to hand over yet.
   if (location.hash.startsWith('#/pair')) {
     const s = new URLSearchParams(location.hash.split('?')[1] ?? '').get('s')
     if (s) {
       try {
-        await importPersonalSecret(decodeURIComponent(s))
+        await importPersonalSecret(decodeURIComponent(s), () =>
+          confirm(
+            'Pair this browser with the device that made this link? That device will receive your messages and earlier ' +
+              'history, your camera, mic and screen when you share them, and an auto-shared clipboard. ' +
+              'Devices paired with your current link disconnect until you pair them again.',
+          ),
+        )
       } catch {
         /* ignore an invalid pairing link */
       }

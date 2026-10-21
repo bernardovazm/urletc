@@ -458,7 +458,9 @@ tiers that all derive the room name client-side (implemented in `src/p2p/discove
    enumerable. Ephemeral; leaving discards it.
 3. **Personal room (pair once, works cross-network).** A 32-byte secret shared via a one-time
    link or QR; all your devices derive `H(secret)` and auto-join forever. The only tier that
-   receives clipboard auto-share, and with code rooms, local media.
+   receives clipboard auto-share, and with code rooms, local media. Anyone can send a
+   `#/pair` link, so one that would replace a secret the device already holds asks first;
+   a fresh install takes it without a question.
 4. **Presence list ("Online now"), which shows who is online and nothing else.** One fixed
    room, `H("global|v1")`, that every opted-in device joins (`presenceRoom()`). It answers
    "who else is using this right now" without a shared secret, a shared IP or a code.

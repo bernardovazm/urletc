@@ -1543,6 +1543,33 @@ with sync_playwright() as p:
           bool(rpoll(rp, lambda: _hrow.count() == 1 and 'v1, html' in _hrow.inner_text(), 5)))
     rc.close()
 
+    # A pairing link that would replace this device's secret asks first. Holding the secret
+    # makes a device an own device, so one click on a mailed link must not hand that over.
+    # Declined, the device keeps its own link; accepted, it adopts the new one.
+    def pair_field(pg):
+        pg.locator('.topbar button', has_text='Connect').click()
+        f = pg.locator('.modal input[aria-label="Pairing link"]')
+        f.wait_for(timeout=5000)
+        v = f.input_value()
+        pg.keyboard.press('Escape')
+        return v
+
+    pkc, pkp = rf_open()
+    _own = pair_field(pkp)
+    _pq = base64.b64encode(os.urandom(32)).decode().replace('+', '%2B').replace('/', '%2F').replace('=', '%3D')
+    _pdlg = []
+    pkp.once('dialog', lambda d: (_pdlg.append(d.message), d.dismiss()))
+    pkp.goto(f'{BASE}/?r=1#/pair?s={_pq}')
+    pkp.wait_for_selector('.composer', timeout=20000)
+    check('pair link: replacing a stored secret asks first', len(_pdlg) == 1 and 'Pair this browser' in _pdlg[0], str(_pdlg))
+    check('pair link: declined, the device keeps its own link', pair_field(pkp) == _own)
+    pkp.once('dialog', lambda d: d.accept())
+    pkp.goto(f'{BASE}/?r=2#/pair?s={_pq}')
+    pkp.wait_for_selector('.composer', timeout=20000)
+    _padopt = pair_field(pkp)
+    check('pair link: accepted, the device adopts the new link', _padopt != _own and _padopt.endswith(_pq), _padopt[-60:])
+    pkc.close()
+
     # Session tool and game handlers fan out per card. Workshop shares and relays on the
     # personal room, so two contexts open one pairing link and meet only there. On B,
     # closing one of two Workshop cards leaves the other listing a tool A shares, and a

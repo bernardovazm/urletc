@@ -37,8 +37,12 @@ export async function resetPersonalSecret(): Promise<Uint8Array<ArrayBuffer>> {
   return secret
 }
 
-export async function importPersonalSecret(b64: string): Promise<void> {
+/** Store a secret from a pairing link. `replace` is asked only when a different secret is
+ *  already stored, since overwriting it unpairs every device that holds the old one. */
+export async function importPersonalSecret(b64: string, replace: () => boolean): Promise<void> {
   if (b64ToBytes(b64).length !== 32) throw new Error('invalid pairing code')
+  const current = await getItem<string>(SECRET_KEY)
+  if (current && current !== b64 && !replace()) return
   await setItem(SECRET_KEY, b64)
 }
 

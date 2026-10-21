@@ -1239,7 +1239,6 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     wrap: HTMLElement // the .stage-tile (video) or the bare <audio> (audio-only, in sink)
     recorder: MediaRecorder | null
     fsBtn: HTMLElement | null
-    recUrl: string
     relabel: () => void // redraws the nameplate and control names from `label`
   }
   const stageTiles: StageTile[] = []
@@ -1410,7 +1409,6 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     coveredMedia.delete(tile.media)
     const i = stageTiles.indexOf(tile)
     if (i >= 0) stageTiles.splice(i, 1)
-    if (tile.recUrl) URL.revokeObjectURL(tile.recUrl)
     // Release an expansion that a screen share opened, unless another screen share still
     // holds the stage. `autoMaxBy` is null once the control has been pressed by hand, so
     // a share ending never undoes a state the user set.
@@ -1476,7 +1474,6 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
       media,
       wrap: media,
       recorder: null,
-      recUrl: '',
       fsBtn: null,
       relabel: () => {},
     }
@@ -3442,17 +3439,12 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
       rec.onstop = () => {
         tile.recorder = null
         const blob = new Blob(chunks, { type: chunks[0]?.type || (tile.hasVideo ? 'video/webm' : 'audio/webm') })
-        if (tile.recUrl) URL.revokeObjectURL(tile.recUrl)
-        tile.recUrl = URL.createObjectURL(blob)
-        const a = el('a', { href: tile.recUrl, download: `studio-${tile.kind}-${new Date().toISOString().replace(/[:.]/g, '-')}.webm` }) as HTMLAnchorElement
+        const url = URL.createObjectURL(blob)
+        const a = el('a', { href: url, download: `studio-${tile.kind}-${new Date().toISOString().replace(/[:.]/g, '-')}.webm` }) as HTMLAnchorElement
         a.click()
-        // A recording ended by the tile going away stops after removeStageTile revoked the
-        // old URL, and nothing would revoke this one. Held long enough for the download.
-        if (!stageTiles.includes(tile)) {
-          const url = tile.recUrl
-          tile.recUrl = ''
-          window.setTimeout(() => URL.revokeObjectURL(url), 60_000)
-        }
+        // The download holds its own copy once started; kept on the tile, the URL pinned the
+        // whole recording in memory until the tile went or the next one replaced it.
+        window.setTimeout(() => URL.revokeObjectURL(url), 60_000)
         notifyStage()
       }
       rec.start()

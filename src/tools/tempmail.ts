@@ -253,8 +253,11 @@ const tool: ToolModule = {
     const load = async (): Promise<Account | null> => {
       try {
         const v = await ctx.storage.get<Partial<Account>>(KEY)
-        if (v && str(v.address) && str(v.password) && str(v.token)) {
-          return { address: v.address as string, password: v.password as string, token: v.token as string }
+        // The token may be empty: an account is saved as soon as it is claimed, before its
+        // first login, and fetchInbox logs in when there is none. Requiring one abandoned
+        // a claimed inbox on reload and claimed a new address.
+        if (v && str(v.address) && str(v.password)) {
+          return { address: v.address as string, password: v.password as string, token: typeof v.token === 'string' ? v.token : '' }
         }
       } catch {
         // no stored inbox is reachable, so fall through and claim a new one

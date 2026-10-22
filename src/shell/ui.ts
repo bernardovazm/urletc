@@ -119,7 +119,9 @@ export function consent(o: ConsentOptions): Promise<boolean> {
         return
       }
       if (e.key !== 'Tab') return
-      const f = modal.querySelectorAll<HTMLElement>('button, a[href], input, select, textarea, [tabindex]:not([tabindex="-1"])')
+      // summary included: the Source disclosure is the one way to read the code being
+      // consented to, and the trap used to cycle past it between Cancel and Run.
+      const f = modal.querySelectorAll<HTMLElement>('button, a[href], input, select, textarea, summary, [tabindex]:not([tabindex="-1"])')
       if (!f.length) return
       const first = f[0]
       const last = f[f.length - 1]

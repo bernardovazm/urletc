@@ -1045,7 +1045,20 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
 
   // presence starts open: the group exists to report who is online
   const groupOpen: Record<Tier, boolean> = { personal: true, nearby: true, code: true, presence: true }
+  const ROSTER_FOCUSABLE = 'summary, button, input, select'
   const renderRoster = () => {
+    // The roster is rebuilt on every roster and transport event, which threw keyboard focus
+    // back to the page whenever a peer's state changed. The focused control's position is
+    // restored after the rebuild: the order is stable unless a peer joins or leaves.
+    const focused = document.activeElement
+    const at = focused && peersBox.contains(focused) ? [...peersBox.querySelectorAll(ROSTER_FOCUSABLE)].indexOf(focused) : -1
+    renderRosterRows()
+    if (at >= 0) {
+      const all = peersBox.querySelectorAll<HTMLElement>(ROSTER_FOCUSABLE)
+      all[Math.min(at, all.length - 1)]?.focus()
+    }
+  }
+  const renderRosterRows = () => {
     peersBox.replaceChildren()
     if (!sessions.size) {
       peersBox.append(el('div', { class: 'muted small', text: p2pReady ? 'Connecting...' : 'P2P needs a newer browser.' }))

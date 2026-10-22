@@ -1,14 +1,19 @@
 // Encrypted-at-rest store facade (ARCHITECTURE section 9, "Key lifecycle"). Two modes:
 //
 //  - device (default): a non-extractable AES-GCM CryptoKey generated once and kept
-//    in IndexedDB. Protects an offline profile copy, another origin and a casual IDB
-//    dump, but not same-origin XSS, since an attacker in our origin can use the key.
-//    Boots silently.
+//    in IndexedDB. Protects against another origin and a casual IDB dump. The key record
+//    sits in the same profile as the ciphertext, so a profile copy opened in a browser
+//    decrypts the vault (only WebKit wraps stored keys under the OS keychain), and
+//    same-origin XSS can use the key in place. Boots silently.
 //
 //  - passphrase (opt-in): the wrapping key is derived on unlock via PBKDF2 at 600k
 //    iterations from a user passphrase plus stored salt, held only in memory and zeroised
 //    on lock. This raises the bar against an offline attacker and against a later XSS,
 //    since a locked vault has no key in memory, at the cost of re-unlocking.
+//
+// Either mode covers wt-data only. The device identity keypairs (identity.ts) sit
+// unwrapped in wt-keys in both modes, so a profile copy, or an XSS while the vault is
+// locked, can sign handshakes as this device.
 //
 // Primary XSS controls remain CSP and Trusted Types. Encrypted-at-rest is secondary and
 // is not an XSS control in device mode.

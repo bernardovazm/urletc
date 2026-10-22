@@ -31,7 +31,9 @@ design; the app's security does not depend on them (see `ARCHITECTURE.md`, threa
 ## Handling secrets
 
 There are no server-side secrets in this project. Never commit tokens, private keys, or
-`.env` files. `src/p2p/session.ts` carries STUN servers only and `TURN_SERVERS` is empty:
-the public demo TURN service it used to name stopped returning relay candidates and was
-removed. Adding a TURN server means adding credentials, and any credential committed here
-is public by definition.
+`.env` files. `src/p2p/session.ts` commits STUN servers only; the public demo TURN service
+it used to name stopped returning relay candidates and was removed. A TURN relay comes at
+runtime from Settings, stored encrypted on that device, or from `VITE_TURN_SERVERS` in the
+build environment, both parsed by `src/p2p/turn.ts`. Vite compiles `VITE_TURN_SERVERS` into
+the public bundle, so its credentials are readable by anyone, and any credential committed
+here is public by definition.

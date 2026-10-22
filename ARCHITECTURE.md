@@ -17,39 +17,41 @@ notes at the end of the file list both sets.
 One static SPA on the Vercel free tier: Vite 8 (Rolldown) with TypeScript in strict mode and
 no UI framework `[v]`, a hand-rolled CSS custom-property token sheet, and a vanilla tool
 registry that `dynamic-import()`s every tool, built-in and workshop alike, behind a single
-`ToolManifest` contract. Heavy capability code (Whisper, Tesseract, Kokoro, QuickJS) lives
-inside its tool's import boundary, is fetched only on activation, and is then cached in the
-Cache API or OPFS.
+`ToolManifest` contract. Heavy capability code (Whisper, Tesseract, Kokoro) lives inside its
+tool's import boundary, is fetched only on activation, and is then cached in the Cache API
+or OPFS.
 
-Peer discovery and signaling are serverless via Trystero, Nostr primary with a BitTorrent
-fallback `[v]`. NAT traversal is STUN first, with a TURN relay that is configured at runtime
-(per device in Settings, or per deployment at build time) and never committed; without one
-the symmetric-NAT tail does not connect (section 5.2). Identity is a single Ed25519 + X25519
-device keypair, non-extractable,
-in IndexedDB; the dual public/private model was rejected in favour of room scoping plus
-challenge-response admission. The messenger reuses one WebRTC mesh (cap 6 video, about 12
-data peers) with app-layer X25519 + AES-GCM E2EE on every DataChannel. Since the app talks
-to public-room strangers over untrusted relays, it also runs a per-session ratchet (HKDF
-chain) on top of NaCl-box, giving forward secrecy across a session (sections 6 and 9).
+Peer discovery and signaling are serverless via Trystero over Nostr relays `[v]`; the
+BitTorrent tracker fallback Trystero offers is not built. NAT traversal is STUN first, with a
+TURN relay that is configured at runtime (per device in Settings, or per deployment at build
+time) and never committed; without one the symmetric-NAT tail does not connect (section
+5.2). Identity is a single Ed25519 + X25519 device keypair, non-extractable, in IndexedDB;
+the dual public/private model was rejected in favour of room scoping plus
+challenge-response admission. The messenger reuses one WebRTC mesh, sized for about 6 video
+and 12 data peers with no cap enforced (section 5.2), with app-layer X25519 + AES-GCM E2EE
+on every DataChannel. Since the app talks to public-room strangers over untrusted relays, it
+also runs a per-session ratchet (HKDF chain) on top of NaCl-box, giving forward secrecy
+across a session (sections 6 and 9).
 
 The Workshop gossips Ed25519-signed, SHA-256 content-addressed manifests over the same mesh,
 with bodies fetched peer to peer. Executable scripts run only inside a null-origin
-`sandbox="allow-scripts"` iframe wrapping QuickJS-WASM, behind two explicit gestures. The
-property this design guarantees and tests for: the user sees the source and explicitly
-chooses to run it, and nothing ever autoruns. The single security boundary for all untrusted
-code is one explicitly enumerated postMessage capability API (section 8.2); the iframe is
-defence in depth behind it.
+`sandbox="allow-scripts"` iframe, behind two explicit gestures. The guest source runs with
+`new Function` in the frame's own realm; the QuickJS-WASM interpreter planned for inside the
+frame is not built (section 8.1). The property this design guarantees and tests for: the
+user sees the source and explicitly chooses to run it, and nothing ever autoruns. The single
+security boundary for all untrusted code is one explicitly enumerated postMessage capability
+API (section 8.2); the iframe is defence in depth behind it.
 
 Security is cross-cutting: native WebCrypto only, strict CSP plus Trusted Types, COOP/COEP,
 encrypted-at-rest IndexedDB. There is no backend you operate in the core product. Three
-external dependencies are flagged instead of hidden (Nostr and BitTorrent relays, Google
+external dependencies are flagged instead of hidden (Nostr relays, Google and Cloudflare
 STUN, and a TURN relay when one is configured), along with one optional Vercel Edge Function
 (section 10). The target deployment is a small team, a handful of peers, which is what makes
 best-effort free infrastructure an acceptable trade.
 
 ```
 +----------------------------------------------------------------------------+
-|  BROWSER TAB  (single origin, HTTPS, COOP:same-origin + COEP:require-corp) |
+| BROWSER TAB (single origin, HTTPS, COOP:same-origin + COEP:credentialless) |
 |                                                                            |
 |  +------------+   hash-router     +--------------------------------------+ |
 |  |   SHELL    |------------------>|      TOOL REGISTRY (Map)             | |
@@ -71,7 +73,7 @@ best-effort free infrastructure an acceptable trade.
 |   +-------------------------+      +-----------------------------------+   |
 |                                                                            |
 |   +--------------------------------------------------------------------+   |
-|   | WORKSHOP SANDBOX  null-origin iframe (allow-scripts only), QuickJS |   |
+|   | WORKSHOP SANDBOX  null-origin iframe (allow-scripts), new Function |   |
 |   | THE BOUNDARY = enumerated postMessage capability RPC (section 8.2) |   |
 |   +--------------------------------------------------------------------+   |
 +--------------------------------+-------------------------------------------+
@@ -79,7 +81,7 @@ best-effort free infrastructure an acceptable trade.
         +------------------------+-----------------------------+
         v                        v                             v
   Nostr relays (signaling)   Google STUN (free)         TURN: runtime config only
-  BitTorrent trackers (FB)   ~70-90% direct [~]         ~10-30% tail needs it
+  no tracker fallback        ~70-90% direct [~]         ~10-30% tail needs it
   *3rd-party, not yours*     *3rd-party*                *see section 5.2*
   NOTE: WebRTC ICE/media traffic is NOT governed by CSP connect-src (sections 2 and 10).
 ```
@@ -169,10 +171,11 @@ urletc/
 ```
 
 Where a planned module was never created, the sections below name what exists instead: the
-capability schema and QuickJS runner live in `src/workshop/sandbox.ts` with the permission
-shapes in `src/workshop/manifest.ts` (there is no `src/core/capabilities.ts` and no
-`public/sandbox.html`, since the guest frame is a `blob:` document built at runtime); TTS
-runs in `src/tools/tts.ts` (no `tts.worker.ts` was split out); the workers that do exist are
+capability dispatcher and iframe runner live in `src/workshop/sandbox.ts` with the permission
+shapes in `src/workshop/manifest.ts` (there is no `src/core/capabilities.ts` and no QuickJS
+runner), and the guest documents are `public/sandbox/script.html` and
+`public/sandbox/app.html`, served with their own CSP header (section 8.3); TTS runs in
+`src/tools/tts.ts` (no `tts.worker.ts` was split out); the workers that do exist are
 `src/workers/stt.worker.ts` and `src/workers/re-engine.worker.ts`; and `kdf.worker.ts` was
 never built, so the proof-of-work in section 5.5 is a specification with no implementation,
 while the PBKDF2 passphrase wrapping that does exist runs in `src/core/store.ts`.
@@ -213,12 +216,13 @@ export type Permission =
 - Workshop tools are stored in IndexedDB as signed manifest plus body. Their `load` resolves
   to a controlled loader that re-verifies signature and content hash, validates the manifest
   with zod, renders the consent dialog, and only then hands the body to the sandbox runner. A
-  Workshop tool's `activate` never runs in the host realm; it mounts the runner iframe and
-  proxies UI and state over the postMessage capability API.
+  Workshop tool's `activate` never runs in the host realm; it mounts the runner iframe. A
+  script returns a value from a hidden frame and an HTML app draws its own UI inside a
+  visible one; either reaches host state only over the postMessage capability API.
 - `ToolContext` is the capability facade and the security boundary. For host-realm built-ins
   it is a direct object; for sandboxed tools it is the postMessage RPC surface enumerated in
-  section 8.2. Either way it exposes only declared and consented capabilities,
-  input-validated and rate-limited.
+  section 8.2. Either way it exposes only declared and consented capabilities, with the
+  per-method checks listed in 8.2.
 
 ---
 
@@ -311,20 +315,25 @@ Files and video are solid; live mic is best effort. The pipeline runs in a dedic
   `navigator.deviceMemory` (iOS WKWebView OOM risk). Download sizes are tens of MB for base
   and smaller for tiny. Surface the build-measured byte count in the download dialog instead
   of a hardcoded figure, and never auto-fetch.
-- Files and video decode chain: `decodeAudioData`, then WebCodecs `AudioDecoder`, then
-  ffmpeg.wasm as fallback, to 16 kHz mono. Chunk `chunk_length_s=30, stride_length_s=5` with
-  sliding-window stitching. Slow WASM is acceptable here. COEP caveat: ffmpeg.wasm's
+- Files and video decode chain: what ships is `decodeAudioData` resampled to 16 kHz mono
+  through the Web Audio API (`src/tools/stt/index.ts`). The WebCodecs `AudioDecoder` and
+  ffmpeg.wasm fallbacks are not built, so a container `decodeAudioData` cannot read, video
+  included, fails. Chunk `chunk_length_s=30, stride_length_s=5` with sliding-window
+  stitching. Slow WASM is acceptable here. COEP caveat for the ffmpeg plan: ffmpeg.wasm's
   multithread core requires SharedArrayBuffer and therefore COOP+COEP `[v]`, while its
-  singlethread core does not `[v]`. The app ships the singlethread core so transcription
-  works even where COEP must be relaxed, and treats the multithread core as a faster path
-  only when `crossOriginIsolated === true`. That decouples OCR and STT from the global COEP
-  decision (section 10).
+  singlethread core does not `[v]`. The plan is to ship the singlethread core so
+  transcription works even where COEP must be relaxed, and to treat the multithread core as
+  a faster path only when `crossOriginIsolated === true`, which keeps STT out of the global
+  COEP decision (section 10).
 - Live mic uses `@ricky0123/vad-web` (Silero) to gate roughly 30 s segments before Whisper.
   Near-real-time on capable hardware, with no guarantee of low-latency streaming.
 - Do not hardcode WebGPU as the fast path. Benchmark WASM against WebGPU at runtime on a
   short clip and pick the winner; WASM frequently wins on Apple Silicon and q8.
 - Cache weights in OPFS after an explicit, size-disclosed, user-triggered download. Verify
   the weight SHA-256 against a pinned digest before loading (supply-chain control, section 9).
+  Neither the OPFS cache nor the digest check is built: `src/workers/stt.worker.ts` passes
+  no `revision`, so transformers.js fetches the model repo's main branch from Hugging Face
+  and caches the files itself, unverified.
 - The Web Speech API is offered only as an opt-in, persistently-warned, never-default cloud
   fast path, since it ships audio to Google or Apple, which rules it out as a default. No
   diarization in v1.
@@ -349,17 +358,25 @@ Signaling and discovery are genuinely serverless from this project's side. Relia
 connectivity for every peer is not: the symmetric-NAT tail needs TURN, which is a third-party
 dependency.
 
-### 5.1 Discovery and signaling via Trystero, Nostr primary, BitTorrent fallback `[v]`
+### 5.1 Discovery and signaling via Trystero over Nostr `[v]`
 Trystero v0.25.2 (June 2026) `[v]` is actively maintained and ships scoped `@trystero-p2p/*`
-packages including a self-hostable `ws-relay` `[v]`. Configure 3-5 Nostr relays plus tracker
-fallback, and implement establishment retry and timeout, since relay latency can stall SDP.
+packages including a self-hostable `ws-relay` `[v]`. The app joins through `trystero/nostr`
+alone, on the three relays in `NOSTR_RELAYS` (`src/p2p/session.ts`). The BitTorrent tracker
+fallback is not built, and no tracker origin is in `connect-src`. Implement establishment
+retry and timeout, since relay latency can stall SDP.
 
 SDP-encryption nuance: Trystero encrypts SDP with a key derived from app ID plus room ID by
 default, which a relay operator can reverse-engineer from the public room and app IDs. Hiding
-SDP from relays requires passing a custom per-room password `[v]`. The app therefore always
-supplies a high-entropy room password derived from its own X25519 handshake material and
-never relies on the default derivation. This is independent of, and additional to, the
-app-layer payload E2EE in section 6.
+SDP from relays requires passing a custom per-room password `[v]`. The app always supplies
+its own room password and never relies on the default derivation, but the password comes
+from the same seed as the room name, so it hides SDP only as well as that seed is secret
+(`src/p2p/discovery.ts`, `src/p2p/personal.ts`): a 32-byte secret for personal rooms
+(SHA-256), the join code for code rooms (the same PBKDF2 output as the room id, about 2^39.6
+codes), the public IPv4 for nearby, which a relay typically sees as the client's own
+address, and a constant for presence. A relay can therefore read nearby and presence SDP.
+The `hs` exchange runs only after SDP has been exchanged, so it cannot feed the password;
+what stops a relay MITM is the DTLS-bound `hs` signature (5.3), not SDP encryption. This is
+independent of, and additional to, the app-layer payload E2EE in section 6.
 
 ### 5.2 NAT traversal: the fallback chain
 Target scale is a small team, a handful of peers, which is what makes best-effort free
@@ -394,7 +411,8 @@ infrastructure acceptable here.
    for an allocation over a relay-only connection and reports one of: answered, refused the
    username or password (401), or no answer from this network. Without any relay, peers
    behind symmetric or carrier-grade NAT cannot connect, the failure report says so, and
-   `relayOnly` refuses to pretend otherwise.
+   `relayOnly` in `joinRoomSession` refuses to pretend otherwise (no setting turns it on;
+   section 6).
 3. Self-hosted coturn on Oracle Always Free ARM remains the planned fallback, not built.
    One box, and an operated dependency, flagged in sections 10 and 13.
 
@@ -410,7 +428,9 @@ default either way.
 
 Scale guard: the mesh degrades past roughly 20-30 peers `[~]` (Chromium PeerConnection
 ceiling, Firefox and Safari mesh lag). Enforce app-level room caps around 12-15 data peers
-and hub-and-spoke beyond that.
+and hub-and-spoke beyond that. Neither is built: `src/p2p/session.ts` admits every peer that
+completes the `hs`, in every tier, so each member of the opt-in presence room holds one
+connection and one handshake per other member, however many join.
 
 ### 5.3 Identity model: single keypair, dual identity rejected
 One Ed25519 (signing) and one X25519 (ECDH) non-extractable keypair per device on first load,
@@ -429,13 +449,18 @@ admission exists.
   app-visible. The certificates tie the signature to that one connection: a member who
   keeps another member's `hs` and presents it from a second peer names certificates that
   connection does not carry, since the far end of a DTLS connection cannot present a
-  certificate it holds no key for. An `hs` without `v: 2` signed less than that and is
-  turned away.
-  Timestamp-freshness plus a per-window rate limit are the spam defenses. On proof of work,
-  see section 5.5; it is a speed-bump and no part of the Sybil answer.
-- Key backup is a user-downloaded JSON file: public key plus private key wrapped with a
-  PBKDF2 (>=600k) derived AES-256-GCM key. No cloud backup; passphrase loss is unrecoverable
-  by design.
+  certificate it holds no key for. An `hs` with any `v` other than 3 (`HS_VERSION`) is
+  turned away: before v2 the signature covered less than that, and a v2 peer would
+  handshake and then fail every file, since v3 sends file chunks as binary.
+  The `hs` carries no timestamp (`HsPayload` in `src/p2p/session.ts`) and there is no
+  per-window rate limit, so neither spam defense is built; what exists is that a peer whose
+  sealed frames fail to open 8 times (`MAX_OPEN_FAILURES`) is dropped for the life of the
+  connection. On proof of work, see section 5.5; it is a speed-bump and no part of the Sybil
+  answer.
+- Key backup is not built. The plan is a user-downloaded JSON file: public key plus private
+  key wrapped with a PBKDF2 (>=600k) derived AES-256-GCM key, which needs keypairs generated
+  extractable, and `src/core/identity.ts` generates them non-extractable. No cloud backup;
+  passphrase loss is unrecoverable by design.
 
 ### 5.4 Four serverless rendezvous tiers
 LAN and mDNS auto-discovery are unavailable to web pages: there is no web API for mDNS
@@ -529,11 +554,17 @@ ships today.
 - **Transport:** one E2EE WebRTC mesh. PeerJS 1.5.x is acceptable for 1:1 and small-group
   connection lifecycle, but raw `RTCDataChannel` is mandatory for file transfer, because
   PeerJS reassembles in RAM and large files OOM. `simple-peer` is rejected as unmaintained.
-- **Chat and control:** one DataChannel. File transfer: a second DataChannel, 16 KiB chunks,
-  `bufferedAmountLowThreshold` backpressure, incoming chunks written incrementally to OPFS
-  (fallback Dexie/IDB). Per-chunk and whole-file SHA-256 integrity. Offline messages are a
-  best-effort outbound queue in encrypted IDB, replayed on reconnect. There is no
-  store-and-forward guarantee, since there is no server to hold them.
+- **Chat and control:** one ratcheted `msg` Trystero action. File transfer: 64 KiB chunks on
+  a separate `fdata` action, each sealed with AES-GCM under a per-file random key (delivered
+  over the ratchet in the `file` envelope), with a fresh IV and `fileId:index` as AAD, and
+  Trystero's own backpressure. A receive silent for 20 s asks the sender for its missing
+  indices with `fneed`, at most 3 rounds of 256, then is abandoned out loud. Chunks are
+  reassembled in memory into a `Blob`, bounded at 2 GiB per file and 2 GiB across all
+  receives in flight (`MAX_INCOMING_BYTES` in `src/p2p/session.ts`); streaming to OPFS and a
+  whole-file SHA-256 are not built, so integrity is the per-chunk AEAD. Chat typed while no
+  peer is reachable waits in an in-memory outbox (`src/shell/console.ts`) and is sent when
+  one connects; a reload drops it. There is no store-and-forward guarantee, since there is
+  no server to hold them.
 - **VoIP and screen-share:** `getUserMedia` and `getDisplayMedia` (HTTPS is satisfied;
   `getDisplayMedia` is unavailable on iOS Safari, so degrade gracefully). Lazy-acquire tracks
   and call `track.stop()` on call end.
@@ -564,10 +595,14 @@ ships today.
   DTLS baseline for media on Firefox and Safari and do not over-claim.
 - **Group-size limits:** hard cap 6 video (CPU and bandwidth cliff) `[~]` and about 12
   data-only `[~]`. No SFU: no free SFU fits, and an SFU terminates DTLS, leaving plaintext
-  unless SFrame is used. Warn past the cap.
+  unless SFrame is used. Warn past the cap. Neither cap nor warning is built: every
+  authenticated peer is admitted and, in a tier that carries local media, offered every
+  active local stream (5.2).
 - **IP-leak hygiene:** mDNS hides LAN candidates on Chromium, less uniformly on Firefox and
   Safari. A relay-only privacy toggle (`iceTransportPolicy:'relay'`) is the only complete
-  public-IP mitigation.
+  public-IP mitigation. `joinRoomSession` supports it as `relayOnly`, but no setting exposes
+  it: `src/shell/console.ts` always passes `relayOnly: false`, so every peer, nearby and
+  presence included, receives this device's server-reflexive candidates.
 
 ---
 
@@ -689,67 +724,113 @@ fixed 134.0.6998.177) and CVE-2025-4609 (ipcz handle leak, $250k bounty, fixed
 API in 8.2 is the boundary.
 
 ### 8.1 Layered model keyed to trust tier
+One layer set is built, and it applies to every Workshop `type:"script"` and `type:"html"`
+tool whatever its trust tier (`src/workshop/sandbox.ts`):
+
+- A null-origin iframe, `sandbox="allow-scripts"` without `allow-same-origin`, loading the
+  static guest `public/sandbox/script.html` or `public/sandbox/app.html`. The untrusted
+  source arrives by postMessage after the guest's `ready` and is never interpolated into
+  the markup.
+- The guest runs in the frame's own JS realm with no interpreter in between: a script
+  through `new Function` in strict mode, an app's HTML mounted with `DOMParser` and its
+  `<script>` nodes re-created so they execute.
+- CSP from a `/sandbox/` response header (`vercel.json`, `vite.config.ts`) plus a meta tag
+  in each guest: `default-src 'none'`, `connect-src 'none'`,
+  `script-src 'unsafe-inline' 'unsafe-eval'`, images, media and fonts from `data:`/`blob:`
+  only.
+- Before any untrusted code runs, the bootstrap poisons the WebRTC constructors and starts
+  stripping child frames (section 13), since `connect-src` governs neither ICE nor a child
+  realm.
+- Lifetime: a script's frame is removed by a host `setTimeout` after 30 s; an app has no
+  deadline and runs until the user closes it or the tool deactivates. Neither is preemptive
+  or memory-bounded: where the browser keeps the null-origin frame in the host's renderer
+  process, a guest that never yields stalls the host's event loop, that timer included.
+
+The tiers below are the plan. Rows and layers marked not built do not exist.
+
 | Trust tier | Layers |
 |---|---|
-| Untrusted (unknown peer, JS) | null-origin iframe `sandbox="allow-scripts"` (no `allow-same-origin`), then QuickJS-WASM interpreter inside, then in-doc meta-CSP `default-src 'none'; connect-src 'none'`, then `setInterruptHandler` deadline plus `setMemoryLimit` |
-| Community-vetted (manually trusted peer) | null-origin iframe plus SES Compartment (intrinsics frozen) plus `connect-src 'none'` |
-| Self-authored | null-origin iframe plus Web Worker (no DOM) |
+| Untrusted (unknown peer, JS) | the built layer set above. Not built: a QuickJS-WASM interpreter inside the frame, with a `setInterruptHandler` deadline, `setMemoryLimit` and no time source |
+| Community-vetted (manually trusted peer) | not built: null-origin iframe plus SES Compartment (intrinsics frozen) plus `connect-src 'none'`; runs under the built layer set today |
+| Self-authored | not built: null-origin iframe plus Web Worker (no DOM); runs under the built layer set today |
 | Declarative automation | safe-by-construction interpreter, ReDoS-guarded worker (7.1); no JS sandbox needed |
 
 ### 8.2 The postMessage capability API, fully enumerated
-This is the most security-critical artifact in the codebase. The guest realm has no ambient
-authority; everything goes through this message schema. The host validates
-`event.origin === 'null'`, validates against a zod schema, rate-limits per method, and never
-reflects host objects.
+This is the most security-critical artifact in the codebase. The guest holds no host object
+and no working network handle; whatever reaches the host goes through this message schema. The
+host acts on a message only when `event.source` is the guest frame's window and
+`event.origin === 'null'`, and treats it as a capability call only with a numeric `id` and
+a string `method`. No schema library sits on this path (zod validates manifests, not
+messages): arguments are coerced with `String()` and checked per method below. The host
+never reflects host objects.
 
 ```ts
-// src/workshop/sandbox.ts: the ONLY surface a sandboxed tool can reach.
+// src/workshop/sandbox.ts: the methods the host dispatches; anything else gets an error.
 // (permission shapes live in src/workshop/manifest.ts)
-// Guest to Host request:
-type Req =
-  | { id: number; m: 'ui.render';      dom: SanitizedVDom }          // host DOMPurifies + paints into the tool's container
-  | { id: number; m: 'ui.on';          event: 'click'|'input'|'submit'; ref: string }
-  | { id: number; m: 'clipboard.read' }                              // gated by 'clipboard-read' perm + per-run consent
-  | { id: number; m: 'clipboard.write'; text: string }               // gated by 'clipboard-write'
-  | { id: number; m: 'storage.get';    key: string }                 // namespaced to tool id; gated by 'storage'
-  | { id: number; m: 'storage.set';    key: string; value: Json }    // quota-capped (e.g. 1 MiB/tool)
-  | { id: number; m: 'net.fetch';      url: string; init?: SafeInit } // ONLY if {net:[origin]} declared+consented; host fetches, strips cookies/credentials, enforces origin allow-list, size cap, no redirects off-list
-  | { id: number; m: 'notify';         text: string };               // gated by 'notifications', rate-limited
-// Host to Guest response:
-type Res = { id: number; ok: true; value: Json } | { id: number; ok: false; error: string };
-// Host to Guest events (only for refs the guest registered): { evt: 'ui'; ref: string; payload: Json }
+// Guest to Host call: { k: 'cap'; id: number; method: string; args: unknown[] }
+//   'clipboard.read'                  gated by 'clipboard-read'
+//   'clipboard.write'  [text]         gated by 'clipboard-write'; no length cap
+//   'storage.get'      [key]          gated by 'storage'; keys prefixed with the tool id
+//   'storage.set'      [key, value]   gated by 'storage'; key <= 256 chars; 1 MiB Workshop quota
+//   'net.fetch'        [url, init?]   gated by {net:[origin]}; host-mediated, see below
+//   'room.send'        [data]         html apps, gated by 'p2p-room'; >= 15 ms apart, <= 16384 JSON chars
+//   'room.peers'                      html apps, gated by 'p2p-room'
+// Guest to Host, no reply: { k: 'ready' } (honoured once), { k: 'log'; msg } (cut to 2000
+//   chars), and for scripts { k: 'done'; value } or { k: 'error'; error }, which end the run.
+// Host to Guest: { k: 'exec'; source } once after 'ready';
+//   { k: 'cap-result'; id; ok: true; value } | { k: 'cap-result'; id; ok: false; error };
+//   { k: 'room'; from; data } for apps, relayed from authenticated room peers running the
+//   same content hash over the best-effort `game` channel.
 ```
+
+The manifest schema also accepts a `notifications` permission, which no method reads. There
+are no `ui.*` methods: an app draws its own UI inside its frame (8.1).
 
 Hard properties of the boundary:
 
-- No raw `fetch`, no `Date.now` or `performance.now`, no `crypto`, no `postMessage`
-  passthrough and no `eval` is ever injected into the guest. Time is withheld because of
-  timing side-channels, which COOP/COEP coarsens without eliminating Spectre. `net.fetch` is
-  a host-mediated capability: the host performs the fetch with credentials stripped, enforces
-  the declared origin allow-list, caps response size, and forbids off-list redirects. The
-  guest never holds a network handle.
-- Every method is permission-gated by the manifest's declared `Permission[]` and by per-run
-  consent. A method the manifest did not declare is rejected before reaching the handler.
-- Validation first: unknown `m`, malformed args and oversize payloads are dropped, and the
-  handler is the rate-limiter.
-- The schema is versioned and frozen per release. Adding a method is a reviewed security
-  change.
+- Nothing from the host realm is injected into the guest, but the guest realm keeps its own
+  ordinary globals: `Date`, `performance.now`, `crypto`, `eval` and `Function`, timers, and
+  `parent.postMessage`, through which it can send any message, not only those the `host`
+  facade builds. Time is therefore not withheld: the timing side channels that motivated
+  withholding it, which COOP/COEP coarsens without eliminating Spectre, are open to guest
+  code. Withholding time and `eval` belongs to the QuickJS-WASM plan (8.1).
+  `fetch`, XHR and WebSocket exist in the guest and fail on `connect-src 'none'`, the WebRTC
+  constructors are poisoned and child frames are stripped, so the guest holds no working
+  network handle.
+- `net.fetch` is host-mediated (`hostFetch`): the host refuses an origin the manifest did
+  not declare and the app's own origin, fetches with `credentials: 'omit'`,
+  `redirect: 'error'` and no referrer, reads at most 2 MB of body, and runs at most 4 calls
+  per guest at once, all aborted on teardown. Method, body and headers are the guest's. The
+  origin must also be in the host's `connect-src`, or the host fetch fails.
+- Every method is permission-gated by the manifest's declared `Permission[]`, mapped once
+  per run, and every run follows the per-run consent dialog. The check is the first step of
+  each method's handler.
+- Limits as built are the ones in the block above. There is no per-method rate limit beyond
+  the `room.send` interval and the `net.fetch` concurrency gate, and no size cap on a
+  `clipboard.write` text or a `storage.set` value other than the storage quota.
+- The method set is fixed per release. Adding a method is a reviewed security change.
 
 ### 8.3 Hard rules
 Footguns do not become safety properties by being documented, so these are absolute.
 
 - Never combine `allow-scripts` with `allow-same-origin`; the frame can strip its own sandbox.
-- The iframe alone does not block network. Set `connect-src 'none'` via a `<meta>` CSP inside
-  the guest document, which `src/workshop/sandbox.ts` builds as a `blob:` document. The guest
-  has no `fetch` anyway (8.2).
+- The iframe alone does not block network. `connect-src 'none'` comes from the `/sandbox/`
+  response header (`vercel.json`, `vite.config.ts`) and is repeated in a `<meta>` CSP in
+  each guest document. The guests are real URLs under `public/sandbox/`, not `blob:` or
+  `srcdoc` documents, because those inherit the host policy, whose `script-src` and Trusted
+  Types refuse the guest's inline bootstrap and its `eval`. `fetch` exists in the guest and
+  fails on that directive; WebRTC is poisoned separately (section 13).
 - Never inject any credential-bearing capability into guests.
-- The `postMessage` handler does a strict `event.origin === 'null'` check and validates every
-  message.
-- Never autorun. Two gestures, a 30 s execution kill-timeout, unconditional iframe teardown,
-  and a new iframe per run.
+- The `postMessage` handler checks `event.source` against the guest frame and
+  `event.origin === 'null'`, and type-checks `id` and `method` (8.2).
+- Never autorun. Two gestures and a new iframe per run. A script's frame is removed after
+  30 s by a host timer, which is not preemption (8.1); an app has no deadline and is
+  removed when closed or when the tool deactivates.
 - ShadowRealm (TC39) is not shippable in mid-2026; design so it can slot in as a future tier.
 - Surface a stale or embedded Chromium banner, since in-the-wild escapes hit unpatched and
-  embedded builds per the CVEs above. Ship a Trusted Types polyfill for Firefox.
+  embedded builds per the CVEs above. Ship a Trusted Types polyfill for Firefox. Neither is
+  built: there is no banner, and where the browser has no Trusted Types,
+  `src/core/trusted-types.ts` installs nothing and the CSP directive is inert.
 
 ---
 
@@ -758,13 +839,13 @@ Footguns do not become safety properties by being documented, so these are absol
 ### Threat model
 | Adversary | Capability | Primary control |
 |---|---|---|
-| Signaling relay / TURN operator | sees SDP, peer IPs, traffic metadata; can MITM signaling | custom-password SDP encryption (5.1) plus app-layer X25519+AES-GCM plus per-session HKDF ratchet for FS; opaque room ids; relay-only toggle |
-| Network MITM at first key exchange | substitute keys (TOFU window) | out-of-band safety-number or QR verification, offered and not forced (section 10) |
-| Malicious Workshop author | ship signed-but-harmful code | null-origin iframe plus QuickJS plus the enumerated postMessage API (8.2) plus mandatory source review; declarative interpreter safe by construction (7.1) |
+| Signaling relay / TURN operator | sees SDP, peer IPs, traffic metadata; can MITM signaling | DTLS-bound `hs` signature against MITM (5.3) plus app-layer X25519+AES-GCM plus per-session HKDF ratchet for FS; custom-password SDP encryption (5.1) hides SDP for personal and code rooms only, not nearby or presence; opaque room ids; relay-only mode exists in the session layer but no setting exposes it (6) |
+| Network MITM at first key exchange | substitute keys (no prior pin) | out-of-band safety-number comparison in a confirm dialog, offered and not forced (section 10); no QR and no key-change warning (Peer auth below) |
+| Malicious Workshop author | ship signed-but-harmful code | null-origin iframe running the source with `new Function`, no network (`connect-src 'none'`, WebRTC poisoned, no child frames), the enumerated postMessage API (8.2) plus mandatory source review; no preemption and no memory bound, QuickJS-WASM not built (8.1); declarative interpreter safe by construction (7.1) |
 | Sybil / gossip poisoner | flood or fake-vouch | challenge-response (signature) admission, trusted-peers-only vouching, re-verify before relay; PoW is an anti-flood speed-bump only, no part of the Sybil answer (5.5) |
 | XSS into host origin | read IDB, use in-realm keys, exfiltrate | strict CSP (no eval, no inline) plus Trusted Types plus the DOMParser strip as the primary control; encrypted IDB is secondary (see the key-lifecycle caveat below) |
-| Offline disk-image attacker | copy browser profile | non-extractable CryptoKeys plus passphrase-lock mode (PBKDF2>=600k into AES-GCM) |
-| Supply chain | tampered dep or model | exact-pinned deps plus lockfile, bundle rather than CDN, SRI where applicable, model-weight hash verification |
+| Offline disk-image attacker | copy browser profile | passphrase-lock mode (PBKDF2>=600k into AES-GCM) for the vault. Device mode does not cover this: its wrap key record sits in the same profile as the ciphertext. The identity keypairs (`wt-keys`) are outside the vault in both modes, so a profile copy can sign handshakes as this device (Key lifecycle below) |
+| Supply chain | tampered dep or model | exact-pinned deps plus lockfile, bundle rather than CDN, SRI where applicable; model-weight hash verification is not built (`src/workers/stt.worker.ts` loads the Hugging Face model unpinned and unverified, 4.3) |
 
 ### Identity, key and E2EE design
 - All crypto is native WebCrypto: Ed25519 (sign), X25519 (ECDH), AES-256-GCM, HKDF-SHA-256
@@ -777,33 +858,46 @@ Footguns do not become safety properties by being documented, so these are absol
   update to use P2P and Workshop" message rather than silently shipping a JS crypto polyfill,
   since polyfilled curve crypto in-page is a weaker and larger attack surface. Single-user
   tools (clipboard, OCR, STT, TTS) still work without the curves.
-- Keys are non-extractable, stored as `CryptoKey` in IndexedDB, OS-keychain-backed on desktop
-  and weaker on mobile WebView, which is documented.
+- Keys are non-extractable, stored as `CryptoKey` records in IndexedDB. Non-extractable
+  restricts the JS API, not the storage: Chromium and Firefox serialize the key bytes into
+  the profile's IndexedDB files, and only WebKit wraps stored keys under a keychain-held
+  master key, so elsewhere a copied profile opened in a browser can use them. Mobile
+  WebView is weaker still, which is documented.
 - Message and file E2EE: per-connection ephemeral X25519 into HKDF into AES-256-GCM, plus the
   per-session HKDF ratchet for forward secrecy (section 6). 64 KiB file chunks with a fresh
   nonce and index each. Double-Ratchet, for post-compromise security, is the Phase 4 upgrade
   (section 12).
-- Peer auth: TOFU plus safety numbers: an 80-bit fingerprint per key
+- Peer auth: safety numbers compared by hand: an 80-bit fingerprint per key
   (`SHA-256("urletc/safety-number|" || pk)`), the two sorted and shown as 40 hex digits in
-  10x4 groups, with QR exchange and a loud warning on key change. Per key, so a MITM needs
-  a second preimage for each side; one digest over both keys fell to a ~2^40 collision
-  search between two keys the MITM chooses.
+  10x4 groups. Verify opens a confirm dialog with the number, and a match adds the peer's
+  public key to the `verified` set in the encrypted store (`src/shell/console.ts`). Trust is
+  keyed by public key alone: no name or device is pinned to a key on first sight, so a new
+  key is just another unverified row and raises no key-change warning, and there is no QR
+  exchange. In code rooms a peer can therefore show a verified peer's display name, only
+  without the verified mark; the presence roster leads with the key fingerprint instead
+  (5.4). Per key, so a MITM needs a second preimage for each side; one digest over both keys
+  fell to a ~2^40 collision search between two keys the MITM chooses.
 
 ### Key lifecycle for encrypted-at-rest IDB
 Encrypting IDB does not defend against an in-page XSS attacker who can use the
 non-extractable key in place. What each mode buys:
 
 - MVP at-rest mode, no passphrase: the AES-GCM wrapping key is a non-extractable `CryptoKey`
-  generated once and stored in IDB. It protects against offline profile copy, another origin,
-  and a casual IDB dump, but not against same-origin XSS, which can call the key. The primary
-  XSS control is therefore CSP plus Trusted Types plus the DOMParser strip, and the threat-model table
-  reflects that ordering. Encrypted IDB is not claimed to stop XSS.
+  generated once and stored in IDB (`src/core/store.ts`). It protects against another origin
+  and a casual IDB dump. It does not protect against an offline profile copy, since the key
+  record sits in the same profile as the ciphertext and a browser opening the copy can use
+  it (WebKit's keychain wrapping aside), nor against same-origin XSS, which can call the key.
+  The primary XSS control is therefore CSP plus Trusted Types plus the DOMParser strip, and
+  the threat-model table reflects that ordering. Encrypted IDB is not claimed to stop XSS.
 - Phase 4 passphrase-lock mode: the wrapping key is derived on unlock via PBKDF2>=600k from a
   user passphrase and held only in memory, zeroised on lock, which reaches every open tab
-  (there is no idle timeout yet). This is the mode
-  that raises the bar against both offline attackers and a later XSS, since a locked vault
-  holds no key in memory. It is opt-in because it trades convenience, meaning re-unlock, for
-  that protection.
+  (there is no idle timeout yet). This is the mode that raises the bar against both offline
+  attackers and a later XSS, since a locked vault holds no key in memory. It is opt-in
+  because it trades convenience, meaning re-unlock, for that protection.
+- Either mode covers the vault (`wt-data`) only. The device identity keypairs
+  (`src/core/identity.ts`) sit unwrapped in `wt-keys` in both modes, so a profile copy, or
+  an XSS while the vault is locked, can sign handshakes as this device, including to peers
+  that verified its key.
 
 ### Controls by phase
 Phase 0 and 1 (MVP):
@@ -812,28 +906,34 @@ Phase 0 and 1 (MVP):
 - Strict CSP (`default-src 'none'`, no `unsafe-eval`, no `unsafe-inline`) plus
   `require-trusted-types-for 'script'`.
 - COOP `same-origin` plus COEP via `vercel.json`; service worker re-injects on cached
-  navigations; singlethread ffmpeg so STT and OCR survive COEP relaxation.
+  navigations; singlethread ffmpeg so STT survives COEP relaxation, not built since no
+  ffmpeg ships (4.3; OCR needs no SharedArrayBuffer, 4.2).
 - Encrypted-at-rest IDB facade, documented as not an XSS control; exact-pinned deps plus
-  lockfile; bundle rather than CDN; `npm audit` in CI.
+  lockfile; bundle rather than CDN; `npm audit` in CI, not built
+  (`.github/workflows/ci.yml` runs typecheck, lint, format check, build and e2e).
 
 Phase 2 (P2P):
-- Custom-password SDP encryption; app-layer AES-GCM plus per-session HKDF ratchet on every
-  channel; opaque room ids; relay-only toggle.
+- Custom-password SDP encryption, effective for personal and code rooms only (5.1);
+  app-layer AES-GCM plus per-session HKDF ratchet on every channel; opaque room ids;
+  relay-only toggle, present in the session layer and not exposed by any setting (6).
 - Challenge-response (signature) admission; trusted-peers vouching; PoW anti-flood speed-bump
   if it is ever built (5.5).
-- TOFU plus safety-number verification offered progressively rather than forced (section 10).
+- Safety-number verification offered rather than forced (section 10); the TOFU key pin and
+  the key-change warning are not built (Peer auth above).
 
 Phase 3 (Workshop):
-- Null-origin iframe plus QuickJS plus `connect-src 'none'`; enumerated, validated,
-  rate-limited postMessage capability API (8.2).
+- Null-origin iframe plus `connect-src 'none'`, WebRTC poisoning and child-frame stripping,
+  with the guest run by `new Function` (QuickJS-WASM not built, 8.1); enumerated
+  postMessage capability API with the per-method checks in 8.2.
 - Declarative interpreter safe by construction: op-whitelist, no eval, ReDoS worker plus
   RE2-WASM, depth and op caps.
 - Ed25519 author signing; verify before display; same-key updates; no auto-approve; two-gesture
-  consent plus per-run re-verify plus 30 s kill-timeout.
+  consent plus per-run re-verify plus a 30 s teardown for scripts (apps run until closed).
 
 Phase 4 (Hardening):
 - Stale-Chromium banner; Trusted Types polyfill for Firefox; passphrase-lock mode, the real
-  at-rest and post-XSS control.
+  at-rest and post-XSS control for the vault. Passphrase-lock is built; the banner and the
+  polyfill are not.
 
 ---
 
@@ -871,9 +971,12 @@ short list to check a change against.
   policy plus a written argument for why the output cannot execute.
 - **Never autorun shared or executable tools.** Install and run are separate explicit
   gestures, and verification (hash plus signature) gates both display and execution.
-- **Sandbox boundary.** Guest scripts run in a null-origin `blob:` iframe with
-  `allow-scripts` and never `allow-same-origin`, behind an enumerated postMessage
-  capability API. The iframe is defence in depth; the API is the boundary.
+- **Sandbox boundary.** Guest code runs in a null-origin iframe loaded from
+  `public/sandbox/`, with `allow-scripts` and never `allow-same-origin`, behind an
+  enumerated postMessage capability API. Keep the guests at real URLs with their own CSP
+  header: a `blob:` or `srcdoc` guest inherits the host policy, which refuses the inline
+  bootstrap that poisons WebRTC and strips child frames. The iframe is defence in depth; the
+  API is the boundary.
 - **Local media routing is an allow-list.** `MEDIA_TIERS` names the tiers that may receive
   camera, microphone and screen. As a deny-list, every tier added later was silently opted in.
 - **Never join a room because a peer asked you to.** Inbound peer text renders a Join
@@ -905,33 +1008,33 @@ Response headers and the SPA rewrite live in `vercel.json` at the repo root: COO
 `Referrer-Policy`, and the CSP. Read that file for the current directive values. An inline
 copy in this document drifts out of date, which is what happened to the previous one.
 
-- `wasm-unsafe-eval` in `script-src` is required for the Whisper, Tesseract, Kokoro and
-  QuickJS WASM. No nonces: a static site takes Vite-generated hashes, and a clean build has
-  zero inline scripts.
+- `wasm-unsafe-eval` in `script-src` is required for the Whisper, Tesseract and Kokoro
+  WASM. No nonces: a static site takes Vite-generated hashes, and a clean build has zero
+  inline scripts.
 - `connect-src` is a curated allow-list, and it is not the WebRTC boundary. It lists the
-  relay WebSockets (Nostr and BitTorrent) plus the origins of the consented downloads (such
-  as the tessdata and model hosts). STUN and TURN are deliberately absent because ICE traffic
+  Nostr relay WebSockets plus the origins of the consented downloads (such as the tessdata
+  and model hosts). STUN and TURN are deliberately absent because ICE traffic
   is out of CSP scope (section 2); listing them would be cargo-cult. The conflict with
   user-supplied relays resolves this way: a static `connect-src` cannot admit arbitrary user
   `wss://` origins, so the shipped app uses the curated list only, and bring-your-own-relay is
   available either through WebRTC-strategy relays that `connect-src` does not bind, or in a
   documented self-host fork where the operator edits this header. The hosted build does not
-  advertise arbitrary user relays. BitTorrent tracker fallback likewise needs its tracker
-  origins in this list, so keep the tracker set curated and small.
+  advertise arbitrary user relays. A BitTorrent tracker fallback, not built, would need its
+  tracker origins in this list too, kept curated and small.
 - COEP is `credentialless` rather than `require-corp`, precisely because `require-corp` breaks
   any cross-origin resource lacking CORP, including URL-preview embeds and third-party media.
-  `credentialless` still grants `crossOriginIsolated`, and with it SharedArrayBuffer and the
-  multithread ffmpeg fast path, while letting no-CORP subresources load credential-free.
-  Because OCR and STT use the singlethread cores (4.2, 4.3), the core tools keep working even
-  if a future tool forces COEP off entirely. Disable the Vercel toolbar in production, a known
-  COEP conflict.
+  `credentialless` still grants `crossOriginIsolated`, and with it SharedArrayBuffer for
+  multithread WASM, while letting no-CORP subresources load credential-free. OCR runs
+  without SharedArrayBuffer (4.2) and the ffmpeg core that would need it is not built
+  (4.3), so the core tools keep working even if a future tool forces COEP off entirely.
+  Disable the Vercel toolbar in production, a known COEP conflict.
 - The service worker must re-inject COOP/COEP on cached navigation responses, which Workbox
   does not do, or `crossOriginIsolated` breaks on reload.
 
 Backends and external dependencies, stated explicitly: no backend you operate is required
 for the core product, but client-only and free does not mean nothing third-party is involved.
-The app depends on third-party Nostr relays and BitTorrent trackers for signaling (free,
-unreliable, no SLA, may gate writes) and on Google STUN. A TURN relay is used only when a
+The app depends on third-party Nostr relays for signaling (free, unreliable, no SLA, may
+gate writes) and on Google and Cloudflare STUN. A TURN relay is used only when a
 device or the deployment configures one (per 5.2); without one the symmetric-NAT tail simply
 fails rather than falling back. Self-hosted coturn on Oracle Always Free would be a server
 you operate, one box, if relay reliability matters later. None of these is your application
@@ -961,10 +1064,11 @@ than upfront. Primitives live in `src/shell/ui.ts`:
 Roster row:  alice (verified)  |  bob (unverified)  [ Verify ]
 ```
 
-- Safety-number verification is offered, not forced. First contact works immediately under
-  TOFU, and an unobtrusive "unverified" chip invites a one-time QR or number check when the
-  user cares. That avoids a mandatory QR ceremony during onboarding while keeping the control
-  available for the threat that needs it.
+- Safety-number verification is offered, not forced. First contact works immediately, and an
+  unobtrusive Verify control on an unverified roster row invites a one-time number check in
+  a confirm dialog when the user cares (QR exchange is not built). That avoids a mandatory
+  ceremony during onboarding while keeping the control available for the threat that needs
+  it.
 - Per-run consent is the deliberate single point of friction for executable tools, with no
   remember-or-auto-approve. Everything else, including size disclosure and badges, is inline
   rather than a separate dialog.
@@ -991,18 +1095,19 @@ lazy-loaded and Cache/OPFS-cached.
 
 Phase 2: P2P messenger. Trystero discovery plus signed-heartbeat roster with custom-password
 SDP encryption; E2EE DataChannel wrapper with per-session HKDF ratchet; chat; raw-DataChannel
-file transfer into OPFS; VoIP and screen-share with caps; relay-only toggle; local
-`getStats()` relay-bandwidth estimate.
+file transfer into OPFS; VoIP and screen-share with caps; relay-only toggle (in the session
+layer, not exposed by any setting, 6); local `getStats()` relay-bandwidth estimate.
 - Security gate: app-layer AES-GCM plus ratchet on every channel (ciphertext and key-advance
   verified on the wire, old key zeroised); challenge-response signature admission; PoW
   anti-flood verified not to block honest peers; safety-number verification flow works
-  (offered, not forced); room caps enforced; default-relay SDP shown encrypted to a simulated
-  relay observer.
+  (offered, not forced); room caps enforced (not built: no per-room cap exists, 5.2);
+  default-relay SDP shown encrypted to a simulated relay observer.
 
 Phase 3: Workshop and sandboxed scripts. Gossip catalog plus IDB pinning plus signed file
 export and import; manifest schema plus zod plus Ed25519 sign and verify; trust tiers and
 badges; declarative automations first (safe-by-construction interpreter plus ReDoS worker),
-then the QuickJS iframe runner for `type:"script"`; two-gesture consent.
+then the iframe runner for `type:"script"`, built with `new Function` in the frame (the
+QuickJS-WASM interpreter inside it is not built, 8.1); two-gesture consent.
 - Security gate: `allow-same-origin` provably absent; in-doc `connect-src 'none'`; postMessage
   capability API audited as if the iframe is fully escaped (every method permission-gated,
   validated, rate-limited); interpreter op-whitelist has no eval or
@@ -1039,11 +1144,13 @@ self-hosted coturn; Double-Ratchet upgrade if the threat model escalates.
   and even signaling leans on third parties. STUN covers ~70-90% residential `[~]`; the
   ~10-30% symmetric-NAT and CGNAT tail `[~]` needs TURN. Free TURN is best-effort and
   shared-pool, and you cannot read the remaining pool quota, only a local `getStats()`
-  estimate. Nostr and BitTorrent relays are third-party, unreliable, and may gate writes.
-- **In-browser Whisper:** files and video are solid; live-mic real time is best effort and
-  device and browser dependent, degrading to VAD-chunked near real time. Accuracy is capped at
+  estimate. Nostr relays are third-party, unreliable, and may gate writes.
+- **In-browser Whisper:** files are solid, and video only where `decodeAudioData` reads the
+  container, since no ffmpeg ships (4.3); live-mic real time is best effort and device and
+  browser dependent, degrading to VAD-chunked near real time. Accuracy is capped at
   base/small, below cloud large-v3. Do not trust WebGPU to be faster; benchmark at runtime.
-  Download is tens of MB, never auto-fetched, hash-verified.
+  Download is tens of MB and never auto-fetched. It is not hash-verified: the model loads
+  unpinned from Hugging Face (4.3).
 - **"Catalog with literally no server" is false.** It is "no server *you* operate", with
   persistence degrading to online-peer overlap, and no durable hosting without accepting a
   relay or KV dependency, because browsers have no DHT. Installed tools survive locally and
@@ -1061,29 +1168,36 @@ self-hosted coturn; Double-Ratchet upgrade if the threat model escalates.
   sections 2 and 10, applied to the *guest*. Fixed: the guest bootstrap poisons
   `RTCPeerConnection`, `webkitRTCPeerConnection`, `mozRTCPeerConnection` and `RTCDataChannel`,
   which is browser-enforced and CSP-independent, before any untrusted source runs
-  (`src/workshop/sandbox.ts`). Poisoning reaches one realm only, and a child frame is a realm
-  of its own: an `<iframe srcdoc>` the guest inserts gets a working `RTCPeerConnection`, and
-  CSP stops neither srcdoc nor `about:`/`javascript:` navigations (Chromium also ignores the
-  CSP3 `webrtc` directive). So the guest gets no frames: a `MutationObserver` detaches any
-  inserted `iframe`/`frame`/`object`/`embed` before its navigation can commit, using DOM
-  methods captured before untrusted code runs. Every shadow root `attachShadow` creates is
-  watched the same way, so web components keep working; `setHTMLUnsafe`, `parseHTMLUnsafe`
-  (declarative shadow roots) and `document.open/write` are refused because they would place
-  an insertion where the observer does not look. Apps lose `<object>`/`<embed>` with it.
-  Per-tool IndexedDB is also quota-capped at 1 MiB, counting key bytes, with writes
-  serialised per namespace, so a `storage`-granted tool cannot exhaust origin storage.
+  (`public/sandbox/script.html`, `app.html`). Poisoning reaches one realm only, and a child
+  frame is a realm of its own: an `<iframe srcdoc>` the guest inserts gets a working
+  `RTCPeerConnection`, and CSP stops neither srcdoc nor `about:`/`javascript:` navigations
+  (Chromium also ignores the CSP3 `webrtc` directive). So the guest gets no frames: a
+  `MutationObserver` detaches any inserted `iframe`/`frame`/`object`/`embed` before its
+  navigation can commit, using DOM methods captured before untrusted code runs. Every
+  shadow root `attachShadow` creates is watched the same way, so web components keep
+  working; `setHTMLUnsafe`, `parseHTMLUnsafe` (declarative shadow roots) and
+  `document.open/write` are refused because they would place an insertion where the
+  observer does not look. Apps lose `<object>`/`<embed>` with it.
+  Tool storage is also quota-capped at 1 MiB per tool namespace (`toolStorage` in
+  `src/core/store.ts`), counting key bytes, with writes serialised per namespace, so a
+  `storage`-granted tool cannot exhaust origin storage. Every Workshop tool shares one
+  namespace, `tool:workshop:`, with the installed list and its sources (up to 512 KiB
+  each), so that 1 MiB covers all of them together: one tool filling it, or two near-maximum
+  sources, makes later installs fail with `tool storage quota exceeded`.
 - **COEP interaction is real.** `require-corp` breaks cross-origin embeds, so the default is
-  `credentialless`. ffmpeg.wasm multithread needs cross-origin isolation, so the app ships its
-  singlethread core and STT and OCR survive COEP relaxation `[v]`. Trusted Types is
-  Chromium-only, so Firefox gets a polyfill. Workbox will not forward COOP/COEP on cached
-  navigations, so a custom service-worker handler is required.
+  `credentialless`. ffmpeg.wasm multithread needs cross-origin isolation, so the plan is its
+  singlethread core `[v]`; no ffmpeg ships yet (4.3), and OCR needs no SharedArrayBuffer
+  (4.2). Where the browser has no Trusted Types, `src/core/trusted-types.ts` installs
+  nothing and the CSP directive is inert; the planned Firefox polyfill is not built.
+  Workbox will not forward COOP/COEP on cached navigations, so a custom service-worker
+  handler is required.
 - **Native WebCrypto Ed25519/X25519 is recent:** Firefox 129, Safari 17, Chrome 137 `[v]`,
   saturating around 2027 `[v]`. Crypto-dependent features hard-fail on older browsers instead
   of shipping a weaker JS-crypto polyfill. Single-user tools still work.
 - **Encrypted-at-rest IDB does nothing against XSS (see section 9).** A same-origin attacker can use the
   non-extractable key in place. CSP plus Trusted Types plus the DOMParser strip are the primary XSS
-  controls, and passphrase-lock mode (Phase 4) is the only mode that protects against a later
-  compromise.
+  controls, and passphrase-lock mode (Phase 4) is the only mode that protects the vault
+  against a later compromise; the identity keys stay outside it (section 9).
 - **Mesh ceiling is roughly 20-30 peers `[~]`, video roughly 6 `[~]`.** No free SFU exists, so
   scope groups small.
 

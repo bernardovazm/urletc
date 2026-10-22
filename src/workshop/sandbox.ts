@@ -5,10 +5,13 @@
 // with its own CSP header (vercel.json, vite.config.ts): a blob: or srcdoc document inherits
 // the host policy, whose script-src and Trusted Types refuse the guest's inline bootstrap and
 // its eval. The iframe is defence-in-depth and the boundary is the enumerated postMessage
-// capability API below: the guest has zero ambient authority, every capability is
-// host-mediated, permission-gated and validated, and the iframe is destroyed on a 30 s
-// deadline. The caller must obtain consent first and NEVER autorun. Swapping the guest's
-// eval for QuickJS-WASM is the planned upgrade, for preemptive interruption and interpreter
+// capability API below: the guest reaches nothing of the host's except through it, and
+// every capability is host-mediated and permission-gated. Inside its own realm the guest
+// still has the usual globals (time, crypto, eval). A script's iframe is removed after
+// 30 s by a host timer, which is not preemptive: a guest that never yields can stall the
+// host where the browser keeps the frame in its process. An app runs until closed. The
+// caller must obtain consent first and NEVER autorun. Swapping the guest's eval for
+// QuickJS-WASM is the planned upgrade, for preemptive interruption and interpreter
 // isolation.
 
 export interface SandboxPermissions {

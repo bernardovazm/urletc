@@ -1,11 +1,10 @@
 import type { ToolContext, ToolModule } from '../shell/registry'
 import { copyText, el } from '../shell/ui'
 
-// How long this tab has been open. The elapsed number comes from performance.now(), which
-// counts from performance.timeOrigin on a monotonic clock, so an NTP step, a manual clock
-// change or a timezone switch cannot corrupt it the way `Date.now() - startedAt` can.
-// timeOrigin is also the wall-clock anchor, read once for the "Opened at" row. A reload is
-// a new document, so it starts a new count.
+// How long this tab has been open, measured against the "Opened at" wall-clock anchor
+// (performance.timeOrigin). performance.now() stops while the machine sleeps on common
+// platforms, so it undercounted after a suspend; wall time counts sleep, and a clock step
+// can skew the total instead. A reload is a new document, so it starts a new count.
 
 /** "00:00:04", "02:14:03", "3d 02:14:03". Always hours:minutes:seconds, so the width
  *  stays put as it ticks and no field can be mistaken for a bigger unit. */
@@ -36,10 +35,10 @@ const tool: ToolModule = {
     const opened = valueRow('Opened at')
     opened.value.textContent = openedAt.toLocaleString()
 
-    // Recomputed from performance.now() every tick rather than incremented, so a
-    // throttled or skipped interval in a background tab cannot make the total drift.
+    // Recomputed every tick rather than incremented, so a throttled or skipped interval in a
+    // background tab cannot make the total drift.
     const tick = () => {
-      openFor.value.textContent = formatUptime(performance.now())
+      openFor.value.textContent = formatUptime(Date.now() - performance.timeOrigin)
     }
     tick()
     const timer = window.setInterval(tick, 1000)

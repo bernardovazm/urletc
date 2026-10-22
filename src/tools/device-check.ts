@@ -254,6 +254,9 @@ const tool: ToolModule = {
     void fillDevices()
 
     cleanups.set(container, () => {
+      // A recording still running when the card closes stops below and would mint a URL
+      // nothing revokes, so its handler is detached first.
+      if (recorder) recorder.onstop = null
       stopAll()
       if (lastUrl) URL.revokeObjectURL(lastUrl)
     })

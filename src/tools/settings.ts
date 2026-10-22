@@ -126,7 +126,7 @@ const tool: ToolModule = {
       // Presence is off by default. Unlike nearby, which is one network, this announces
       // you to everyone running the app, so it is opt-in. It carries no messages, files
       // or media.
-      const prChk = el('input', { type: 'checkbox' }) as HTMLInputElement
+      const prChk = el('input', { type: 'checkbox', class: 'presence-chk' }) as HTMLInputElement
       prChk.checked = (await getItem<boolean>('presence-on')) ?? false
       prChk.addEventListener('change', () => {
         void setItem('presence-on', prChk.checked)
@@ -297,7 +297,16 @@ const tool: ToolModule = {
       if (sel) sel.value = (e as CustomEvent<OcrMode>).detail
     }
     window.addEventListener(OCR_MODE_EVENT, onOcrMode)
-    cleanups.set(container, () => window.removeEventListener(OCR_MODE_EVENT, onOcrMode))
+    // Same for the online list, which the sidebar switch and an invitation also turn on.
+    const onPresence = (e: Event) => {
+      const chk = container.querySelector<HTMLInputElement>('input.presence-chk')
+      if (chk) chk.checked = !!(e as CustomEvent).detail
+    }
+    window.addEventListener('wt:presence', onPresence)
+    cleanups.set(container, () => {
+      window.removeEventListener(OCR_MODE_EVENT, onOcrMode)
+      window.removeEventListener('wt:presence', onPresence)
+    })
   },
 
   deactivate(container: HTMLElement) {

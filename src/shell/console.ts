@@ -269,7 +269,9 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
 
   // Messages typed while no one is connected are queued and delivered as soon as a
   // device joins. The composer never refuses to send.
-  const outbox: Array<{ text: string; id: string }> = []
+  // Each entry remembers the code room it was typed in. One typed for room A and still
+  // queued after a switch went to the first peer of room B, a stranger's room included.
+  const outbox: Array<{ text: string; id: string; code: string }> = []
   let flushingOutbox = false
   async function flushOutbox() {
     if (flushingOutbox || !outbox.length || reachableCount() === 0) return
@@ -2406,10 +2408,11 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
       join(c.code)
     } else if (reachableCount() > 0) {
       void sendChatAll(text, id)
-    } else if (!c) {
-      // A code-shaped token is never queued: whoever arrives first, a nearby stranger
-      // included, would be handed it.
-      outbox.push({ text, id })
+    } else if (!c || c.code.length !== CODE_LENGTH || !/^[2-9a-hj-km-np-z]+$/.test(c.code)) {
+      // A token shaped like a generated code is never queued: whoever arrives first, a
+      // nearby stranger included, would be handed it. Other digit-bearing words ("10min")
+      // are ordinary replies.
+      outbox.push({ text, id, code: codeLabel })
       toast('No one connected. Message queued; sends when a device joins')
     }
     ta.value = ''
@@ -2815,6 +2818,11 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     // An invite to the room being left would send its invitee into a room nobody is in.
     void withdrawInvites((pend) => pend.code !== code)
     await leaveTier('code')
+    const stale = outbox.filter((m) => m.code && m.code !== code)
+    if (stale.length) {
+      for (const m of stale) outbox.splice(outbox.indexOf(m), 1)
+      sys(`Dropped ${stale.length} queued message${stale.length > 1 ? 's' : ''} typed for ${stale[0].code.toUpperCase()}.`)
+    }
     if (code) {
       codeLabel = code
       if (!(await joinTier('code', await codeRoom(code)))) codeLabel = ''

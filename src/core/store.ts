@@ -214,16 +214,22 @@ export function unlock(passphrase: string): Promise<boolean> {
   return rekey(() => unlockStore(passphrase))
 }
 
-async function unlockStore(passphrase: string): Promise<boolean> {
-  const salt = await get<Uint8Array<ArrayBuffer>>(SALT_ID, keyStore)
+/** Whether a key opens the stored passphrase verifier. */
+async function verifies(ppKey: CryptoKey): Promise<boolean> {
   const verifier = await get<AesGcmBlob>(VERIFIER_ID, keyStore)
-  if (!salt || !verifier) throw new Error('no passphrase configured')
-  const ppKey = await deriveKey(passphrase, salt)
+  if (!verifier) return false
   try {
-    if (decoder.decode(await aesGcmDecrypt(ppKey, verifier)) !== VERIFIER_TOKEN) return false
+    return decoder.decode(await aesGcmDecrypt(ppKey, verifier)) === VERIFIER_TOKEN
   } catch {
     return false
   }
+}
+
+async function unlockStore(passphrase: string): Promise<boolean> {
+  const salt = await get<Uint8Array<ArrayBuffer>>(SALT_ID, keyStore)
+  if (!salt || !(await get(VERIFIER_ID, keyStore))) throw new Error('no passphrase configured')
+  const ppKey = await deriveKey(passphrase, salt)
+  if (!(await verifies(ppKey))) return false
 
   // Finish a switch that was interrupted before commit (both keys are in hand here).
   const migrating = (await get<string>(MIGRATION_ID, keyStore)) as StoreMode | undefined
@@ -283,12 +289,20 @@ export function enablePassphrase(passphrase: string): Promise<void> {
 
 async function switchToPassphrase(passphrase: string): Promise<void> {
   const deviceKey = requireKey()
-  const salt = randomBytes(16)
+  // A switch that failed part-way (a full disk) left items under its passphrase key. A
+  // retry resumes it under the same salt; a fresh salt made a key that could open none of
+  // them, and the commit then stranded them for good. So a retry must use that passphrase.
+  const pendingSalt = (await get<string>(MIGRATION_ID, keyStore)) === 'passphrase' ? await get<Uint8Array<ArrayBuffer>>(SALT_ID, keyStore) : undefined
+  const salt = pendingSalt ?? randomBytes(16)
   const ppKey = await deriveKey(passphrase, salt)
 
-  await set(MIGRATION_ID, 'passphrase', keyStore) // mark in-flight (device key still selectable)
-  await set(VERIFIER_ID, await aesGcmEncrypt(ppKey, encoder.encode(VERIFIER_TOKEN)), keyStore)
-  await set(SALT_ID, salt, keyStore) // a stored salt means "committed to going forward" (see initStore)
+  if (pendingSalt) {
+    if (!(await verifies(ppKey))) throw new Error('an interrupted switch is pending; enter the passphrase used for it')
+  } else {
+    await set(MIGRATION_ID, 'passphrase', keyStore) // mark in-flight (device key still selectable)
+    await set(VERIFIER_ID, await aesGcmEncrypt(ppKey, encoder.encode(VERIFIER_TOKEN)), keyStore)
+    await set(SALT_ID, salt, keyStore) // a stored salt means "committed to going forward" (see initStore)
+  }
   await finishSwitch('passphrase', ppKey, deviceKey)
   wrapKey = ppKey
   locked = false
@@ -308,10 +322,14 @@ export function disablePassphrase(): Promise<void> {
 
 async function switchToDevice(): Promise<void> {
   const ppKey = requireKey()
-  const deviceKey = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt'])
+  // Same as switchToPassphrase: a retry reuses the key an interrupted switch persisted.
+  const pending = (await get<string>(MIGRATION_ID, keyStore)) === 'device' ? await get<CryptoKey>(WRAP_KEY_ID, keyStore) : undefined
+  const deviceKey = pending ?? (await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']))
 
-  await set(MIGRATION_ID, 'device', keyStore)
-  await set(WRAP_KEY_ID, deviceKey, keyStore) // persist target key before any item is re-wrapped
+  if (!pending) {
+    await set(MIGRATION_ID, 'device', keyStore)
+    await set(WRAP_KEY_ID, deviceKey, keyStore) // persist target key before any item is re-wrapped
+  }
   await finishSwitch('device', deviceKey, ppKey)
   wrapKey = deviceKey
   locked = false

@@ -2546,11 +2546,26 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
       // Switching rooms is a user decision, so it takes a user gesture.
       const c = m.mine ? null : chatCodeCandidate(m.text)
       if (c && c.code !== codeLabel) {
-        const join = () =>
+        // A code from anyone but a paired device names a room someone else chose, so live
+        // sources stop instead of following the switch into it, as with an invite.
+        const stranger = tier !== 'personal'
+        const join = () => {
+          if (stranger && localStreams.size) {
+            stopMedia()
+            sys('Stopped sharing before joining their room.')
+          }
           void setCode(c.code).then((ok) => {
             if (ok) toast(`Joined code ${c.code.toUpperCase()}`)
           })
-        node.append(button(`Join code ${c.code.toUpperCase()}`, join, 'ghost small', 'Use this message as a join code'))
+        }
+        node.append(
+          button(
+            `Join code ${c.code.toUpperCase()}`,
+            join,
+            'ghost small',
+            stranger ? 'Use this message as a join code. Anything you are sharing stops first' : 'Use this message as a join code',
+          ),
+        )
       }
       addCard(node)
       markActivity()

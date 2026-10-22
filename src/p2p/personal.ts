@@ -8,6 +8,16 @@ import { b64ToBytes, bytesToB64, randomBytes, sha256, toHex } from '../core/cryp
 import { getItem, setItem } from '../core/store'
 
 const SECRET_KEY = 'personal-secret:v1'
+
+// Every tab of the app joins the personal room. A reset or an imported link in one tab
+// moved only that tab, and another one (an installed PWA window) stayed in the old room
+// with the device the reset was meant to cut off. A channel never hears its own messages.
+const secretChannel = typeof BroadcastChannel === 'function' ? new BroadcastChannel('wt-personal') : null
+
+/** Run `cb` when another tab replaces the pairing secret. */
+export function onSecretReplaced(cb: () => void): void {
+  secretChannel?.addEventListener('message', cb)
+}
 const enc = new TextEncoder()
 
 function concat(a: Uint8Array, b: Uint8Array): Uint8Array<ArrayBuffer> {
@@ -34,6 +44,7 @@ export async function ensurePersonalSecret(): Promise<Uint8Array<ArrayBuffer>> {
 export async function resetPersonalSecret(): Promise<Uint8Array<ArrayBuffer>> {
   const secret = randomBytes(32)
   await setItem(SECRET_KEY, bytesToB64(secret))
+  secretChannel?.postMessage('replaced')
   return secret
 }
 
@@ -42,8 +53,9 @@ export async function resetPersonalSecret(): Promise<Uint8Array<ArrayBuffer>> {
 export async function importPersonalSecret(b64: string, replace: () => boolean): Promise<void> {
   if (b64ToBytes(b64).length !== 32) throw new Error('invalid pairing code')
   const current = await getItem<string>(SECRET_KEY)
-  if (current && current !== b64 && !replace()) return
+  if (current === b64 || (current && !replace())) return
   await setItem(SECRET_KEY, b64)
+  secretChannel?.postMessage('replaced')
 }
 
 export async function personalRoom(secret: Uint8Array): Promise<{ roomId: string; password: string }> {

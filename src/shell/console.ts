@@ -25,7 +25,7 @@ import { randomNickname } from '../core/nickname'
 import { getOcrMode } from '../core/prefs'
 import { getItem, removeItem, setItem } from '../core/store'
 import { CODE_LENGTH, codeRoom, generateJoinCode, nearbyRoom, normalizeJoinCode, publicIp } from '../p2p/discovery'
-import { ensurePersonalSecret, pairLink, personalRoom, resetPersonalSecret } from '../p2p/personal'
+import { ensurePersonalSecret, onSecretReplaced, pairLink, personalRoom, resetPersonalSecret } from '../p2p/personal'
 import type { ChatMessage, HistoryRecord, InviteSignal, PeerTransport, ReceivedFile, RoomSession, RosterPeer, SessionEvents, TransportState } from '../p2p/session'
 import { setTransientGuard } from '../tools/close-guard'
 import { markActivity } from './attention'
@@ -3654,6 +3654,13 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
       sys(e instanceof CryptoUnsupportedError ? 'P2P unavailable on this browser. Local tools still work.' : `Could not open your room: ${(e as Error).message}`)
     }
   })()
+  // Another tab reset or imported the pairing link: follow it out of the old room.
+  onSecretReplaced(() => {
+    void (async () => {
+      await leaveTier('personal')
+      if (await joinTier('personal', await personalRoom(await ensurePersonalSecret()))) sys('Pairing link changed in another tab; your room moved with it.')
+    })()
+  })
 
   // 3) nearby: same-public-IP rendezvous. Open the app on two devices on one Wi-Fi
   //    and they find each other (section 5.4). Nearby peers are untrusted by default,

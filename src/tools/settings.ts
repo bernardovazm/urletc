@@ -4,7 +4,7 @@ import { checkRelay, deploymentRelay, describeRelay, parseIceServers, validateIc
 import type { ToolModule } from '../shell/registry'
 import { currentTheme, toggleTheme } from '../shell/theme'
 import { button, el, toast } from '../shell/ui'
-import { getCloseGuard, setCloseGuard } from './close-guard'
+import { getCloseGuard, releaseCloseGuard, setCloseGuard } from './close-guard'
 
 // Manages the at-rest encryption mode (ARCHITECTURE section 9) plus the console's
 // proactivity switches (auto-OCR on images, live mic captions) and this device's TURN
@@ -88,6 +88,7 @@ const tool: ToolModule = {
               'Lock now',
               () => {
                 lockAll()
+                releaseCloseGuard()
                 location.reload()
               },
               'primary',
@@ -270,7 +271,10 @@ const tool: ToolModule = {
             return
           wipeBtn.setAttribute('disabled', '')
           void wipeAll()
-            .then(() => location.reload()) // the identity and wrapping key are gone; there is nothing left to run on
+            .then(() => {
+              releaseCloseGuard()
+              location.reload() // the identity and wrapping key are gone; there is nothing left to run on
+            })
             .catch((e: unknown) => {
               wipeBtn.removeAttribute('disabled')
               toast(`Failed: ${(e as Error).message}`)

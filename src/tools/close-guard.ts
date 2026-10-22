@@ -58,6 +58,14 @@ export function setTransientGuard(on: boolean): void {
   applyCloseGuard()
 }
 
+/** Disarm for a reload the user just confirmed (Lock now, Delete everything). Left armed,
+ *  the browser asked again, and cancelling left a tab holding the key or a wiped store. */
+export function releaseCloseGuard(): void {
+  stored = false
+  transient = false
+  applyCloseGuard()
+}
+
 /** Boot hook that re-arms a guard left on. Safe to call before any UI exists. */
 export async function initCloseGuard(): Promise<void> {
   stored = await getCloseGuard()

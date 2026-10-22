@@ -507,7 +507,13 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
           /* ignore */
         }
         if (revealedItem === wrap) revealedItem = null
+        // Focus moves to the neighbouring card, or the composer: removing the focused
+        // control dropped a keyboard user back at the top of the page.
+        const next =
+          (wrap.nextElementSibling ?? wrap.previousElementSibling)?.querySelector<HTMLElement>('button, a[href], summary, input, textarea') ??
+          document.querySelector<HTMLElement>('.composer textarea')
         wrap.remove()
+        if (document.activeElement === document.body) next?.focus()
       },
       'icon sm del',
       'Remove from feed',
@@ -2173,7 +2179,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     true,
   )
 
-  function openTools(filter = '', anchor?: HTMLElement) {
+  function openTools(filter = '', anchor?: HTMLElement, focusFirst = false) {
     closeLauncher()
     window.clearTimeout(launcherCloseTimer)
     const menu = el('div', { class: 'menu tool-grid' })
@@ -2272,6 +2278,9 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     document.body.append(menu)
     placeMenu(menu, (anchor ?? topbar).getBoundingClientRect())
     launcher = menu
+    // Opened by a press rather than a hover, focus goes into the menu: it is appended at the
+    // end of the page, so a keyboard user otherwise had to Tab past every card to reach it.
+    if (focusFirst) menu.querySelector<HTMLElement>('button')?.focus()
   }
   /** Give a button hover-open behavior for the launcher. */
   const hoverTools = (b: HTMLElement) => {
@@ -2445,7 +2454,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   })
   imgInput.addEventListener('change', () => void handleAttach(imgInput.files?.[0]))
 
-  const slashBtn = hoverTools(button('/', () => openTools('', slashBtn), 'icon', 'Tools (hover to open, drag to reorder)'))
+  const slashBtn = hoverTools(button('/', () => openTools('', slashBtn, true), 'icon', 'Tools (hover to open, drag to reorder)'))
   const composerCollapseBtn = button(
     '🔽',
     () => {
@@ -3331,7 +3340,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     'icon room-link',
     'Copy the room link to share',
   )
-  const toolsBtn = hoverTools(button('Tools', () => openTools('', toolsBtn), 'ghost', 'All tools. Hover to open, drag to reorder'))
+  const toolsBtn = hoverTools(button('Tools', () => openTools('', toolsBtn, true), 'ghost', 'All tools. Hover to open, drag to reorder'))
 
   // The two controls that belong next to the roster rather than three clicks away: whether
   // you are on the online list at all, and the name the list shows for you. The switch
@@ -3371,6 +3380,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   const applySidebar = () => {
     sidebar.classList.toggle('open', sidebarOpen)
     bodyEl.classList.toggle('side-collapsed', !sidebarOpen)
+    peersBtn.setAttribute('aria-expanded', String(sidebarOpen)) // the drawer's state, for a screen reader
   }
   applySidebar()
 

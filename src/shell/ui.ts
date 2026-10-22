@@ -149,7 +149,8 @@ export function consent(o: ConsentOptions): Promise<boolean> {
       body.push(el('details', {}, [el('summary', { text: 'Source' }), el('pre', { text: o.source })]))
     }
     const runBtn = button(o.runLabel ?? 'Run once', () => close(true), 'primary')
-    body.push(el('div', { class: 'row' }, [el('span', { class: 'spacer' }), button('Cancel', () => close(false)), runBtn]))
+    const cancelBtn = button('Cancel', () => close(false))
+    body.push(el('div', { class: 'row' }, [el('span', { class: 'spacer' }), cancelBtn, runBtn]))
 
     const modal = el('div', { class: 'modal', role: 'dialog', 'aria-modal': 'true', 'aria-label': `Consent required: ${o.title}` }, body)
     back.append(modal)
@@ -157,6 +158,8 @@ export function consent(o: ConsentOptions): Promise<boolean> {
       if (e.target === back) close(false)
     })
     document.body.append(back)
-    runBtn.focus()
+    // Focus starts on Cancel: on Run, a repeated or held Enter from the click that opened
+    // the gate approved running code nobody had read.
+    cancelBtn.focus()
   })
 }

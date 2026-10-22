@@ -2772,6 +2772,8 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     // Normalised here, at the one place every route goes through, so the chip, the address
     // bar and the recent-rooms list always hold the same spelling of a code.
     const code = raw ? normalizeJoinCode(raw) : null
+    // An invite to the room being left would send its invitee into a room nobody is in.
+    void withdrawInvites((pend) => pend.code !== code)
     await leaveTier('code')
     if (code) {
       codeLabel = code
@@ -2804,8 +2806,11 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     }
     const timer = window.setTimeout(() => {
       if (!pendingInvites.delete(p.pubKeyHex)) return
+      // The code already reached them, so the invite is withdrawn, or their Connect card
+      // would stay live and walk them into this room whenever they pressed it.
+      void sessions.get('presence')?.withdrawInvite(p.peerId)
       renderRoster()
-      sys(`${who} did not answer your invite. Nothing was shared.`)
+      sys(`${who} did not answer your invite, so it was withdrawn.`)
     }, INVITE_TIMEOUT)
     pendingInvites.set(p.pubKeyHex, { peerId: p.peerId, code, timer })
     renderRoster()
@@ -2893,13 +2898,21 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   /** Drop a peer locally: the row goes, their media is torn down through the same path
    *  the stage uses (so peerMedia and the row's mute/volume controls stay consistent),
    *  and anything they send from now on is ignored. */
+  /** End invites this device sent without an answer, retracting each from its invitee. */
+  function withdrawInvites(which: (pend: { peerId: string; code: string }) => boolean): Promise<unknown> {
+    const done: Promise<unknown>[] = []
+    for (const [key, pend] of [...pendingInvites]) {
+      if (!which(pend)) continue
+      window.clearTimeout(pend.timer)
+      pendingInvites.delete(key)
+      done.push(sessions.get('presence')?.withdrawInvite(pend.peerId) ?? Promise.resolve())
+    }
+    return Promise.allSettled(done)
+  }
+
   function dropPeer(p: RosterPeer, tier: Tier): void {
     if (p.deviceId) dropped.add(p.deviceId)
-    const pend = pendingInvites.get(p.pubKeyHex)
-    if (pend) {
-      window.clearTimeout(pend.timer)
-      pendingInvites.delete(p.pubKeyHex)
-    }
+    void withdrawInvites((pend) => pend.peerId === p.peerId)
     dismissInvite(p.peerId)
     dropPeerMedia(p.peerId)
     renderRoster()
@@ -3748,12 +3761,15 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     const has = sessions.get('presence')
     if (presenceWanted && !has) void startPresence()
     else if (!presenceWanted && has) {
-      for (const [key, pend] of pendingInvites) {
-        window.clearTimeout(pend.timer)
-        pendingInvites.delete(key)
-      }
       for (const peerId of [...inboundInvites.keys()]) dismissInvite(peerId)
-      void leaveTier('presence').then(() => sys('Online list off, so you no longer appear to other users.'))
+      // Withdrawals go out on the presence session, so it is left once they are sent. A
+      // switch flipped back on meanwhile found the session still there and started nothing,
+      // and the leave then took it away; it stays instead.
+      void withdrawInvites(() => true).then(async () => {
+        if (presenceWanted) return
+        await leaveTier('presence')
+        sys('Online list off, so you no longer appear to other users.')
+      })
     }
   })
   window.addEventListener('wt:cover-video', (e) => {

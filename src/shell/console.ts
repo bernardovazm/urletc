@@ -302,6 +302,12 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   }
 
   // ---------- feed ----------
+  // Announces what arrives, since nothing else tells a screen reader a card was added. Not
+  // the feed itself: a history replay inserted at the top would be read out whole.
+  const announcer = el('div', { class: 'sr-only', role: 'status', 'aria-live': 'polite' })
+  const announce = (text: string) => {
+    announcer.textContent = text.slice(0, 200)
+  }
   const feedInner = el('div', { class: 'feed-inner' })
   const feed = el('div', { class: 'feed' }, [feedInner])
   // Back to the newest item after scrolling up. addCard follows new content by pinning
@@ -786,6 +792,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     card.append(el('span', { text: `${who} joined and asked for the ${n} earlier message${n === 1 ? '' : 's'} stored here. ` }), send, always, no)
     historyPrompts.set(peerId, { card, tier })
     addCard(card, () => historyPrompts.delete(peerId))
+    announce(`${who} asked for the earlier messages stored here.`)
   }
 
   /** Replayed entries render as one collapsed card, never as loose bubbles, so what was
@@ -2547,6 +2554,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     onChat: (m) => {
       if (dropped.has(m.deviceId)) return
       remember({ id: m.id, deviceId: m.deviceId, name: m.name, text: m.text, ts: m.ts, kind: 'chat', tier, room: histRoom })
+      if (!m.mine) announce(`${m.name}: ${m.text}`)
       const node = chatCard(m)
       // A code that arrives in a peer's message always requires an explicit click,
       // never the auto-join branch the composer uses for text you typed yourself.
@@ -2588,6 +2596,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
       // The card owns the blob URL: the session hands it over and never revokes it, so a
       // Download link keeps working after the room that delivered the file is left.
       addCard(fileCard(f), () => URL.revokeObjectURL(f.url))
+      announce(`File received: ${f.name}`)
       markActivity()
     },
     onHistoryRequest: (peerId) => {
@@ -2904,6 +2913,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     card.append(el('span', { text: `${who}, calling itself "${sig.name.slice(0, 24)}", wants to connect. ` }), join, no)
     inboundInvites.set(sig.peerId, card)
     addCard(card, () => inboundInvites.delete(sig.peerId))
+    announce(`${who} wants to connect.`)
   }
 
   /** Drop a peer locally: the row goes, their media is torn down through the same path
@@ -3379,7 +3389,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
 
   renderPins()
 
-  app.append(sink, el('div', { class: 'app-shell' }, [topbar, bodyEl]))
+  app.append(sink, announcer, el('div', { class: 'app-shell' }, [topbar, bodyEl]))
   if (stageView) document.documentElement.classList.add('stage-view') // chromeless: CSS shows only the stage
 
   // ---------- on-screen keyboard ----------

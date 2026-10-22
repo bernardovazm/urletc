@@ -470,7 +470,7 @@ export interface RoomSession {
    * Ignored on a session without `allowHistory`, which is how nearby and presence stay
    * incapable of carrying history no matter what the caller asks for.
    */
-  setHistory(cfg: { provide: (() => HistoryRecord[]) | null; request: boolean; onRecords: ((records: HistoryRecord[], fromPeerId: string) => void) | null }): void
+  setHistory(cfg: { provide: ((peerId: string) => HistoryRecord[]) | null; request: boolean; onRecords: ((records: HistoryRecord[], fromPeerId: string) => void) | null }): void
   /**
    * Answer one peer that already asked, without installing a provider for the room. The
    * per-person grant is still a pull, since the peer's own request is the precondition.
@@ -711,7 +711,7 @@ export async function joinRoomSession(opts: {
   // History capability. presenceOnly wins over allowHistory, so a caller that sets both
   // gets a session that carries nothing. Everything below stays inert until setHistory().
   const historyOk = !!opts.allowHistory && !opts.presenceOnly
-  let historyProvide: (() => HistoryRecord[]) | null = null
+  let historyProvide: ((peerId: string) => HistoryRecord[]) | null = null
   let historyRequest = false
   let historyRecords: ((records: HistoryRecord[], fromPeerId: string) => void) | null = null
   const historyServed = new Set<string>() // peers already answered; one answer each, ever
@@ -1445,7 +1445,7 @@ export async function joinRoomSession(opts: {
         ev.onHistoryRequest?.(ctx.peerId)
         return
       }
-      await serveHistory(ctx.peerId, historyProvide())
+      await serveHistory(ctx.peerId, historyProvide(ctx.peerId))
       return
     }
     if (env.t !== 'hres') return
@@ -1778,8 +1778,8 @@ export async function joinRoomSession(opts: {
       // A provider installed after a peer asked answers that peer now. Without this the
       // switch only helped the next joiner, because a peer asks once and never again.
       if (historyProvide && historyPending.size) {
-        const owed = historyProvide() // read once, so every waiting peer sees one snapshot
-        for (const peerId of [...historyPending]) void serveHistory(peerId, owed)
+        const provide = historyProvide
+        for (const peerId of [...historyPending]) void serveHistory(peerId, provide(peerId))
       }
       // A setting flipped after the room filled must still reach the peers already in it,
       // otherwise "ask for history" would only ever take effect on the next join.

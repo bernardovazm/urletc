@@ -226,19 +226,32 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   /** Send to every connected device exactly once, across all tiers. Returns count. */
   /** One id per message, minted once and reused across tiers, so a device reachable on
    *  two tiers stores one record and a later replay dedupes against it. */
+  /** Identity keys of devices removed with the roster's trash button. They are skipped
+   *  like a device already reached on another tier, so nothing composed here reaches them;
+   *  removing a peer used to hide it while every message and file still went to it. */
+  const droppedKeys = () =>
+    new Set(
+      [...rosters.values()]
+        .flat()
+        .filter((p) => dropped.has(p.deviceId) && p.pubKeyHex)
+        .map((p) => p.pubKeyHex),
+    )
+
   async function sendChatAll(text: string, id: string): Promise<number> {
-    const sent = new Set<string>()
+    const sent = droppedKeys()
+    const skipped = sent.size
     for (const tier of BROADCAST_TIERS) {
       const s = sessions.get(tier)
       if (s) for (const k of await s.sendChat(text, sent, id)) sent.add(k)
     }
-    return sent.size
+    return sent.size - skipped
   }
   /** Per tier, and one tier's failure must not swallow the others: these run in sequence
    *  so a device reachable on two tiers is not sent the same megabytes twice, which also
    *  meant a throw on the first tier silently cancelled the file for every later one. */
   async function sendFileAll(file: File): Promise<number> {
-    const sent = new Set<string>()
+    const sent = droppedKeys()
+    const skipped = sent.size
     const failed: string[] = []
     for (const tier of BROADCAST_TIERS) {
       const s = sessions.get(tier)
@@ -249,9 +262,9 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
         failed.push(`${tier}: ${(e as Error).message}`)
       }
     }
-    if (failed.length && !sent.size) throw new Error(failed.join('; '))
+    if (failed.length && sent.size === skipped) throw new Error(failed.join('; '))
     if (failed.length) sys(`Some devices did not get "${file.name}" (${failed.join('; ')}).`)
-    return sent.size
+    return sent.size - skipped
   }
 
   // Messages typed while no one is connected are queued and delivered as soon as a
@@ -667,7 +680,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
       if (!s) continue
       const room = roomOf(tier) ?? undefined // fixed now, so a late answer is filed under its own room
       s.setHistory({
-        provide: sharesTo(tier) ? () => shareableHistory(tier) : null,
+        provide: sharesTo(tier) ? (peerId: string) => (isDropped(peerId) ? [] : shareableHistory(tier)) : null,
         request: askOnJoin,
         onRecords: (recs, fromPeerId) => queueBackfill(recs, fromPeerId, tier, room),
       })

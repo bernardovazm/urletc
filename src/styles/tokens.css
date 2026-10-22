@@ -44,13 +44,15 @@
   /* One overlay scale, so stacking is decided here rather than by whichever rule was
      edited last. The drawer sits lowest: the user parked it open, so anything opened on
      top of it is newer and more specific. Then menus, then the flyout a menu spawns (it
-     must cover its own menu), then toasts, then the modal, which owns the screen. Values
-     below 20 (the card delete button at 2) are in-flow overlap rather than overlays. */
+     must cover its own menu), then the modal, which owns the screen, then toasts: feedback
+     from a control inside a modal was painted under its scrim and read as nothing
+     happening. Values below 20 (the card delete button at 2) are in-flow overlap rather
+     than overlays. */
   --z-drawer: 20;
   --z-menu: 40;
   --z-flyout: 50;
-  --z-toast: 55;
-  --z-modal: 60;
+  --z-modal: 55;
+  --z-toast: 60;
 }
 :root[data-theme='light'] {
   color-scheme: light;
@@ -270,6 +272,15 @@ label.row {
 }
 .hidden {
   display: none;
+}
+/* Read by screen readers, never painted. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 .full {
   width: 100%;
@@ -1243,6 +1254,20 @@ video.tile {
   padding: 0.5rem;
   text-align: center;
   color: #fff;
+}
+/* The cover is dark in both themes, so its button is too: themed light-mode ink on it was
+   near-black on near-black, focus ring included. */
+.tile-cover button {
+  color: #fff;
+  background: var(--plate);
+  border-color: rgba(255, 255, 255, 0.4);
+}
+.tile-cover button:focus-visible {
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.7);
+}
+.tile-cover button.armed {
+  border-color: #d6a04a;
+  color: #d6a04a;
 }
 .tile-cover-text {
   max-width: 100%;

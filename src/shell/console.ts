@@ -1069,15 +1069,26 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   renderRoster()
 
   // ---------- cards ----------
-  const chatCard = (m: ChatMessage) =>
+  /** Where an unverified sender came from, shown beside its name. A name is self-asserted,
+   *  so a stranger on the same network named like a paired device ("Ana's laptop") read
+   *  exactly like it in the feed, links and files included. Paired and verified devices
+   *  are shown by name alone. */
+  const provenance = (tier: Tier, deviceId: string): string | undefined => {
+    if (tier === 'personal') return undefined
+    const p = (rosters.get(tier) ?? []).find((x) => x.deviceId === deviceId)
+    if (p && verified.has(p.pubKeyHex)) return undefined
+    return `${tier === 'nearby' ? 'nearby' : 'code room'}, device ${deviceId.slice(0, 6)}`
+  }
+
+  const chatCard = (m: ChatMessage, via?: string) =>
     // Hovering a message reveals when it was sent (native tooltip, no extra chrome).
     el('div', { class: `msg ${m.mine ? 'me' : ''}`, title: new Date(m.ts).toLocaleString() }, [
-      el('div', { class: 'who', text: m.name }),
+      el('div', { class: 'who', text: via ? `${m.name} · ${via}` : m.name }),
       el('div', { class: 'bubble', text: m.text }),
     ])
 
-  const fileCard = (f: ReceivedFile) => {
-    const who = senderLabel(f.from)
+  const fileCard = (f: ReceivedFile, via?: string) => {
+    const who = via ? `${senderLabel(f.from)} · ${via}` : senderLabel(f.from)
     // Images arrive with nothing else identifying them, so a file card names its sender.
     // The sender sits in the summary rather than the body so it survives collapsing, and
     // reads like the author line over a chat bubble.
@@ -2564,7 +2575,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
       if (dropped.has(m.deviceId)) return
       remember({ id: m.id, deviceId: m.deviceId, name: m.name, text: m.text, ts: m.ts, kind: 'chat', tier, room: histRoom })
       if (!m.mine) announce(`${m.name}: ${m.text}`)
-      const node = chatCard(m)
+      const node = chatCard(m, provenance(tier, m.deviceId))
       // A code that arrives in a peer's message always requires an explicit click,
       // never the auto-join branch the composer uses for text you typed yourself.
       // Auto-joining on inbound text let any peer who can chat you (including an
@@ -2604,7 +2615,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
       remember({ id: f.id, deviceId: f.from, name: senderLabel(f.from), text: f.name, ts: Date.now(), kind: 'file', size: f.size, tier, room: histRoom })
       // The card owns the blob URL: the session hands it over and never revokes it, so a
       // Download link keeps working after the room that delivered the file is left.
-      addCard(fileCard(f), () => URL.revokeObjectURL(f.url))
+      addCard(fileCard(f, provenance(tier, f.from)), () => URL.revokeObjectURL(f.url))
       announce(`File received: ${f.name}`)
       markActivity()
     },

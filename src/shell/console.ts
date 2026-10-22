@@ -2357,16 +2357,20 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
       })
     if (c && !auto) node.append(button(`Join code ${c.code.toUpperCase()}`, () => join(c.code), 'ghost small', 'Connect using this as a join code'))
     addCard(node)
-    // Sent or queued before the switch below, which drops the code session synchronously.
-    if (reachableCount() > 0) {
-      void sendChatAll(text, id)
-    } else if (!auto) {
-      outbox.push({ text, id })
-      toast('No one connected. Message queued; sends when a device joins')
-    }
     if (c && auto) {
+      // Joining, not sharing: the code goes to this person's own devices only, so they can
+      // follow. Broadcast, it reached nearby strangers as a Join button for the room this
+      // device was about to enter, before anyone it was meant for.
+      void sessions.get('personal')?.sendChat(text, undefined, id)
       sys(`"${c.code}" is a join code. Connecting...`)
       join(c.code)
+    } else if (reachableCount() > 0) {
+      void sendChatAll(text, id)
+    } else if (!c) {
+      // A code-shaped token is never queued: whoever arrives first, a nearby stranger
+      // included, would be handed it.
+      outbox.push({ text, id })
+      toast('No one connected. Message queued; sends when a device joins')
     }
     ta.value = ''
     autosize()
@@ -2959,7 +2963,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
       // for both.
       content.append(
         el('div', { class: 'group-label', text: 'Join someone with their code' }),
-        el('div', { class: 'muted small', text: 'Ask them for the code in their topbar (or send yours below). Same code = same room. Typing it in the message box also works.' }),
+        el('div', { class: 'muted small', text: 'Ask them for the code in their topbar (or send yours below). Same code = same room. Typing it in the message box joins it too.' }),
       )
       const codeInput = el('input', {
         type: 'text',

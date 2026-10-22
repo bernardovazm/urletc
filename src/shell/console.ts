@@ -1642,7 +1642,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     if (navigator.userActivation && !navigator.userActivation.isActive) return
     document.removeEventListener('click', releaseSound, true)
     document.removeEventListener('keydown', releaseSound, true)
-    soundCard?.remove()
+    soundCard?.closest('.feed-item')?.remove() // the wrapper, or its delete control stays behind
     soundCard = null
     tiles.querySelectorAll('.tile-sound').forEach((b) => b.remove())
     const held = [...soundHeld]
@@ -1674,7 +1674,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   }
   function forgetSound(m: HTMLMediaElement): void {
     if (!soundHeld.delete(m) || soundHeld.size) return
-    soundCard?.remove()
+    soundCard?.closest('.feed-item')?.remove() // the wrapper, or its delete control stays behind
     soundCard = null
   }
   function startRemote(m: HTMLMediaElement): void {

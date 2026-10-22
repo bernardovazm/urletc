@@ -2425,6 +2425,17 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     addCard(card)
   }
   fileInput.addEventListener('change', () => void handleAttach(fileInput.files?.[0]))
+  // The empty feed says files can be dropped. With nothing taking the drop, the browser
+  // opened the file in place of the app, leaving every room and losing the outbox.
+  document.addEventListener('dragover', (e) => {
+    if (e.dataTransfer?.types.includes('Files')) e.preventDefault()
+  })
+  document.addEventListener('drop', (e) => {
+    const f = e.dataTransfer?.files[0]
+    if (!f) return
+    e.preventDefault()
+    void handleAttach(f)
+  })
   imgInput.addEventListener('change', () => void handleAttach(imgInput.files?.[0]))
 
   const slashBtn = hoverTools(button('/', () => openTools('', slashBtn), 'icon', 'Tools (hover to open, drag to reorder)'))
@@ -3551,10 +3562,12 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
         if (f) files.push(f)
       }
     }
-    const img = files.find((f) => f.type.startsWith('image/'))
-    if (img) {
+    // An image first, since a copied image often arrives alongside a file of another type;
+    // otherwise any file, so a copied PDF lands as an attachment like a dropped one.
+    const file = files.find((f) => f.type.startsWith('image/')) ?? files[0]
+    if (file) {
       e.preventDefault()
-      void handleAttach(img)
+      void handleAttach(file)
       return
     }
     if (document.activeElement !== ta) {

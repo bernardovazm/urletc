@@ -342,8 +342,9 @@ Files and video are solid; live mic is best effort. The pipeline runs in a dedic
 - Default `speechSynthesis`, filtered to `localService:true` voices only, because cloud voices
   silently POST text off-device. Sentence-chunk to dodge Chrome's ~200-char cutoff `[~]`.
   Linux local voices may be espeak-only and robotic, so Kokoro is the real option there.
-- HQ path: kokoro-js (Kokoro-82M-v1.0-ONNX, Apache-2.0) `[v]`, living in `src/tools/tts.ts`
-  since no dedicated TTS worker was split out. The fp32 export is about 80 MB `[~]`, smaller
+- HQ path, not built: kokoro-js (Kokoro-82M-v1.0-ONNX, Apache-2.0) `[v]`. `src/tools/tts.ts`
+  uses `speechSynthesis` only, and the unused dependency was removed (it installed a second
+  transformers.js and ONNX Runtime for Node, about 700 MB). The fp32 export is about 80 MB `[~]`, smaller
   quants (q8/q4) are available, and weights are IDB/OPFS-cached. kokoro-js runs on WASM by
   default with a WebGPU device option `[v]`; do not assume WebGPU, and gate it behind the same
   runtime benchmark as STT. Gate the download behind an explicit gesture plus measured-size

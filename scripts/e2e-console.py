@@ -1311,6 +1311,33 @@ with sync_playwright() as p:
     rstop.click()
     check('stt: stopping the recording ends the mic track',
           bool(rpoll(rp, lambda: rp.evaluate(GUM_LIVE) == 0, 3)), f'{rp.evaluate(GUM_LIVE)} live tracks')
+    # A real transcription, end to end. Every file and recording used to fail with "no
+    # available backend found": ONNX Runtime's loader came from a CDN as a blob: module,
+    # which script-src 'self' refuses, and its thread workers met Trusted Types with no
+    # policy in the worker. The sample is the one the transformers.js docs use.
+    _jfk = None
+    try:
+        _jr = rp.request.get('https://huggingface.co/datasets/Xenova/transformers.js-docs/resolve/main/jfk.wav', timeout=60000)
+        _jfk = _jr.body() if _jr.ok else None
+    except Exception:
+        _jfk = None
+    check('stt: the speech sample is reachable', bool(_jfk))
+    if _jfk:
+        # The recording stopped above asks for the model download first; that one is declined.
+        _scancel = rp.locator('.modal button', has_text='Cancel')
+        if rpoll(rp, lambda: _scancel.count() > 0, 3):
+            _scancel.click()
+        rstt.locator('select').first.select_option('Xenova/whisper-tiny')
+        rstt.locator('input[type=file]').set_input_files(files=[{'name': 'jfk.wav', 'mimeType': 'audio/wav', 'buffer': _jfk}])
+        rstt.locator('button', has_text='Transcribe file').click()
+        _sgo = rp.locator('.modal button', has_text='Download')
+        if rpoll(rp, lambda: _sgo.count() > 0, 5):
+            _sgo.click()
+        _sst = rstt.locator('div.muted').first
+        rpoll(rp, lambda: _sst.inner_text().startswith(('Done', 'Failed')), 300, 1)
+        _sout = rstt.locator('pre').last.inner_text()
+        check('stt: a speech file transcribes on-device', 'ask not what your country' in _sout.lower(),
+              f'{_sst.inner_text()[:160]!r} {_sout[:80]!r}')
     rc.close()
 
     # Both Pong players see the match end. Only the host scores, and the state carrying

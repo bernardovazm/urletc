@@ -111,7 +111,15 @@ const tool: ToolModule = {
       status.textContent = 'Decoding audio...'
       transcribing++
       try {
-        const audio = await decodeToMono16k(blob)
+        let audio: Float32Array
+        try {
+          audio = await decodeToMono16k(blob)
+        } catch {
+          // The browser decodes the audio track of common video files (MP4, WebM) as well;
+          // what it cannot read, nothing here can.
+          status.textContent = 'Could not read audio from this file. Try an audio file or an MP4 or WebM video.'
+          return
+        }
         if (torn) return // closed while decoding: transcribing now would respawn the worker
         const text = await transcribe(audio, modelSel.value, langSel.value, (s) => {
           status.textContent = s
@@ -120,7 +128,7 @@ const tool: ToolModule = {
         out.textContent = append && out.textContent ? `${out.textContent}\n${clean}` : clean
         status.textContent = 'Done.'
       } catch (e) {
-        status.textContent = `Failed: ${(e as Error).message}. Video files may need the ffmpeg add-on, which is not shipped yet.`
+        status.textContent = `Failed: ${(e as Error).message}`
       } finally {
         transcribing--
       }

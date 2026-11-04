@@ -8,8 +8,24 @@
 // with no digest check.
 
 import { pipeline, env } from '@huggingface/transformers'
+import { installTrustedTypes } from '../core/trusted-types'
+// ONNX Runtime's WebAssembly loader and binary, served from this origin. By default
+// transformers.js fetches the loader from cdn.jsdelivr.net and imports it as a blob: URL,
+// which script-src 'self' refuses, so every transcription failed with "no available
+// backend found". Same-origin, the loader is a plain module import, and no third-party
+// code runs in the worker.
+import ortMjs from 'onnxruntime-web/ort-wasm-simd-threaded.asyncify.mjs?url'
+import ortWasm from 'onnxruntime-web/ort-wasm-simd-threaded.asyncify.wasm?url'
+
+// The worker is under the same require-trusted-types-for CSP as the page, and ONNX
+// Runtime's threaded build starts its own workers from here, which throw without a policy.
+installTrustedTypes()
 
 env.allowLocalModels = false
+// The wasm cache path re-imports the loader through a blob: URL, the step the CSP refuses.
+// The binary is still cached by the service worker like any other /assets/ file.
+env.useWasmCache = false
+env.backends.onnx.wasm.wasmPaths = { mjs: ortMjs, wasm: ortWasm }
 
 // One load per model, shared by every request for it. Switching models disposes the
 // previous pipeline: its ONNX sessions held hundreds of MB in this shared worker. Not

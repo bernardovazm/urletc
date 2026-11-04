@@ -2,10 +2,12 @@
 // Whisper speech-to-text via transformers.js, off the main thread (ARCHITECTURE section 4.3).
 // Excluded from the app tsconfig because it runs in a worker global scope, and built by Vite.
 // Receives 16 kHz mono Float32 audio plus model and language, posts back status, progress
-// and result. Not built (ARCHITECTURE sections 4.3 and 9, Phase 1 gate in section 11):
-// pinned model-weight SHA-256 verification. pipeline() gets no `revision`, so
-// transformers.js fetches the model repo's main branch from Hugging Face and caches it
-// with no digest check.
+// and result. Models load at a pinned Hugging Face commit (REVISIONS): a commit names its
+// files' content, so a later push to the repo cannot change what runs here. (The library
+// still asks the main branch for each file's size, a one-byte range read used only for the
+// progress total.) Not built: a
+// SHA-256 check of each fetched file against digests kept in this repo, which would also
+// stand against the host serving other bytes for that commit.
 
 import { pipeline, env } from '@huggingface/transformers'
 import { installTrustedTypes } from '../core/trusted-types'
@@ -31,6 +33,13 @@ env.backends.onnx.wasm.wasmPaths = { mjs: ortMjs, wasm: ortWasm }
 // previous pipeline: its ONNX sessions held hundreds of MB in this shared worker. Not
 // while a request is still transcribing with it, since STT cards share this worker, so
 // the last such request disposes it when it ends.
+// The only models this worker loads, each at the commit it was tested against. A model
+// not listed is refused rather than fetched from the repo's moving main branch.
+const REVISIONS = {
+  'Xenova/whisper-base': '64da57285918e20ea79ea5c88eed7197933abaa8',
+  'Xenova/whisper-tiny': '5332fcc35e32a33b86612b9a57a89be7906102b1',
+}
+
 let loading = null // { model, promise, users, superseded, settled }
 const waiting = new Set() // request ids waiting on a load, each told its download progress
 
@@ -44,6 +53,8 @@ self.onmessage = async (e) => {
   const post = (m) => postMessage({ id, ...m }) // echo the request id so callers can demux
   let entry = null
   try {
+    const revision = REVISIONS[model]
+    if (!revision) throw new Error(`model not allowed: ${model}`)
     if (!loading || loading.model !== model) {
       const prev = loading
       if (prev) {
@@ -56,6 +67,7 @@ self.onmessage = async (e) => {
         superseded: false,
         settled: false,
         promise: pipeline('automatic-speech-recognition', model, {
+          revision,
           dtype: 'q8',
           progress_callback: (p) => {
             for (const wid of waiting) postMessage({ id: wid, type: 'progress', data: p })

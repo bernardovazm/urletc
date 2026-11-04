@@ -331,9 +331,11 @@ Files and video are solid; live mic is best effort. The pipeline runs in a dedic
   short clip and pick the winner; WASM frequently wins on Apple Silicon and q8.
 - Cache weights in OPFS after an explicit, size-disclosed, user-triggered download. Verify
   the weight SHA-256 against a pinned digest before loading (supply-chain control, section 9).
-  Neither the OPFS cache nor the digest check is built: `src/workers/stt.worker.ts` passes
-  no `revision`, so transformers.js fetches the model repo's main branch from Hugging Face
-  and caches the files itself, unverified.
+  Neither the OPFS cache nor the digest check is built. `src/workers/stt.worker.ts` loads
+  each model at a pinned Hugging Face commit and refuses any other model, so a later push
+  to the repo cannot change what runs; transformers.js caches the files itself, and no
+  digest is checked against bytes the host serves for that commit. ONNX Runtime's loader
+  and WASM binary are served from this origin (`?url` imports), not from jsdelivr.
 - The Web Speech API is offered only as an opt-in, persistently-warned, never-default cloud
   fast path, since it ships audio to Google or Apple, which rules it out as a default. No
   diarization in v1.
@@ -853,7 +855,7 @@ Footguns do not become safety properties by being documented, so these are absol
 | Sybil / gossip poisoner | flood or fake-vouch | challenge-response (signature) admission, trusted-peers-only vouching, re-verify before relay; PoW is an anti-flood speed-bump only, no part of the Sybil answer (5.5) |
 | XSS into host origin | read IDB, use in-realm keys, exfiltrate | strict CSP (no eval, no inline) plus Trusted Types plus the DOMParser strip as the primary control; encrypted IDB is secondary (see the key-lifecycle caveat below) |
 | Offline disk-image attacker | copy browser profile | passphrase-lock mode (PBKDF2>=600k into AES-GCM) for the vault. Device mode does not cover this: its wrap key record sits in the same profile as the ciphertext. The identity keypairs (`wt-keys`) are outside the vault in both modes, so a profile copy can sign handshakes as this device (Key lifecycle below) |
-| Supply chain | tampered dep or model | exact-pinned deps plus lockfile, bundle rather than CDN, SRI where applicable; model-weight hash verification is not built (`src/workers/stt.worker.ts` loads the Hugging Face model unpinned and unverified, 4.3) |
+| Supply chain | tampered dep or model | exact-pinned deps plus lockfile, bundle rather than CDN, SRI where applicable; models load at a pinned Hugging Face commit and ONNX Runtime from this origin; model-weight hash verification is not built (4.3) |
 
 ### Identity, key and E2EE design
 - All crypto is native WebCrypto: Ed25519 (sign), X25519 (ECDH), AES-256-GCM, HKDF-SHA-256
@@ -1157,8 +1159,8 @@ self-hosted coturn; Double-Ratchet upgrade if the threat model escalates.
   container, since no ffmpeg ships (4.3); live-mic real time is best effort and device and
   browser dependent, degrading to VAD-chunked near real time. Accuracy is capped at
   base/small, below cloud large-v3. Do not trust WebGPU to be faster; benchmark at runtime.
-  Download is tens of MB and never auto-fetched. It is not hash-verified: the model loads
-  unpinned from Hugging Face (4.3).
+  Download is tens of MB and never auto-fetched. It is pinned to a commit but not
+  hash-verified (4.3).
 - **"Catalog with literally no server" is false.** It is "no server *you* operate", with
   persistence degrading to online-peer overlap, and no durable hosting without accepting a
   relay or KV dependency, because browsers have no DHT. Installed tools survive locally and

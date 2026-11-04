@@ -5581,6 +5581,92 @@ with sync_playwright() as p:
     check('relay: no page errors', not rerrs, ' | '.join(rerrs)[:200])
     rctx.close()
 
+    # --- relay only: every connection through the relay, from the next load ---
+    # Trystero's pool of offering connections is built once per page, so the policy is
+    # page-wide and a change applies from a reload. Room connections carry STUN plus the
+    # relay; the bare TURN list also appears from iceServers validation, which never gathers.
+    roctx = browser.new_context()
+    roctx.add_init_script(RL_LOG)
+    ropg = roctx.new_page()
+    ropg.goto(BASE)
+    ropg.wait_for_selector('.composer', timeout=30000)
+
+    def ro_card():
+        ropg.evaluate("location.hash = '#/t/settings'")
+        c = ropg.locator('details.card[data-tool="settings"]').last
+        c.locator('input.relay-only-chk').wait_for(state='attached', timeout=15000)
+        return c
+
+    def ro_rooms(relay):
+        return [r for r in ropg.evaluate('window.__iceLog || []') if r['kind'] == 'new' and r['relayOnly'] == relay
+                and any(u.startswith('stun:') for u in r['urls']) and any(u.startswith(('turn:', 'turns:')) for u in r['urls'])]
+
+    roc = ro_card()
+    ro_chk = roc.locator('input.relay-only-chk')
+    check('relay only: off, and unavailable with no relay', not ro_chk.is_checked() and ro_chk.is_disabled())
+    roc.locator('textarea.turn-input').fill(RL_SNIPPET)
+    roc.locator('button', has_text='Save').click()
+    check('relay only: available once a relay is set', bool(poll(lambda: not ro_chk.is_disabled(), 10)))
+    ro_chk.check()
+    _ro_apply = roc.locator('button', has_text='Reload to apply')
+    check('relay only: asks for a reload to apply', _ro_apply.is_visible())
+    _ro_apply.click()
+    ropg.wait_for_selector('.composer', timeout=30000)
+    _ro_rel = poll(lambda: ro_rooms(True), 30) or []
+    ropg.wait_for_timeout(3000)
+    check('relay only: after the reload every room connection is relay-only', bool(_ro_rel) and not ro_rooms(False),
+          f'{len(_ro_rel)} relay-only, direct: {ro_rooms(False)[:1]}')
+    roc = ro_card()
+    roc.locator('button', has_text='Remove').click()
+    poll(lambda: 'No relay server' in roc.locator('p.turn-status').inner_text(), 10)
+    ropg.reload()
+    ropg.wait_for_selector('.composer', timeout=30000)
+    check('relay only: with no relay left, no room joins and the feed says why',
+          bool(poll(lambda: 'no relay server is set, so no room connects' in feed_text(ropg), 15)), feed_text(ropg)[-200:])
+    ropg.wait_for_timeout(3000)
+    check('relay only: nothing connects directly once the relay goes', not ro_rooms(False), str(ro_rooms(False)[:1]))
+    check('relay only: still switchable off with no relay', ro_card().locator('input.relay-only-chk').is_enabled())
+    roctx.close()
+
+    # --- rooms off: the tools alone, reachable by no one ---
+    ofctx = browser.new_context()
+    ofctx.add_init_script(RL_LOG)
+    ofpg = ofctx.new_page()
+    of_ws = []
+    ofpg.on('websocket', lambda w: of_ws.append(w.url))
+    ofpg.goto(f'{BASE}/')
+    ofpg.wait_for_selector('.composer', timeout=30000)
+
+    def of_chip():
+        c = ofpg.locator('button.code-chip')
+        return c.inner_text().strip() if c.is_visible() else ''
+
+    _of_code = poll(of_chip, 20)
+    ofpg.locator('.topbar button', has_text='Connect').click()
+    _of_chk = ofpg.locator('.modal input.offline-chk')
+    _of_chk.wait_for(timeout=5000)
+    _of_chk.check()
+    check('rooms off: Connect shrinks to the switch', bool(poll(lambda: ofpg.locator('.modal .group-label').count() == 0, 5)))
+    ofpg.keyboard.press('Escape')
+    check('rooms off: the code room is left and the chip goes', bool(poll(lambda: not of_chip(), 10)))
+    check('rooms off: the topbar says tools-only', ofpg.locator('.topbar .badge').first.inner_text().strip() == 'tools-only')
+    ofpg.reload()
+    ofpg.wait_for_selector('.composer', timeout=30000)
+    of_ws.clear()
+    ofpg.wait_for_timeout(8000)
+    check('rooms off: after a reload no relay socket opens', not [u for u in of_ws if u.startswith('wss://')], str(of_ws[:3]))
+    check('rooms off: after a reload no peer connection is built', not ofpg.evaluate('window.__iceLog || []'),
+          str(ofpg.evaluate('window.__iceLog || []'))[:160])
+    ofpg.evaluate(f"location.hash = '#/join/zz{os.urandom(3).hex()}'")
+    check('rooms off: a #/join link is refused out loud',
+          bool(poll(lambda: 'Rooms are off, so this device did not join' in feed_text(ofpg), 8)), feed_text(ofpg)[-160:])
+    ofpg.locator('.topbar button', has_text='Connect').click()
+    ofpg.locator('.modal input.offline-chk').uncheck()
+    ofpg.keyboard.press('Escape')
+    _of_back = poll(of_chip, 30)
+    check('rooms on again: the same code room comes back', bool(_of_code) and _of_back == _of_code, f'{_of_back!r} vs {_of_code!r}')
+    ofctx.close()
+
     # --- composer collapse: a manual, persisted toggle that keeps the control row ---
     # Collapsing is deliberately not wired to sharing: it only ever moves when the toggle
     # is clicked, so this drives the toggle and nothing else.

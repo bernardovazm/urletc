@@ -412,8 +412,7 @@ infrastructure acceptable here.
    for an allocation over a relay-only connection and reports one of: answered, refused the
    username or password (401), or no answer from this network. Without any relay, peers
    behind symmetric or carrier-grade NAT cannot connect, the failure report says so, and
-   `relayOnly` in `joinRoomSession` refuses to pretend otherwise (no setting turns it on;
-   section 6).
+   relay only (Settings, section 6) joins no room at all rather than pretend otherwise.
 3. Self-hosted coturn on Oracle Always Free ARM remains the planned fallback, not built.
    One box, and an operated dependency, flagged in sections 10 and 13.
 
@@ -600,10 +599,18 @@ ships today.
   authenticated peer is admitted and, in a tier that carries local media, offered every
   active local stream (5.2).
 - **IP-leak hygiene:** mDNS hides LAN candidates on Chromium, less uniformly on Firefox and
-  Safari. A relay-only privacy toggle (`iceTransportPolicy:'relay'`) is the only complete
-  public-IP mitigation. `joinRoomSession` supports it as `relayOnly`, but no setting exposes
-  it: `src/shell/console.ts` always passes `relayOnly: false`, so every peer, nearby and
-  presence included, receives this device's server-reflexive candidates.
+  Safari. Relay only (Settings, `iceTransportPolicy:'relay'`) is the only complete public-IP
+  mitigation: every connection goes through the relay, so no peer, nearby and presence
+  included, receives this device's addresses. It is page-wide and applies from the next
+  load, because Trystero builds one pool of offering connections per page from the config
+  of the first room joined, and offers prepared earlier already carry host and
+  server-reflexive candidates. With it on and no relay configured, no room is joined and the
+  feed says why. The nearby tier still asks a public STUN server for this device's address
+  to name its room; no peer sees that request. Off, which is the default, every peer receives
+  this device's server-reflexive candidates.
+- **Rooms off (Connect):** for using the tools alone. No room is joined and no relay, STUN
+  or presence server is contacted, at boot or after; `#/join` links and typed codes are
+  refused with a message, and the stored code room is kept for when rooms come back on.
 
 ---
 
@@ -840,7 +847,7 @@ Footguns do not become safety properties by being documented, so these are absol
 ### Threat model
 | Adversary | Capability | Primary control |
 |---|---|---|
-| Signaling relay / TURN operator | sees SDP, peer IPs, traffic metadata; can MITM signaling | DTLS-bound `hs` signature against MITM (5.3) plus app-layer X25519+AES-GCM plus per-session HKDF ratchet for FS; custom-password SDP encryption (5.1) hides SDP for personal and code rooms only, not nearby or presence; opaque room ids; relay-only mode exists in the session layer but no setting exposes it (6) |
+| Signaling relay / TURN operator | sees SDP, peer IPs, traffic metadata; can MITM signaling | DTLS-bound `hs` signature against MITM (5.3) plus app-layer X25519+AES-GCM plus per-session HKDF ratchet for FS; custom-password SDP encryption (5.1) hides SDP for personal and code rooms only, not nearby or presence; opaque room ids; relay only in Settings hides peer IPs from each other (6) |
 | Network MITM at first key exchange | substitute keys (no prior pin) | out-of-band safety-number comparison in a confirm dialog, offered and not forced (section 10); no QR and no key-change warning (Peer auth below) |
 | Malicious Workshop author | ship signed-but-harmful code | null-origin iframe running the source with `new Function`, no network (`connect-src 'none'`, WebRTC poisoned, no child frames), the enumerated postMessage API (8.2) plus mandatory source review; no preemption and no memory bound, QuickJS-WASM not built (8.1); declarative interpreter safe by construction (7.1) |
 | Sybil / gossip poisoner | flood or fake-vouch | challenge-response (signature) admission, trusted-peers-only vouching, re-verify before relay; PoW is an anti-flood speed-bump only, no part of the Sybil answer (5.5) |
@@ -916,7 +923,7 @@ Phase 0 and 1 (MVP):
 Phase 2 (P2P):
 - Custom-password SDP encryption, effective for personal and code rooms only (5.1);
   app-layer AES-GCM plus per-session HKDF ratchet on every channel; opaque room ids;
-  relay-only toggle, present in the session layer and not exposed by any setting (6).
+  relay-only toggle in Settings, applied from the next load (6).
 - Challenge-response (signature) admission; trusted-peers vouching; PoW anti-flood speed-bump
   if it is ever built (5.5).
 - Safety-number verification offered rather than forced (section 10); the TOFU key pin and
@@ -1096,8 +1103,8 @@ lazy-loaded and Cache/OPFS-cached.
 
 Phase 2: P2P messenger. Trystero discovery plus signed-heartbeat roster with custom-password
 SDP encryption; E2EE DataChannel wrapper with per-session HKDF ratchet; chat; raw-DataChannel
-file transfer into OPFS; VoIP and screen-share with caps; relay-only toggle (in the session
-layer, not exposed by any setting, 6); local `getStats()` relay-bandwidth estimate.
+file transfer into OPFS; VoIP and screen-share with caps; relay-only toggle (Settings, from the
+next load, 6); local `getStats()` relay-bandwidth estimate.
 - Security gate: app-layer AES-GCM plus ratchet on every channel (ciphertext and key-advance
   verified on the wire, old key zeroised); challenge-response signature admission; PoW
   anti-flood verified not to block honest peers; safety-number verification flow works

@@ -164,6 +164,20 @@ const tool: ToolModule = {
         turnMsg.classList.toggle('settings-error', error)
       }
       const activeRelay = () => turnOwn ?? (deploymentRelay().length ? deploymentRelay() : null)
+      // Relay only: every connection goes through the relay, so no peer learns this
+      // device's addresses. It needs a relay to connect at all; without one it stays
+      // switchable only towards off, and the console says why nothing connects.
+      const roChk = el('input', { type: 'checkbox', class: 'relay-only-chk' }) as HTMLInputElement
+      roChk.checked = (await getItem<boolean>('relay-only')) ?? false
+      // Connections prepared before the change already carry this device's addresses, so
+      // it applies from a reload rather than to the rooms open now.
+      const roApply = button('Reload to apply', () => location.reload(), 'small hidden', 'Relay only applies from the next load')
+      const roWas = roChk.checked
+      roChk.addEventListener('change', () => {
+        void setItem('relay-only', roChk.checked)
+        roChk.disabled = !roChk.checked && !activeRelay()
+        roApply.classList.toggle('hidden', roChk.checked === roWas)
+      })
       const showRelay = async () => {
         const stored = await getItem<unknown>('turn-servers')
         const v = stored === undefined ? null : validateIceServers(stored)
@@ -176,6 +190,7 @@ const tool: ToolModule = {
             : 'No relay server. Devices behind symmetric or carrier-grade NAT cannot be reached.'
         turnRemove.classList.toggle('hidden', !turnOwn)
         turnCheck.toggleAttribute('disabled', !activeRelay())
+        roChk.disabled = !roChk.checked && !activeRelay()
       }
       const CHECK_SAYS: Record<RelayCheck, string> = {
         ok: 'The relay answered. A device that cannot be reached directly connects through it.',
@@ -248,6 +263,13 @@ const tool: ToolModule = {
         turnIn,
         el('div', { class: 'row' }, [button('Save', () => void saveRelay(), 'primary', 'Check and save this relay on this device'), turnCheck, turnRemove]),
         turnMsg,
+        el('label', { class: 'row small' }, [
+          roChk,
+          el('span', {
+            text: 'Relay only: connect through the relay every time, never directly, so no peer sees this device’s IP addresses. Takes effect on the next load. Needs a relay above, and every byte then counts toward its allowance.',
+          }),
+        ]),
+        roApply,
         el('p', {
           class: 'muted small',
           text: "Used only when a direct connection fails. The relay carries traffic that is already encrypted, and sees both devices' addresses. Kept on this device and never sent to peers. A free plan's monthly allowance runs out quickly under video: Metered counts every relayed byte in and out, so its free 500 MB is roughly 15 to 30 minutes of screen sharing.",

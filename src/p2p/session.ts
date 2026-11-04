@@ -88,6 +88,13 @@ let turnSource: 'device' | 'deployment' | null = null
 // config by reference and reads rtcConfig.iceServers each time it builds a connection, so a
 // room already joined picks up a changed relay for every connection it builds afterwards.
 const ICE_SERVERS: RTCIceServer[] = []
+// One config object for every room, for the same reason: Trystero's pool of offering
+// connections is built from the config of the first room joined on the page and serves
+// every room after it. The transport policy is therefore page-wide, fixed by the first
+// join, and a change of relay-only takes a reload: offers prepared earlier already carry
+// this device's addresses.
+const RTC_CONFIG: RTCConfiguration = { iceServers: ICE_SERVERS, iceTransportPolicy: 'all' }
+let policyFixed = false
 
 // Connections built ahead of time do not read that list again. Trystero keeps one pool of
 // 20 offering connections per page, shared by every room and recycled rather than rebuilt,
@@ -111,6 +118,11 @@ function trackedPeerConnection(): typeof RTCPeerConnection | undefined {
     }
   }
   return trackedPc
+}
+
+/** Whether a relay is configured, from this device or the deployment. */
+export function hasRelay(): boolean {
+  return turnServers.length > 0
 }
 
 /**
@@ -626,6 +638,10 @@ export async function joinRoomSession(opts: {
   // 'relay' means "use only a relay", so with no TURN entry the browser gathers zero
   // candidates and the room silently connects nobody. Refusing here surfaces that instead.
   if (opts.relayOnly && !turnServers.length) throw new Error('Relay-only needs a TURN server, and none is configured.')
+  const policy: RTCIceTransportPolicy = opts.relayOnly ? 'relay' : 'all'
+  if (policyFixed && RTC_CONFIG.iceTransportPolicy !== policy) throw new Error('Relay-only changed after rooms were joined; reload to apply it.')
+  RTC_CONFIG.iceTransportPolicy = policy
+  policyFixed = true
   let displayName = opts.displayName
   const id = await loadOrCreateIdentity()
   const enc = new TextEncoder()
@@ -651,7 +667,7 @@ export async function joinRoomSession(opts: {
       relayConfig: { urls: NOSTR_RELAYS },
       // iceServers, not turnConfig, so this replaces Trystero's four default STUN
       // servers instead of stacking on top of them (see ICE_SERVERS above).
-      rtcConfig: { iceServers: ICE_SERVERS, iceTransportPolicy: opts.relayOnly ? 'relay' : 'all' },
+      rtcConfig: RTC_CONFIG,
       rtcPolyfill: trackedPeerConnection(),
     },
     opts.roomId,

@@ -1371,6 +1371,16 @@ video.tile {
 :root.stage-view .center {
   grid-template-rows: 1fr;
 }
+/* a stage view with rooms off says so instead of sitting black */
+.stage-notice {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 2rem;
+  color: #bbb;
+  text-align: center;
+}
 
 /* Without these rules a 360px phone computes a spotlight thumbnail at about 84px and
    the grid forces two columns at minmax(150px). */

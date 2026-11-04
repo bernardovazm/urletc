@@ -602,17 +602,23 @@ ships today.
   active local stream (5.2).
 - **IP-leak hygiene:** mDNS hides LAN candidates on Chromium, less uniformly on Firefox and
   Safari. Relay only (Settings, `iceTransportPolicy:'relay'`) is the only complete public-IP
-  mitigation: every connection goes through the relay, so no peer, nearby and presence
-  included, receives this device's addresses. It is page-wide and applies from the next
-  load, because Trystero builds one pool of offering connections per page from the config
-  of the first room joined, and offers prepared earlier already carry host and
-  server-reflexive candidates. With it on and no relay configured, no room is joined and the
-  feed says why. The nearby tier still asks a public STUN server for this device's address
-  to name its room; no peer sees that request. Off, which is the default, every peer receives
-  this device's server-reflexive candidates.
-- **Rooms off (Connect):** for using the tools alone. No room is joined and no relay, STUN
-  or presence server is contacted, at boot or after; `#/join` links and typed codes are
-  refused with a message, and the stored code room is kept for when rooms come back on.
+  mitigation: every connection goes through the relay, so no peer receives this device's
+  addresses. It also keeps the nearby tier off: the nearby room is derived from the public
+  IP alone (5.4), so a peer that knows this device's key from another room can find its IP
+  by computing nearby rooms for candidate addresses and looking for the key. It is page-wide
+  and applies from the next load, because Trystero builds one pool of offering connections
+  per page from the config of the first room joined, and offers prepared earlier already
+  carry host and server-reflexive candidates. With it on and no relay configured, no room is
+  joined, the feed says why, and the requested code room is joined once a relay is saved.
+  Off, which is the default, every peer receives this device's server-reflexive candidates.
+- **Rooms off (Connect):** for using the tools alone, in every tab of the device
+  (BroadcastChannel `wt-rooms`). No room is joined and no relay, STUN or presence server is
+  contacted, at boot or after. Switched on a running page, it leaves every room, closes the
+  rendezvous sockets with reconnection held and closes every peer connection, since Trystero
+  keeps both open after the last room is left. A relay socket already waiting on Trystero's
+  retry timer cannot be cancelled; when it fires, the socket is closed as it is constructed,
+  so the most that leaves the device is an aborted connection attempt. `#/join` links and typed codes are refused
+  with a message and joined when rooms come back on, and the stored code room is kept.
 
 ---
 

@@ -1,5 +1,6 @@
 import { OCR_MODE_EVENT, getOcrMode, setOcrMode, type OcrMode } from '../core/prefs'
 import { disablePassphrase, enablePassphrase, getItem, getStoreMode, lockAll, removeItem, setItem, wipeAll } from '../core/store'
+import { relayOnlyAtLoad } from '../p2p/policy'
 import { checkRelay, deploymentRelay, describeRelay, parseIceServers, validateIceServers, type RelayCheck } from '../p2p/turn'
 import type { ToolModule } from '../shell/registry'
 import { currentTheme, toggleTheme } from '../shell/theme'
@@ -170,13 +171,16 @@ const tool: ToolModule = {
       const roChk = el('input', { type: 'checkbox', class: 'relay-only-chk' }) as HTMLInputElement
       roChk.checked = (await getItem<boolean>('relay-only')) ?? false
       // Connections prepared before the change already carry this device's addresses, so
-      // it applies from a reload rather than to the rooms open now.
+      // it applies from a reload rather than to the rooms open now. The button shows for as
+      // long as the stored value and the one in force differ, a reopened Settings included.
       const roApply = button('Reload to apply', () => location.reload(), 'small hidden', 'Relay only applies from the next load')
-      const roWas = roChk.checked
+      const roRunning = relayOnlyAtLoad() ?? roChk.checked
+      const syncApply = () => roApply.classList.toggle('hidden', roChk.checked === roRunning)
+      syncApply()
       roChk.addEventListener('change', () => {
         void setItem('relay-only', roChk.checked)
         roChk.disabled = !roChk.checked && !activeRelay()
-        roApply.classList.toggle('hidden', roChk.checked === roWas)
+        syncApply()
       })
       const showRelay = async () => {
         const stored = await getItem<unknown>('turn-servers')
@@ -243,7 +247,9 @@ const tool: ToolModule = {
         el('div', { class: 'group-label', text: 'Presence' }),
         el('label', { class: 'row small' }, [
           nbChk,
-          el('span', { text: 'Nearby discovery: devices on this network find each other automatically. Turn it off to stay invisible outside your rooms.' }),
+          el('span', {
+            text: `Nearby discovery: devices on this network find each other automatically. Turn it off to stay invisible outside your rooms.${relayOnlyAtLoad() ? ' Off while relay only is on.' : ''}`,
+          }),
         ]),
         el('label', { class: 'row small' }, [
           prChk,
@@ -266,7 +272,7 @@ const tool: ToolModule = {
         el('label', { class: 'row small' }, [
           roChk,
           el('span', {
-            text: 'Relay only: connect through the relay every time, never directly, so no peer sees this device’s IP addresses. Takes effect on the next load. Needs a relay above, and every byte then counts toward its allowance.',
+            text: 'Relay only: connect through the relay every time, never directly, so no peer sees this device’s IP addresses. It also keeps nearby off, since the nearby room is named after this network’s public IP. Takes effect on the next load. Needs a relay above, and every byte then counts toward its allowance.',
           }),
         ]),
         roApply,

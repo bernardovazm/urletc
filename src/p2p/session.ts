@@ -19,7 +19,7 @@
 // presenceOnly, never nearby) and carries only past chat records, so a peer joining a room
 // later can be handed what was said before it arrived.
 
-import { getRelaySockets, joinRoom, selfId, type Room } from 'trystero/nostr'
+import { getRelaySockets, joinRoom, pauseRelayReconnection, resumeRelayReconnection, selfId, type Room } from 'trystero/nostr'
 import { aesKeyFromBytes, b64ToBytes, bytesToB64, deriveSharedSecret, randomBytes, safetyNumber, sha256, signEd25519, toHex, verifyEd25519 } from '../core/crypto'
 import { loadOrCreateIdentity } from '../core/identity'
 import { holdUpdateWhile } from '../core/update-hold'
@@ -120,6 +120,47 @@ function trackedPeerConnection(): typeof RTCPeerConnection | undefined {
   return trackedPc
 }
 
+// --- Disconnect -----------------------------------------------------------------------
+// Leaving every room does not end this page's contact with the network. Trystero keeps one
+// socket per rendezvous relay for the page's life and reopens it whenever it closes, and a
+// connection to a peer met in a left room stays up for about two minutes (its shared-peer
+// idle time) in case another room wants it. Rooms off ends both: the sockets are closed
+// with reconnection held, and every connection still open is closed, which Trystero reads
+// as a dead peer. Trystero's own online/offline listener goes with the last room left, so
+// a network change cannot resume the sockets while rooms are off.
+//
+// A socket that dropped before then is waiting on Trystero's retry timer (up to 60 s),
+// which nothing can cancel and which opens a new socket without looking at the hold. So
+// while disconnected, a relay socket is closed as it is constructed: its close event then
+// parks the retry on the hold, and reconnect() releases it.
+let disconnected = false
+let socketsHeld = false
+function holdRelaySockets(): void {
+  if (socketsHeld || typeof WebSocket !== 'function') return
+  socketsHeld = true
+  const Native = WebSocket
+  globalThis.WebSocket = class extends Native {
+    constructor(url: string | URL, protocols?: string | string[]) {
+      super(url, protocols)
+      if (disconnected && NOSTR_RELAYS.some((r) => this.url.startsWith(r))) this.close()
+    }
+  }
+}
+export function disconnectAll(): void {
+  disconnected = true
+  holdRelaySockets()
+  pauseRelayReconnection()
+  for (const socket of Object.values(getRelaySockets() as Record<string, WebSocket | undefined>)) socket?.close()
+  for (const pc of openConnections) pc.close()
+  openConnections.clear()
+}
+/** Undo disconnectAll before rooms are joined again: the relay sockets reopen. */
+export function reconnect(): void {
+  if (!disconnected) return
+  disconnected = false
+  resumeRelayReconnection()
+}
+
 /** Whether a relay is configured, from this device or the deployment. */
 export function hasRelay(): boolean {
   return turnServers.length > 0
@@ -169,6 +210,7 @@ function reportRelayHealth(ev: SessionEvents): void {
   if (relayHealthReported) return
   relayHealthReported = true
   setTimeout(() => {
+    if (disconnected) return // closed on purpose: rooms are off
     const sockets = getRelaySockets() as Record<string, WebSocket | undefined>
     const urls = Object.keys(sockets)
     if (!urls.length) return
@@ -601,6 +643,14 @@ function concat(a: Uint8Array, b: Uint8Array): Uint8Array<ArrayBuffer> {
   return out
 }
 
+/** A join abandoned before it reached the relays, because the caller no longer wanted it. */
+export class JoinCancelled extends Error {
+  constructor() {
+    super('join cancelled')
+    this.name = 'JoinCancelled'
+  }
+}
+
 export async function joinRoomSession(opts: {
   roomId: string
   password: string
@@ -632,6 +682,8 @@ export async function joinRoomSession(opts: {
    * ANDed below and presenceOnly wins.
    */
   allowHistory?: boolean
+  /** Read right before the room is joined; false aborts with JoinCancelled. */
+  stillWanted?: () => boolean
   events: SessionEvents
 }): Promise<RoomSession> {
   const ev = opts.events
@@ -652,6 +704,9 @@ export async function joinRoomSession(opts: {
   // Re-read after every wait: a second leave of this roomId can start while the first is
   // awaited. No await sits between the last check and joinRoom().
   for (let pending = leavingRooms.get(opts.roomId); pending; pending = leavingRooms.get(opts.roomId)) await pending
+  // Checked with no await before joinRoom: a join no longer wanted must not reach the relays
+  // or warm the offer pool.
+  if (opts.stillWanted && !opts.stillWanted()) throw new JoinCancelled()
   const room: Room = joinRoom(
     {
       // One app id per room, so every room gets its own RTCPeerConnection. Trystero shares a

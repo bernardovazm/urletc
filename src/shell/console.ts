@@ -25,6 +25,7 @@ import { randomNickname } from '../core/nickname'
 import { getOcrMode } from '../core/prefs'
 import { getItem, removeItem, setItem } from '../core/store'
 import { CODE_LENGTH, codeRoom, generateJoinCode, nearbyRoom, normalizeJoinCode, publicIp } from '../p2p/discovery'
+import { noteRelayOnlyAtLoad } from '../p2p/policy'
 import { ensurePersonalSecret, onSecretReplaced, pairLink, personalRoom, resetPersonalSecret } from '../p2p/personal'
 import type { ChatMessage, HistoryRecord, InviteSignal, PeerTransport, ReceivedFile, RoomSession, RosterPeer, SessionEvents, TransportState } from '../p2p/session'
 import { setTransientGuard } from '../tools/close-guard'
@@ -109,10 +110,20 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   // once: the policy is page-wide and fixed by the first join (session.ts), so a change
   // applies from the next load.
   const relayOnly = (await getItem<boolean>('relay-only')) ?? false
+  noteRelayOnlyAtLoad(relayOnly)
   // Rooms off (Connect): this device joins no room and contacts no relay or STUN server,
   // so it is reachable by no one and the tools run alone. Kept across reloads.
   let offline = (await getItem<boolean>('p2p-off')) ?? false
   let relayMissingSaid = false
+  // Relay only held a join back for want of a relay, so a relay saved later reconnects.
+  let relayHeld = false
+  // A code room asked for while joins were held back (rooms off, or relay only with no
+  // relay). It is joined once they can be, instead of being forgotten with the refusal.
+  let pendingCode = ''
+  let offlineSwitch: Promise<unknown> = Promise.resolve()
+  // Rooms off holds for the device, so every tab of it follows a change made in one: a tab
+  // left joined would keep the device reachable.
+  const roomsChannel = typeof BroadcastChannel === 'function' ? new BroadcastChannel('wt-rooms') : null
 
   // ---------- replayable feed history ----------
   // Local, encrypted at rest, capped by count, age and serialized size. Two extra
@@ -2747,22 +2758,44 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     },
   })
 
-  async function joinTier(tier: Tier, room: { roomId: string; password: string }): Promise<RoomSession | null> {
-    if (offline) return null
+  /** Lazy-load the P2P engine (Trystero/zod/manifest) so it stays out of the initial
+   *  bundle. The UI has already painted; rooms connect a moment later. */
+  async function loadEngine(): Promise<typeof import('../p2p/session')> {
+    const mod = await import('../p2p/session')
+    // Before the first room is joined, so its first connection already has the relay.
+    if (!engine) mod.setTurnServers(turnServers)
+    engine = mod
+    return mod
+  }
+  /** Relay only is on and there is no relay to route through, so nothing may connect. */
+  function relayMissing(mod: typeof import('../p2p/session')): boolean {
+    if (!relayOnly || mod.hasRelay()) return false
+    if (!relayMissingSaid) sys('Relay only is on, but no relay server is set, so no room connects. Set a relay, or turn relay only off, in Settings.')
+    relayMissingSaid = true
+    relayHeld = true
+    return true
+  }
+
+  // One join per tier and room at a time. A boot join still loading the engine when rooms
+  // went off and on again was joined a second time by the on, and the two sessions shared
+  // one Trystero room, the first left registered and never left.
+  const joining = new Map<Tier, { roomId: string; run: Promise<RoomSession | null> }>()
+  function joinTier(tier: Tier, room: { roomId: string; password: string }): Promise<RoomSession | null> {
+    if (offline) return Promise.resolve(null)
     const existing = sessions.get(tier)
-    if (existing) return existing
+    if (existing) return Promise.resolve(existing)
+    const pending = joining.get(tier)
+    if (pending?.roomId === room.roomId) return pending.run
+    const run = joinTierOnce(tier, room).finally(() => {
+      if (joining.get(tier)?.run === run) joining.delete(tier)
+    })
+    joining.set(tier, { roomId: room.roomId, run })
+    return run
+  }
+  async function joinTierOnce(tier: Tier, room: { roomId: string; password: string }): Promise<RoomSession | null> {
     try {
-      // Lazy-load the P2P engine (Trystero/zod/manifest) so it stays out of the
-      // initial bundle. The UI has already painted; rooms connect a moment later.
-      const mod = await import('../p2p/session')
-      // Before the first room is joined, so its first connection already has the relay.
-      if (!engine) mod.setTurnServers(turnServers)
-      engine = mod
-      if (relayOnly && !mod.hasRelay()) {
-        if (!relayMissingSaid) sys('Relay only is on, but no relay server is set, so no room connects. Set a relay, or turn relay only off, in Settings.')
-        relayMissingSaid = true
-        return null
-      }
+      const mod = await loadEngine()
+      if (offline || relayMissing(mod)) return null
       const s = await mod.joinRoomSession({
         ...room,
         displayName,
@@ -2770,8 +2803,17 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
         primary: tier === 'personal',
         presenceOnly: tier === 'presence',
         allowHistory: HISTORY_TIERS.includes(tier),
+        stillWanted: () => !offline,
         events: makeEvents(tier),
       })
+      // Rooms went off after this join reached the relays. The snapshot of tiers they left
+      // did not hold it, so it leaves here, and takes the relay sockets it reopened with it
+      // unless rooms came back on during the leave.
+      if (offline) {
+        await s.leave()
+        if (offline) mod.disconnectAll()
+        return null
+      }
       sessions.set(tier, s)
       rosters.set(tier, [])
       applyHistory() // before any handshake completes, so the first peer is already governed
@@ -2780,6 +2822,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
       updateStatus()
       return s
     } catch (e) {
+      if ((e as Error).name === 'JoinCancelled') return null // rooms went off on the way
       sys(e instanceof CryptoUnsupportedError ? 'P2P unavailable on this browser. Local tools still work.' : `Could not connect (${tier}): ${(e as Error).message}`)
       return null
     }
@@ -2886,7 +2929,11 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
    *  the first then took that session as its own, so the chip named one room while the
    *  device sat in another, or both stayed joined with the live media joinTier adds. */
   let codeSwitch: Promise<unknown> = Promise.resolve()
+  // Set as soon as anything asks for a code room, so the boot pass that restores the stored
+  // one cannot overtake an invite link whose switch is still on its way.
+  let codeAsked = false
   function setCode(code: string | null): Promise<boolean> {
+    if (code) codeAsked = true
     const run = codeSwitch.then(() => switchCode(code))
     codeSwitch = run.catch(() => {})
     return run
@@ -2895,12 +2942,15 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     // Normalised here, at the one place every route goes through, so the chip, the address
     // bar and the recent-rooms list always hold the same spelling of a code.
     const code = raw ? normalizeJoinCode(raw) : null
-    // Rooms off: the request is refused out loud, and the stored code is kept for when
-    // they come back on. Joining nothing would otherwise have cleared it.
-    if (offline && code) {
-      sys(`Rooms are off, so this device did not join ${code.toUpperCase()}. Turn them back on in Connect.`)
+    // Joins held back (rooms off, or relay only with no relay): the request is refused out
+    // loud before anything is left, and kept to be joined once they can be. Joining nothing
+    // would otherwise have cleared the stored code and the #/join link.
+    if (code && (offline || (relayOnly && relayMissing(await loadEngine())))) {
+      pendingCode = code
+      if (offline) sys(`Rooms are off, so this device did not join ${code.toUpperCase()}. It joins once rooms are back on in Connect.`)
       return false
     }
+    pendingCode = ''
     // An invite to the room being left would send its invitee into a room nobody is in.
     void withdrawInvites((pend) => pend.code !== code)
     await leaveTier('code')
@@ -2911,7 +2961,15 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     }
     if (code) {
       codeLabel = code
-      if (!(await joinTier('code', await codeRoom(code)))) codeLabel = ''
+      if (!(await joinTier('code', await codeRoom(code)))) {
+        codeLabel = ''
+        // Held back while it was joining: kept like a refusal above, and the code stays stored.
+        if (offline || relayHeld) {
+          pendingCode = code
+          updateCodeChip()
+          return false
+        }
+      }
     }
     // A #/stage view (an OBS browser source, often in the same profile) only watches, so
     // it leaves the room this device rejoins and its recent-rooms list as they were.
@@ -3452,6 +3510,12 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
       void (async () => {
         let code = codeLabel
         if (!code) {
+          // Held back, a minted code would only be queued, and replace the stored room once
+          // rooms can connect again.
+          if (offline || (relayOnly && !(await loadEngine()).hasRelay())) {
+            toast(offline ? 'Rooms are off. Turn them on in Connect.' : 'Relay only is on with no relay set, so no room can open.')
+            return
+          }
           code = generateJoinCode()
           if (!(await setCode(code))) {
             toast('Could not open a room')
@@ -3728,7 +3792,18 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   // Chromeless stage view (#/stage/<code>, e.g. an OBS browser source): join only that
   // code room, as a pure viewer (publishes nothing), and skip clipboard/personal/nearby.
   if (stageView && p2pReady) {
-    void setCode(normalizeJoinCode(stageViewCode!))
+    // A stage view has no Connect of its own, so it follows Rooms off from the app's tabs by
+    // loading again in the new state. With rooms off it would otherwise sit black with
+    // nothing to say why.
+    roomsChannel?.addEventListener('message', () => location.reload())
+    // A change made while this tab was booting reached no listener; the stored value has it.
+    void getItem<boolean>('p2p-off')
+      .then((v) => {
+        if ((v ?? false) !== offline) location.reload()
+      })
+      .catch(() => {})
+    if (offline) app.append(el('div', { class: 'stage-notice', text: 'Rooms are off on this device, so this stage shows nothing. Turn them on in Connect and it fills.' }))
+    else void setCode(normalizeJoinCode(stageViewCode!))
     return
   }
 
@@ -3815,15 +3890,19 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   let nearbyWanted = true
   /** `announce` is off for the boot pass: a fresh load already says the room is open, and
    *  three more cards announcing tiers is noise. A later Settings toggle does
-   *  announce, so turning it back on is acknowledged the same way turning it off is. */
+   *  announce, so turning it back on is acknowledged the same way turning it off is.
+   *
+   *  Relay only keeps it off too: the nearby room is derived from the public IP alone, so a
+   *  peer who knows this device's key from any other room finds its IP by computing the
+   *  nearby room for candidate addresses and seeing the key there. */
   const startNearby = async (announce = true) => {
-    if (offline) {
+    if (offline || relayOnly) {
       nearbyState = 'off'
       return // not even the STUN probe for the public address
     }
     nearbyState = 'searching'
     const ip = await publicIp()
-    if (!nearbyWanted) {
+    if (!nearbyWanted || offline) {
       nearbyState = 'off'
       return
     }
@@ -3840,7 +3919,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
       nearbyState = 'on'
       if (announce) sys('Nearby discovery on. Devices on this network appear automatically.')
     } else {
-      nearbyState = 'unavailable'
+      nearbyState = offline ? 'off' : 'unavailable'
     }
   }
   void (async () => {
@@ -3952,15 +4031,16 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     notifyStage()
   })
   /** Join every room this device wants: its own devices, nearby and the online list as
-   *  switched, and its code room. Joining a tier already joined is a no-op, and each join
-   *  reports its own failure. */
-  const connectRooms = async () => {
+   *  switched, and its code room. A tier already joined is left as it is, and each join
+   *  reports its own failure. The code room is the one held back, else the stored one;
+   *  `mint` makes a fresh one where there is neither, as a first load does. */
+  const connectRooms = async (mint: boolean) => {
     if (offline) return
-    if (stageView) {
-      await setCode(normalizeJoinCode(stageViewCode!))
-      return
-    }
-    const code = codeLabel || normalizeJoinCode((await getItem<string>('join-code')) ?? '')
+    // A code held back wins over the room still open: it was asked for after that one.
+    const held = pendingCode && pendingCode !== codeLabel ? pendingCode : ''
+    const stored = normalizeJoinCode((await getItem<string>('join-code')) ?? '')
+    const joinCode = held || (sessions.has('code') ? null : stored.length >= 4 ? stored : mint ? generateJoinCode() : null)
+    if (!held) pendingCode = ''
     await Promise.all([
       (async () => {
         try {
@@ -3971,30 +4051,55 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
       })(),
       nearbyWanted && !sessions.has('nearby') ? startNearby(false) : Promise.resolve(),
       presenceWanted && !sessions.has('presence') ? startPresence() : Promise.resolve(),
-      setCode(code.length >= 4 ? code : generateJoinCode()),
+      joinCode ? setCode(joinCode) : Promise.resolve(),
     ])
   }
-  /** Turn rooms off or back on. Off leaves every room, withdraws what this device offered
-   *  on the online list, and keeps the code room's name for when they come back on. */
-  async function setOffline(on: boolean): Promise<void> {
+  /** Turn rooms off or back on, in every tab of this device: the others follow over
+   *  'wt-rooms', since a tab left joined would keep the device reachable. Off leaves every
+   *  room, withdraws what this device offered on the online list, closes the relay sockets
+   *  and peer connections a left room keeps (session.ts disconnectAll), and keeps the code
+   *  room's name for when they come back on. Changes run one at a time: an off issued while
+   *  an on was still joining, or the reverse, otherwise left rooms joined under "Rooms off"
+   *  or nothing joined under "Rooms on". */
+  function setOffline(on: boolean, fromOtherTab = false): Promise<void> {
+    const run = offlineSwitch.then(() => switchOffline(on, fromOtherTab))
+    offlineSwitch = run.catch(() => {})
+    return run
+  }
+  async function switchOffline(on: boolean, fromOtherTab: boolean): Promise<void> {
     if (on === offline) return
     offline = on
-    await setItem('p2p-off', on).catch(() => {})
+    if (!fromOtherTab) {
+      await setItem('p2p-off', on).catch(() => {})
+      roomsChannel?.postMessage({ off: on })
+    }
     if (on) {
       for (const peerId of [...inboundInvites.keys()]) dismissInvite(peerId)
       await withdrawInvites(() => true)
+      // A code switch on its way finishes, or is held, before the rooms are left.
+      await codeSwitch
       for (const tier of [...sessions.keys()]) await leaveTier(tier)
+      engine?.disconnectAll()
       nearbyState = 'off'
       updateCodeChip()
       syncCodeUrl()
       sys('Rooms off. This device is connected to no one: no paired devices, no nearby, no online list and no code room. Tools keep working.')
     } else {
+      engine?.reconnect()
       sys('Rooms on. Reconnecting...')
-      await connectRooms()
+      await connectRooms(true)
     }
     renderRoster()
     updateStatus()
   }
+  roomsChannel?.addEventListener('message', (e) => {
+    const off = (e.data as { off?: unknown } | null)?.off
+    if (typeof off === 'boolean') void setOffline(off, true)
+  })
+  // A change made in another tab while this one was booting reached no listener; the stored
+  // value carries it. Read inside the queue, so a switch made here meanwhile is written
+  // before the read and a message that lands during it applies after.
+  offlineSwitch = offlineSwitch.then(async () => switchOffline((await getItem<boolean>('p2p-off')) ?? false, true)).catch(() => {})
 
   // From Settings: this device's relay changed (null: removed). Rooms already joined use it
   // for every connection they build from now on; see ICE_SERVERS in session.ts.
@@ -4003,8 +4108,12 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     turnServers = Array.isArray(d) ? (d as RTCIceServer[]) : null
     engine?.setTurnServers(turnServers)
     relayMissingSaid = false
-    // A relay just set lets the rooms relay only held back connect now.
-    if (relayOnly && turnServers) void connectRooms()
+    // A relay just set lets the rooms relay only held back connect now. Only those: rooms
+    // already joined stay, and a code room stopped on purpose stays stopped.
+    if (relayHeld && engine?.hasRelay()) {
+      relayHeld = false
+      void connectRooms(false)
+    }
   })
   window.addEventListener('wt:nearby', (e) => {
     nearbyWanted = !!(e as CustomEvent).detail
@@ -4021,9 +4130,9 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   //    one for a first-timer. It announces nothing beyond setCode() putting it in the
   //    topbar chip and in the address bar.
   void (async () => {
-    if (codeLabel || offline) return // an invite link (#/join/...) already claimed the code room, or rooms are off
+    if (codeAsked || offline) return // an invite link (#/join/...) already claimed the code room, or rooms are off
     const saved = normalizeJoinCode((await getItem<string>('join-code')) ?? '')
-    if (codeLabel) return
+    if (codeAsked) return
     await setCode(saved.length >= 4 ? saved : generateJoinCode())
   })()
 }

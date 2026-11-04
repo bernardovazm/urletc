@@ -115,6 +115,9 @@ function trackedPeerConnection(): typeof RTCPeerConnection | undefined {
       // A connection closed by close() fires no event, so closed ones are dropped here.
       for (const pc of openConnections) if (pc.connectionState === 'closed') openConnections.delete(pc)
       openConnections.add(this)
+      // Built while rooms are off, by a signal Trystero was still handling when its room was
+      // left: closed once Trystero's own synchronous setup on it has run.
+      if (disconnected) setTimeout(() => this.close())
     }
   }
   return trackedPc

@@ -5765,7 +5765,9 @@ with sync_playwright() as p:
     # Trystero keeps its relay sockets and peer connections after the last room is left.
     check('rooms off: switched on a running page, every relay socket closes',
           bool(poll(lambda: not ofpg.evaluate(_OF_LIVE_WS), 10)), str(ofpg.evaluate(_OF_LIVE_WS))[:160])
-    check('rooms off: and every peer connection closes', ofpg.evaluate(_OF_LIVE_PC) == 0, str(ofpg.evaluate(_OF_LIVE_PC)))
+    # A connection Trystero builds for a signal it was still handling closes a tick later.
+    check('rooms off: and every peer connection closes', bool(poll(lambda: ofpg.evaluate(_OF_LIVE_PC) == 0, 5)),
+          str(ofpg.evaluate(_OF_LIVE_PC)))
     # The room-link button would mint a code to share; held back, it would only be queued and
     # replace the stored room once rooms come back on.
     _of_link_btn = ofpg.locator('.topbar button.room-link')

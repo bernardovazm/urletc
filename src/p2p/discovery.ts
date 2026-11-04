@@ -24,6 +24,13 @@ async function derivedRoom(tag: string, seed: string): Promise<{ roomId: string;
  * WebRTC/UDP is blocked; nearby discovery is then skipped. Prefers IPv4 (both
  * devices on one NAT share it); falls back to IPv6 at end of gathering.
  */
+// Probes in flight, so Rooms off can end one instead of letting it run to its timeout.
+const probes = new Set<() => void>()
+/** End every probe in flight: its connection closes and it resolves null. */
+export function abortProbes(): void {
+  for (const end of [...probes]) end()
+}
+
 export function publicIp(timeoutMs = 4000): Promise<string | null> {
   if (typeof RTCPeerConnection === 'undefined') return Promise.resolve(null)
   return new Promise((resolve) => {
@@ -41,10 +48,13 @@ export function publicIp(timeoutMs = 4000): Promise<string | null> {
     const finish = (ip: string | null) => {
       if (done) return
       done = true
+      probes.delete(abort)
       clearTimeout(timer)
       pc.close()
       resolve(ip)
     }
+    const abort = () => finish(null)
+    probes.add(abort)
     const timer = setTimeout(() => finish(v6), timeoutMs)
     pc.onicecandidate = (e) => {
       if (!e.candidate) return finish(v6) // end of gathering

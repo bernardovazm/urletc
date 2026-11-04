@@ -24,7 +24,7 @@ import { CryptoUnsupportedError, loadOrCreateIdentity } from '../core/identity'
 import { randomNickname } from '../core/nickname'
 import { getOcrMode } from '../core/prefs'
 import { getItem, removeItem, setItem } from '../core/store'
-import { CODE_LENGTH, codeRoom, generateJoinCode, nearbyRoom, normalizeJoinCode, publicIp } from '../p2p/discovery'
+import { CODE_LENGTH, abortProbes, codeRoom, generateJoinCode, nearbyRoom, normalizeJoinCode, publicIp } from '../p2p/discovery'
 import { noteRelayOnlyAtLoad } from '../p2p/policy'
 import { ensurePersonalSecret, onSecretReplaced, pairLink, personalRoom, resetPersonalSecret } from '../p2p/personal'
 import type { ChatMessage, HistoryRecord, InviteSignal, PeerTransport, ReceivedFile, RoomSession, RosterPeer, SessionEvents, TransportState } from '../p2p/session'
@@ -4125,6 +4125,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
       await codeSwitch
       for (const tier of [...sessions.keys()]) await leaveTier(tier)
       engine?.disconnectAll()
+      abortProbes() // nearby's STUN request for the public address, if one is still running
       nearbyState = 'off'
       updateCodeChip()
       syncCodeUrl()

@@ -40,7 +40,7 @@
     "e2e": "bash scripts/e2e.sh"
   },
   "dependencies": {
-    "@huggingface/transformers": "4.3.1",
+    "@huggingface/transformers": "4.3.2",
     "compromise": "14.19.0",
     "idb-keyval": "6.3.0",
     "nanostores": "1.5.5",

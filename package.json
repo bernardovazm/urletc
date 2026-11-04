@@ -40,25 +40,25 @@
     "e2e": "bash scripts/e2e.sh"
   },
   "dependencies": {
-    "@huggingface/transformers": "4.3.0",
-    "compromise": "14.17.0",
+    "@huggingface/transformers": "4.3.1",
+    "compromise": "14.19.0",
     "idb-keyval": "6.3.0",
     "kokoro-js": "1.2.1",
-    "nanostores": "1.5.3",
+    "nanostores": "1.5.5",
     "tesseract.js": "7.0.0",
-    "trystero": "0.25.2",
-    "zod": "4.6.5"
+    "trystero": "0.25.3",
+    "zod": "4.6.7"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
-    "eslint": "10.11.0",
+    "eslint": "10.13.0",
     "eslint-config-prettier": "10.1.8",
     "eslint-plugin-no-unsanitized": "4.1.5",
-    "globals": "17.12.0",
-    "prettier": "3.9.9",
+    "globals": "17.13.0",
+    "prettier": "3.9.10",
     "typescript": "6.0.3",
-    "typescript-eslint": "8.70.1",
-    "vite": "8.3.0",
-    "vite-plugin-pwa": "1.3.0"
+    "typescript-eslint": "8.72.0",
+    "vite": "8.3.5",
+    "vite-plugin-pwa": "2.0.0"
   }
 }

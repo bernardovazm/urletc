@@ -6612,12 +6612,17 @@ with sync_playwright() as p:
     }""")
     check('cache: the precache is in a cache named after the build',
           bool(rc_cur) and rc_cur.startswith('wt-precache-') and rc_cur != 'wt-precache-v1', str(rc_cur))
-    rc_pg.evaluate("""async (cur) => {
+    # The speech model cache is named after the pins in stt-assets.ts, and the service worker
+    # keeps the current one and the previous build's; the unpinned name is the old cache.
+    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'src', 'workers', 'stt-assets.ts')) as _f:
+        RC_MODEL = 'transformers-cache-' + ''.join(m[:8] for m in re.findall(r"'([0-9a-f]{40})'", _f.read()))
+    rc_pg.evaluate("""async ({ cur, model }) => {
       await (await caches.open('wt-precache-v1')).put('/e2e-old-build', new Response('old'))
-      await (await caches.open('transformers-cache')).put('/e2e-model', new Response('model'))
+      await (await caches.open('transformers-cache')).put('/e2e-old-model', new Response('old model'))
+      await (await caches.open(model)).put('/e2e-model', new Response('model'))
       await (await caches.open(cur)).put('/tesseract/worker-tt.js',
         new Response('// stale', { headers: { 'content-type': 'text/javascript' } }))
-    }""", rc_cur or 'wt-precache-v1')
+    }""", {'cur': rc_cur or 'wt-precache-v1', 'model': RC_MODEL})
     rc_body = rc_pg.evaluate("() => fetch('/tesseract/worker-tt.js').then((r) => r.text())")
     check('cache: a public/ file comes from the network, not a stale cached copy',
           rc_body != '// stale' and len(rc_body) > 100, rc_body[:80])
@@ -6652,7 +6657,9 @@ with sync_playwright() as p:
     rc_keys = poll(rc_pruned, 20) or rc_eval(rc_pg, '() => caches.keys()')
     check('cache: the next worker to activate drops the previous build cache',
           rc_keys is not None and 'wt-precache-v1' not in rc_keys, str(rc_keys))
-    check('cache: it keeps the downloaded speech model', rc_keys is not None and 'transformers-cache' in rc_keys,
+    check('cache: it keeps the downloaded speech model', rc_keys is not None and RC_MODEL in rc_keys,
+          str(rc_keys))
+    check('cache: it drops a speech model cache under an older pin', rc_keys is not None and 'transformers-cache' not in rc_keys,
           str(rc_keys))
     check('cache: it keeps the current build cache', rc_keys is not None and rc_cur in rc_keys, str(rc_keys))
     rc_ctx.close()

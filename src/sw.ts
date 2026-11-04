@@ -4,6 +4,8 @@
 // because caches strip them and crossOriginIsolated would otherwise break on an offline
 // reload (ARCHITECTURE sections 2 and 10).
 
+import { MODEL_CACHE, ORT_WASM } from './workers/stt-assets'
+
 declare const self: ServiceWorkerGlobalScope & {
   __WB_MANIFEST: Array<{ url: string; revision: string | null }>
 }
@@ -12,8 +14,8 @@ const manifest = self.__WB_MANIFEST
 
 // Named after the build (FNV-1a over the precache revisions), so each deploy fills a fresh
 // cache; activate keeps it and the one it replaced, and drops anything older. Only names
-// under this prefix are ours: transformers.js keeps its downloaded models in
-// 'transformers-cache' on the same origin.
+// under this prefix are ours: transformers.js keeps its downloaded models in a
+// 'transformers-cache-<pin>' cache on the same origin (stt.worker.ts).
 const PREFIX = 'wt-precache-'
 let hash = 0x811c9dc5
 for (const e of manifest) {
@@ -60,19 +62,46 @@ self.addEventListener('install', (event) => {
 // read by main.ts as well.
 const META = 'wt-meta'
 const META_KEY = '/__wt-current-build'
+// The speech model cache follows the same rule, by its own name (stt-assets.ts): a pin
+// change opens a new one, and a tab still on the previous bundle keeps its model until the
+// deploy after.
+const MODELS_KEY = '/__wt-current-models'
+const MODEL_PREFIX = 'transformers-cache'
 
 self.addEventListener('activate', (event) => {
   event.waitUntil(
     (async () => {
       const meta = await caches.open(META)
       const prev = await (await meta.match(META_KEY))?.text()
-      const keep = new Set([CACHE, prev ?? CACHE])
-      for (const n of await caches.keys()) if (n.startsWith(PREFIX) && !keep.has(n)) await caches.delete(n)
+      const prevModels = await (await meta.match(MODELS_KEY))?.text()
+      const keep = new Set([CACHE, prev ?? CACHE, MODEL_CACHE, prevModels ?? MODEL_CACHE])
+      for (const n of await caches.keys()) {
+        if (keep.has(n)) continue
+        if (n.startsWith(PREFIX)) await carryBinaries(n).catch(() => {})
+        if (n.startsWith(PREFIX) || n.startsWith(MODEL_PREFIX)) await caches.delete(n)
+      }
       if (prev !== CACHE) await meta.put(META_KEY, new Response(CACHE))
+      if (prevModels !== MODEL_CACHE) await meta.put(MODELS_KEY, new Response(MODEL_CACHE))
       await self.clients.claim()
     })(),
   )
 })
+
+// A hashed binary survives every deploy that leaves it alone, and ONNX Runtime's 13.6 MB
+// wasm is fetched only when speech-to-text runs, so it can sit unused in a build's cache
+// until that cache is dropped, and then be downloaded again. Before the cache goes, the
+// binary this build loads is carried forward. Its URL comes from the build, so activate
+// makes no request: functional events wait for activate.
+const BINARIES = new Set([new URL(ORT_WASM, self.location.href).pathname])
+async function carryBinaries(from: string): Promise<void> {
+  const old = await caches.open(from)
+  const cache = await caches.open(CACHE)
+  for (const path of BINARIES) {
+    if (await cache.match(path, MATCH)) continue
+    const res = await old.match(path, MATCH)
+    if (res) await cache.put(path, res)
+  }
+}
 
 function withIsolation(res: Response): Response {
   const headers = new Headers(res.headers)
@@ -138,9 +167,18 @@ async function remember(req: Request, res: Response): Promise<void> {
   if (storable(res)) await (await caches.open(CACHE)).put(req, res)
 }
 
+// A hit from the previous build's cache is copied into this one. A hashed name survives
+// every deploy that leaves the file alone, and served from the older cache without the
+// copy, it went with that cache two deploys later: ONNX Runtime's 13.6 MB binary was then
+// downloaded again, and STT failed offline until it was.
 async function cacheFirst(req: Request): Promise<Response> {
+  const own = await caches.match(req, { ...MATCH, cacheName: CACHE })
+  if (own) return own
   const cached = await caches.match(req, MATCH)
-  if (cached) return cached
+  if (cached) {
+    void remember(req, cached.clone()).catch(() => {})
+    return cached
+  }
   const res = await fetch(req)
   void remember(req, res.clone()).catch(() => {}) // a full quota costs the copy, not the response
   return res

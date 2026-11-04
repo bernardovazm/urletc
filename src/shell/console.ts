@@ -441,7 +441,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     const item = tapItem
     tapItem = null
     const t = elOf(e.target)
-    if (t?.closest('button.del')) return // the control takes its own tap
+    if (t?.closest('button.del, button.copy')) return // the controls take their own tap
     if (!item?.isConnected) return
     // A drag, a scroll and a text selection are all not taps. The scroll check is separate
     // because a flick that starts and ends on the same pixel still scrolls the feed.
@@ -462,6 +462,48 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     entry.arm(TOUCH_REVEAL_MS)
     revealedItem = item
   })
+  /** The text a feed card stands for: a message's words, each line of a replayed history,
+   *  or a tool's output, falling back to everything the card shows. */
+  const cardText = (node: HTMLElement): string => {
+    const msgs = [...node.querySelectorAll<HTMLElement>('.msg')]
+    if (msgs.length > 1) return msgs.map((m) => `${m.querySelector('.who')?.textContent ?? ''}: ${m.querySelector('.bubble')?.textContent ?? ''}`).join('\n')
+    const bubble = node.querySelector<HTMLElement>('.bubble')
+    if (bubble) return bubble.textContent ?? ''
+    const outs = [...node.querySelectorAll<HTMLElement>('pre')].filter((p) => !p.classList.contains('muted') && !p.classList.contains('hidden') && p.textContent?.trim())
+    if (outs.length) return outs.map((p) => p.textContent).join('\n\n')
+    return node.innerText.trim()
+  }
+  /** An image card's picture as PNG, redrawn from the element on screen: the blob URL it
+   *  came from is revoked once it has loaded. */
+  const cardImage = async (node: HTMLElement): Promise<Blob | null> => {
+    const img = node.querySelector<HTMLImageElement>('img.preview')
+    if (!img?.complete || !img.naturalWidth) return null
+    const c = document.createElement('canvas')
+    c.width = img.naturalWidth
+    c.height = img.naturalHeight
+    c.getContext('2d')?.drawImage(img, 0, 0)
+    return new Promise((resolve) => c.toBlob(resolve, 'image/png'))
+  }
+  /** Copy a card: its image with any text read from it, or its text. */
+  const copyCard = async (node: HTMLElement) => {
+    const image = await cardImage(node).catch(() => null)
+    const text = cardText(node)
+    if (image && typeof ClipboardItem === 'function') {
+      try {
+        const parts: Record<string, Blob> = { 'image/png': image }
+        const read = [...node.querySelectorAll<HTMLElement>('pre')].find((p) => !p.classList.contains('muted') && p.textContent?.trim())?.textContent
+        if (read) parts['text/plain'] = new Blob([read], { type: 'text/plain' })
+        await navigator.clipboard.write([new ClipboardItem(parts)])
+        toast('Image copied')
+        return
+      } catch {
+        // an image the clipboard refuses still leaves its text to copy
+      }
+    }
+    if (text) await copyText(text)
+    else toast('Nothing to copy')
+  }
+
   const addCard = (node: HTMLElement, onRemove?: () => void, place: 'top' | 'bottom' = 'bottom') => {
     empty.remove()
     const wrap = el('div', { class: 'feed-item' })
@@ -530,7 +572,9 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     // timeout and the blur disarm still run everywhere, so an armed card cannot sit waiting.
     if (window.matchMedia('(hover: hover)').matches) del.addEventListener('pointerleave', disarm)
     del.addEventListener('blur', disarm)
-    wrap.append(node, del)
+    // Beside the delete control and revealed with it: one press copies what the card shows.
+    const copy = button('📋', () => void copyCard(node), 'icon sm copy', 'Copy this card')
+    wrap.append(node, copy, del)
     // Replayed history goes to the top: every entry in it is older than everything the
     // feed already holds, and appending it under live messages would misdate the room.
     if (place === 'top') {

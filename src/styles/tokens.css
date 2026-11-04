@@ -416,7 +416,8 @@ label.row {
   /* an unbroken word or URL is otherwise a min-content floor that widens the column */
   overflow-wrap: anywhere;
 }
-.feed-item > .del {
+.feed-item > .del,
+.feed-item > .copy {
   position: absolute;
   top: -0.35rem;
   right: -0.35rem;
@@ -426,14 +427,21 @@ label.row {
   z-index: 2;
   transition: opacity 0.12s;
 }
+/* the copy control sits just left of delete, one 28px button plus a gap away */
+.feed-item > .copy {
+  right: 1.6rem;
+}
 .feed-item:hover > .del,
-.feed-item:focus-within > .del {
+.feed-item:focus-within > .del,
+.feed-item:hover > .copy,
+.feed-item:focus-within > .copy {
   opacity: 1;
 }
 /* The touch counterpart of :hover, and deliberately not a media query: it is set from the
    pointerdown/up pair in addCard, so a tap sets it and a mouse on the same hybrid device
    still gets hover. Exactly one item carries it at a time. */
-.feed-item.revealed > .del {
+.feed-item.revealed > .del,
+.feed-item.revealed > .copy {
   opacity: 1;
 }
 /* Armed: the control is red and the next press removes the card. On a mouse that state is
@@ -1692,9 +1700,13 @@ iframe.ws-app-frame {
   /* the delete button hangs outside its card by design; on a phone that is off-screen, so
      it moves inside. At this width it is usually also a touch screen, where it is revealed
      by tapping the card rather than by a hover that cannot happen. */
-  .feed-item > .del {
+  .feed-item > .del,
+  .feed-item > .copy {
     top: 0.15rem;
     right: 0.15rem;
+  }
+  .feed-item > .copy {
+    right: 2.1rem;
   }
   .composer-wrap {
     padding: 0.4rem 0.7rem 0.7rem;

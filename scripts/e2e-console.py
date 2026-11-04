@@ -186,6 +186,16 @@ def cpf_valid(s):
     return True
 
 
+def poll_page(pg, fn, seconds, step=0.25):
+    """fn() once it is truthy, else None after `seconds`, waiting on `pg` between tries."""
+    for _ in range(int(seconds / step)):
+        v = fn()
+        if v:
+            return v
+        pg.wait_for_timeout(int(step * 1000))
+    return None
+
+
 def clip_after(pg, want, seconds=5):
     """The clipboard text once it equals `want` (or satisfies it, when `want` is a
     predicate), else the last read after `seconds`. Copy handlers call writeText without
@@ -407,6 +417,20 @@ with sync_playwright() as p:
     # Deep links are unaffected and are asserted further down.
     link_btns = page.locator('button[aria-label="Copy a direct link to this tool"]').count()
     check('no per-tool copy-link button on a tool card', link_btns == 0, f'{link_btns} still rendered')
+
+    # --- 8b. copy control: one press copies what a card shows ---
+    _ctext = 'copy me ' + os.urandom(3).hex()
+    page.locator('.composer textarea').fill(_ctext)
+    page.locator('.composer textarea').press('Enter')
+    _cwrap = page.locator('.feed-item', has=page.locator('.bubble', has_text=_ctext)).last
+    _cwrap.wait_for(timeout=5000)
+    _cwrap.hover()
+    _cbtn = _cwrap.locator('button.copy')
+    check('copy control: revealed beside delete on hover', _cbtn.is_visible() and _cbtn.get_attribute('aria-label') == 'Copy this card')
+    _cbtn.click()
+    check('copy control: a message card copies its text', clip_after(page, lambda t: t == _ctext) == _ctext,
+          repr(page.evaluate('navigator.clipboard.readText()')[:80]))
+    page.mouse.move(4, 4)
 
     # --- 9. feed item deletion: arms on the first click, deletes on the second ---
     # The negative assertion is the load-bearing one: a single click must leave the item
@@ -795,6 +819,15 @@ with sync_playwright() as p:
     check('OCR auto-copy actually writes the recognised text to the clipboard',
           'urletc' in page.evaluate('navigator.clipboard.readText()').lower(),
           repr(page.evaluate('navigator.clipboard.readText()')[:80]))
+
+    # The copy control beside delete puts the image itself on the clipboard, with the text
+    # read from it as the plain-text alternative.
+    last_card.hover()
+    last_card.locator('button.copy').click()
+    _CTYPES = "navigator.clipboard.read().then((items) => items.flatMap((i) => i.types))"
+    _ctypes = poll_page(page, lambda: (lambda t: t if 'image/png' in t else None)(page.evaluate(_CTYPES)), 5) or page.evaluate(_CTYPES)
+    check('copy control: an image card copies the image and its text',
+          'image/png' in _ctypes and 'text/plain' in _ctypes, str(_ctypes))
 
     # --- 13h. locale drives the default generator region, pt-BR gives Brazil ---
     ctx2 = browser.new_context(locale='pt-BR')

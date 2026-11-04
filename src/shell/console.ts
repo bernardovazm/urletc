@@ -422,17 +422,18 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   const removers = new WeakMap<Element, () => void>()
   // Touch has no hover to reveal the per-card delete control with. Revealing it for every
   // card wherever hover was absent put a delete icon on every row of a full feed, so a tap
-  // on a card reveals that card's control, exactly one at a time, and a tap anywhere else
-  // puts it away. The tap also arms it, so touch costs two deliberate acts (tap the card,
-  // tap the red control) and matches the mouse, which costs a hover it gets for free plus
-  // two clicks. Keyed by pointerType and not by a media query: a hybrid device with both a
-  // mouse and a screen gets the hover path from one and this path from the other.
+  // on a card reveals that card's controls, exactly one at a time, and a tap anywhere else
+  // puts them away. The reveal does not arm delete: copy sits a few pixels from it, and a
+  // thumb aimed at copy that landed on an armed delete took the card in one tap. Delete
+  // then costs two presses of its own on touch as with a mouse. Keyed by pointerType and not
+  // by a media query: a hybrid device with both a mouse and a screen gets the hover path
+  // from one and this path from the other.
   const TOUCH_REVEAL_MS = 6000
-  const touchDelete = new WeakMap<Element, { arm: (ms?: number) => void; disarm: () => void }>()
+  const touchReveal = new WeakMap<Element, { reveal: (ms: number) => void; hide: () => void }>()
   let revealedItem: HTMLElement | null = null
   const clearRevealed = () => {
     if (!revealedItem) return
-    touchDelete.get(revealedItem)?.disarm()
+    touchReveal.get(revealedItem)?.hide()
     revealedItem = null
   }
   // Anything that handles its own pointer input is not a tap on the card. `canvas` and
@@ -445,6 +446,9 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   let tapScroll = 0
   const elOf = (t: EventTarget | null): HTMLElement | null => (t instanceof Element ? (t as HTMLElement) : null)
   document.addEventListener('pointerdown', (e) => {
+    // Which input is in use, for the CSS that keeps hidden controls untappable by touch. A
+    // hybrid device with a mouse reports hover, so a media query alone missed its screen.
+    document.documentElement.classList.toggle('touch-input', e.pointerType === 'touch')
     if (e.pointerType !== 'touch') return
     const t = elOf(e.target)
     tapItem = t?.closest<HTMLElement>('.feed-item') ?? null
@@ -476,12 +480,17 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
       return
     }
     clearRevealed()
-    const entry = touchDelete.get(item)
+    const entry = touchReveal.get(item)
     if (!entry) return
-    item.classList.add('revealed')
-    entry.arm(TOUCH_REVEAL_MS)
+    entry.reveal(TOUCH_REVEAL_MS)
     revealedItem = item
   })
+  /** A tool's output on a card: its unmuted `pre`s, plus the text OCR read off an image
+   *  (`.ocr-out`, muted for looks). Progress and error lines are neither. */
+  const outputs = (node: HTMLElement): HTMLElement[] =>
+    [...node.querySelectorAll<HTMLElement>('pre')].filter(
+      (p) => (p.classList.contains('ocr-out') || !p.classList.contains('muted')) && !p.classList.contains('hidden') && p.textContent?.trim(),
+    )
   /** The text a feed card stands for: a message's words, each line of a replayed history,
    *  or a tool's output, falling back to everything the card shows. */
   const cardText = (node: HTMLElement): string => {
@@ -489,38 +498,46 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     if (msgs.length > 1) return msgs.map((m) => `${m.querySelector('.who')?.textContent ?? ''}: ${m.querySelector('.bubble')?.textContent ?? ''}`).join('\n')
     const bubble = node.querySelector<HTMLElement>('.bubble')
     if (bubble) return bubble.textContent ?? ''
-    const outs = [...node.querySelectorAll<HTMLElement>('pre')].filter((p) => !p.classList.contains('muted') && !p.classList.contains('hidden') && p.textContent?.trim())
+    const outs = outputs(node)
     if (outs.length) return outs.map((p) => p.textContent).join('\n\n')
     return node.innerText.trim()
   }
-  /** An image card's picture as PNG, redrawn from the element on screen: the blob URL it
-   *  came from is revoked once it has loaded. */
-  const cardImage = async (node: HTMLElement): Promise<Blob | null> => {
-    const img = node.querySelector<HTMLImageElement>('img.preview')
-    if (!img?.complete || !img.naturalWidth) return null
+  /** An image as PNG, redrawn from the element on screen: the blob URL it came from is
+   *  revoked once it has loaded. Past Safari's 16.7 Mpx canvas limit toBlob yields nothing,
+   *  and the text fallback then runs outside the click, where Safari refuses it too, so a
+   *  failed full-size render is retried scaled under the limit. */
+  const MAX_CANVAS_PX = 16_777_216
+  const renderPng = (img: HTMLImageElement, k: number): Promise<Blob | null> => {
     const c = document.createElement('canvas')
-    c.width = img.naturalWidth
-    c.height = img.naturalHeight
-    c.getContext('2d')?.drawImage(img, 0, 0)
+    c.width = Math.max(1, Math.floor(img.naturalWidth * k))
+    c.height = Math.max(1, Math.floor(img.naturalHeight * k))
+    c.getContext('2d')?.drawImage(img, 0, 0, c.width, c.height)
     return new Promise((resolve) => c.toBlob(resolve, 'image/png'))
   }
-  /** Copy a card: its image with any text read from it, or its text. */
-  const copyCard = async (node: HTMLElement) => {
-    const image = await cardImage(node).catch(() => null)
+  const imagePng = async (img: HTMLImageElement): Promise<Blob> => {
+    const k = Math.min(1, Math.sqrt(MAX_CANVAS_PX / (img.naturalWidth * img.naturalHeight)))
+    const b = (await renderPng(img, 1)) ?? (k < 1 ? await renderPng(img, k) : null)
+    if (!b) throw new Error('no image')
+    return b
+  }
+  /** Copy a card: its image with any text read from it, or its text. Nothing is awaited
+   *  before the write: Safari allows clipboard writes only while the click is being handled,
+   *  so the PNG, ready a task later, goes in as a promise the item resolves itself. */
+  const copyCard = (node: HTMLElement): void => {
+    const img = node.querySelector<HTMLImageElement>('img.preview')
     const text = cardText(node)
-    if (image && typeof ClipboardItem === 'function') {
-      try {
-        const parts: Record<string, Blob> = { 'image/png': image }
-        const read = [...node.querySelectorAll<HTMLElement>('pre')].find((p) => !p.classList.contains('muted') && p.textContent?.trim())?.textContent
-        if (read) parts['text/plain'] = new Blob([read], { type: 'text/plain' })
-        await navigator.clipboard.write([new ClipboardItem(parts)])
-        toast('Image copied')
-        return
-      } catch {
+    if (img?.complete && img.naturalWidth && typeof ClipboardItem === 'function') {
+      const parts: Record<string, Promise<Blob>> = { 'image/png': imagePng(img) }
+      const read = outputs(node)[0]?.textContent
+      if (read) parts['text/plain'] = Promise.resolve(new Blob([read], { type: 'text/plain' }))
+      navigator.clipboard.write([new ClipboardItem(parts)]).then(
+        () => toast('Image copied'),
         // an image the clipboard refuses still leaves its text to copy
-      }
+        () => (text ? void copyText(text) : toast('Copy blocked')),
+      )
+      return
     }
-    if (text) await copyText(text)
+    if (text) void copyText(text)
     else toast('Nothing to copy')
   }
 
@@ -532,13 +549,13 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     // would take a card with it. The first press arms (red, and the accessible name changes
     // with it, so the state is not carried by colour alone); the second deletes. It disarms
     // on a timeout and when the pointer or focus leaves, so a card cannot sit armed waiting
-    // to be triggered by an unrelated tap later. On touch the tap that reveals the control
-    // arms it too, so the count is the same on both.
+    // to be triggered by an unrelated tap later. Touch counts the same presses, after the
+    // tap that reveals the controls.
     const ARM_MS = 3000
     let armed = false
     let armTimer = 0
+    let revealTimer = 0
     const disarm = () => {
-      wrap.classList.remove('revealed') // the tap-revealed state expires with the arm
       if (!armed) return
       armed = false
       window.clearTimeout(armTimer)
@@ -556,7 +573,23 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
       window.clearTimeout(armTimer)
       armTimer = window.setTimeout(disarm, ms)
     }
-    touchDelete.set(wrap, { arm, disarm })
+    const hide = () => {
+      window.clearTimeout(revealTimer)
+      wrap.classList.remove('revealed')
+      disarm()
+    }
+    // An armed control outlasts the reveal, so a second press due within the arm window
+    // still lands on a visible target.
+    const expire = () => {
+      if (armed && wrap.isConnected) revealTimer = window.setTimeout(expire, ARM_MS)
+      else hide()
+    }
+    const reveal = (ms: number) => {
+      wrap.classList.add('revealed')
+      window.clearTimeout(revealTimer)
+      revealTimer = window.setTimeout(expire, ms)
+    }
+    touchReveal.set(wrap, { reveal, hide })
     const del = button(
       '🗑',
       () => {
@@ -564,17 +597,19 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
           arm()
           return
         }
-        window.clearTimeout(armTimer)
+        hide() // every timer of this card goes with it
         try {
           onRemove?.()
         } catch {
           /* ignore */
         }
         if (revealedItem === wrap) revealedItem = null
-        // Focus moves to the neighbouring card, or the composer: removing the focused
-        // control dropped a keyboard user back at the top of the page.
+        // Focus moves to the neighbouring card's delete, or the composer: removing the
+        // focused control dropped a keyboard user back at the top of the page.
+        const n = wrap.nextElementSibling ?? wrap.previousElementSibling
         const next =
-          (wrap.nextElementSibling ?? wrap.previousElementSibling)?.querySelector<HTMLElement>('button, a[href], summary, input, textarea') ??
+          n?.querySelector<HTMLElement>(':scope > button.del') ??
+          n?.querySelector<HTMLElement>('button, a[href], summary, input, textarea') ??
           document.querySelector<HTMLElement>('.composer textarea')
         wrap.remove()
         if (document.activeElement === document.body) next?.focus()
@@ -587,13 +622,21 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     del.setAttribute('aria-pressed', 'false')
     // A touch pointer stops existing right after `pointerup`, so `pointerleave` fires at the
     // end of every tap: the card armed and disarmed inside one gesture and the second tap
-    // re-armed instead of confirming. Departure only means "no longer aimed at this" where a
-    // pointer can rest somewhere, so the listener is gated on a hover-capable device. The 3s
-    // timeout and the blur disarm still run everywhere, so an armed card cannot sit waiting.
-    if (window.matchMedia('(hover: hover)').matches) del.addEventListener('pointerleave', disarm)
+    // re-armed instead of confirming, and a pen that does not hover does the same. Departure
+    // only means "no longer aimed at this" for a mouse, so it is gated on the event's pointer
+    // type: a gate on a hover-capable device left a hybrid one unable to delete by touch. The 3s timeout and
+    // the blur disarm still run everywhere, so an armed card cannot sit waiting.
+    del.addEventListener('pointerleave', (e) => {
+      if (e.pointerType === 'mouse') disarm()
+    })
     del.addEventListener('blur', disarm)
+    // A held Enter repeats, and focus lands on the next card's delete after each removal,
+    // so it armed and removed card after card.
+    del.addEventListener('keydown', (e) => {
+      if (e.repeat && (e.key === 'Enter' || e.key === ' ')) e.preventDefault()
+    })
     // Beside the delete control and revealed with it: one press copies what the card shows.
-    const copy = button('📋', () => void copyCard(node), 'icon sm copy', 'Copy this card')
+    const copy = button('📋', () => copyCard(node), 'icon sm copy', 'Copy this card')
     wrap.append(node, copy, del)
     // Replayed history goes to the top: every entry in it is older than everything the
     // feed already holds, and appending it under live messages would misdate the room.
@@ -1250,7 +1293,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   // is already on the clipboard. Settings ⚙ tunes it: copy / show / off.
   const ocrMode = getOcrMode
   async function runOcrInto(blob: Blob, out: HTMLElement, copyAfter: boolean): Promise<void> {
-    out.classList.remove('hidden')
+    out.classList.remove('hidden', 'ocr-out')
     out.textContent = 'Reading text (OCR)...'
     try {
       const { recognizeImage } = await import('../tools/ocr')
@@ -1259,6 +1302,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
       })
       const clean = text.trim()
       out.textContent = clean || '(no text found)'
+      if (clean) out.classList.add('ocr-out') // what Copy on the card takes as the image's text
       if (clean && copyAfter) {
         try {
           await navigator.clipboard.writeText(clean)
@@ -2507,7 +2551,8 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   ta.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
-      send()
+      // A held Enter arriving from elsewhere (a delete that moved focus here) sends nothing.
+      if (!e.repeat) send()
     }
   })
 

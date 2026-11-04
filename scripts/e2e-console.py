@@ -475,6 +475,29 @@ with sync_playwright() as p:
     page.mouse.move(4, 4)
     page.wait_for_timeout(200)
 
+    # By keyboard, focus moves to the next card's delete after a removal, so a held Enter
+    # must not go on to arm and remove that one too.
+    for _k in ('key one', 'key two', 'key three'):
+        page.locator('.composer textarea').fill(f'{_k} {os.urandom(2).hex()}')
+        page.locator('.composer textarea').press('Enter')
+    page.wait_for_timeout(300)
+    _kn = page.locator('.feed-item').count()
+    _kdel = page.locator('.feed-item', has_text='key two').locator('button.del')
+    _kdel.focus()
+    page.keyboard.press('Enter')
+    page.keyboard.down('Enter')
+    page.keyboard.down('Enter')  # auto-repeat of the held key
+    page.keyboard.down('Enter')
+    page.keyboard.up('Enter')
+    page.wait_for_timeout(200)
+    _kfocus = page.evaluate("() => document.activeElement?.className || ''")
+    check('delete: a held Enter removes one card, and focus moves to the next delete',
+          page.locator('.feed-item').count() == _kn - 1 and 'del' in _kfocus,
+          f'{page.locator(".feed-item").count()} items, was {_kn}; focus {_kfocus!r}')
+    check('delete: the repeat does not arm the next card\'s delete',
+          'armed' not in _kfocus, _kfocus)
+    page.locator('.composer textarea').focus()
+
     # --- 10. text-utils auto-copy on transform ---
     tools_btn.hover()
     page.wait_for_selector('.menu.tool-grid', timeout=3000)
@@ -828,6 +851,13 @@ with sync_playwright() as p:
     _ctypes = poll_page(page, lambda: (lambda t: t if 'image/png' in t else None)(page.evaluate(_CTYPES)), 5) or page.evaluate(_CTYPES)
     check('copy control: an image card copies the image and its text',
           'image/png' in _ctypes and 'text/plain' in _ctypes, str(_ctypes))
+    # The text alternative is what OCR read, not the card's labels: the OCR output is styled
+    # muted, and the muted filter that keeps progress lines out once dropped it.
+    _calt = page.evaluate("""navigator.clipboard.read().then(async (items) => {
+        const i = items.find((x) => x.types.includes('text/plain'))
+        return i ? (await i.getType('text/plain')).text() : '' })""")
+    check('copy control: the image\'s text alternative is the OCR result',
+          'urletc' in _calt.lower() and 'Run OCR' not in _calt, repr(_calt[:120]))
 
     # --- 13h. locale drives the default generator region, pt-BR gives Brazil ---
     ctx2 = browser.new_context(locale='pt-BR')
@@ -4414,6 +4444,18 @@ with sync_playwright() as p:
         hq_up = poll(lambda: hq_ask.count() == 1, 150)
         check(f'a joiner raises the history prompt ({hq_answer})', bool(hq_up), hq_a.locator('.feed').inner_text()[-160:])
         if hq_up:
+            if hq_answer == 'No':
+                _hq_cp = hq_a.locator('.feed-item', has=hq_ask).locator('button.copy')
+                check('a status line that asks something has no copy control over its answers',
+                      _hq_cp.count() == 1 and _hq_cp.evaluate('b => getComputedStyle(b).display') == 'none')
+                # ...and no answer sits under its delete control, wherever the line wraps.
+                _hq_over = hq_a.locator('.feed-item', has=hq_ask).evaluate('''(w) => {
+                    const d = w.querySelector(':scope > button.del').getBoundingClientRect()
+                    return [...w.querySelectorAll('.sys button')].filter((b) => {
+                      const r = b.getBoundingClientRect()
+                      return r.right > d.left && r.left < d.right && r.bottom > d.top && r.top < d.bottom
+                    }).map((b) => b.textContent) }''')
+                check('a status line that asks something keeps its answers clear of delete', not _hq_over, str(_hq_over))
             hq_ask.locator('button', has_text=hq_answer).click()
             check(f'answering {hq_answer} takes the prompt away', bool(poll(lambda: hq_ask.count() == 0, 5)))
             check(f'and leaves no empty feed item behind ({hq_answer})', hq_a.evaluate(EMPTY_ITEMS) == 0,
@@ -4483,7 +4525,12 @@ with sync_playwright() as p:
         .filter(d => parseFloat(getComputedStyle(d).opacity) > 0.05).length""")
     check('touch: no card wears a delete control until it is asked for',
           _vis == 0, f'{_vis} of {_tn} showing one')
-    # ...and it still has to work. Tapping the card reveals and arms in one gesture.
+    # ...and it still has to work. Tapping the card reveals its controls without arming
+    # delete: copy sits beside it, and a tap aimed at copy must not remove the card.
+    _hidden_hit = tp.evaluate("""() => [...document.querySelectorAll('.feed-item:not(.revealed) > button.copy')]
+        .filter(b => getComputedStyle(b).pointerEvents !== 'none').length""")
+    check('touch: a hidden copy or delete control takes no tap',
+          _hidden_hit == 0, f'{_hidden_hit} hidden controls hit-testable')
     tcard = tp.locator('.feed-item', has_text='touch delete three')
     tcard.tap(position={'x': 40, 'y': 8})
     tp.wait_for_timeout(250)
@@ -4494,13 +4541,19 @@ with sync_playwright() as p:
     check('touch: exactly one card is revealed at a time',
           tp.locator('.feed-item.revealed').count() == 1,
           f'{tp.locator(".feed-item.revealed").count()} revealed')
-    check('touch: the revealing tap arms it, announced and not only coloured',
-          'armed' in (tdel.get_attribute('class') or '')
-          and tdel.get_attribute('aria-pressed') == 'true',
+    check('touch: the revealing tap does not arm delete',
+          'armed' not in (tdel.get_attribute('class') or '')
+          and tdel.get_attribute('aria-pressed') == 'false',
           f'class={tdel.get_attribute("class")!r} pressed={tdel.get_attribute("aria-pressed")!r}')
     _tbefore = MINE.count()
     tdel.tap()
-    check('touch: tapping the revealed control removes the card',
+    tp.wait_for_timeout(150)
+    check('touch: the first tap on delete arms it, announced and not only coloured',
+          'armed' in (tdel.get_attribute('class') or '')
+          and tdel.get_attribute('aria-pressed') == 'true' and MINE.count() == _tbefore,
+          f'class={tdel.get_attribute("class")!r} pressed={tdel.get_attribute("aria-pressed")!r} items={MINE.count()}')
+    tdel.tap()
+    check('touch: the second tap on delete removes the card',
           bool(poll(lambda: MINE.count() == _tbefore - 1 and tcard.count() == 0, 3)),
           f'{MINE.count()} items, was {_tbefore}')
     # A tap that lands anywhere else has to put it away, or the quiet state only holds

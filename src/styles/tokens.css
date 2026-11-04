@@ -427,9 +427,20 @@ label.row {
   z-index: 2;
   transition: opacity 0.12s;
 }
-/* the copy control sits just left of delete, one 28px button plus a gap away */
+/* the copy control sits left of delete, one 28px button plus a 0.5rem gap away: closer,
+   a thumb aimed at copy landed on delete */
 .feed-item > .copy {
-  right: 1.6rem;
+  right: 1.9rem;
+}
+/* A status line that asks something (an invite, a history request) keeps its answers clear
+   of the corner controls: it has no copy control, since its words are not worth copying,
+   and its content stays out from under delete, which otherwise sat over an answer that
+   wrapped to the right edge. Both sides, so the centred line stays centred. */
+.feed-item:has(> .sys :is(button, a[href], input)) > .copy {
+  display: none;
+}
+.feed-item:has(> .sys :is(button, a[href], input)) > .sys {
+  padding-inline: 2rem;
 }
 .feed-item:hover > .del,
 .feed-item:focus-within > .del,
@@ -444,12 +455,26 @@ label.row {
 .feed-item.revealed > .copy {
   opacity: 1;
 }
-/* Armed: the control is red and the next press removes the card. On a mouse that state is
-   reached by clicking the revealed control once; on touch the tap that reveals the control
-   also arms it, so both paths cost two deliberate acts and neither leaves a bare delete
-   button sitting under a thumb. Staying visible while armed keeps the second press on a
-   target that is still there. The state is also carried in the button's accessible name
-   (see addCard), so colour is never the only signal. */
+/* Hidden is also untappable by touch: on a phone the controls sit inside the card, and a
+   tap meant for the card's summary copied it or armed delete unseen. `.touch-input` is set
+   from the pointer type (console.ts pointerdown), since a hybrid device with a mouse reports
+   hover; the media query covers the first tap on a touch-only screen. A sticky :hover after
+   a tap shows the controls, so it leaves them tappable too. */
+:root.touch-input .feed-item:not(.revealed):not(:focus-within):not(:hover) > .del:not(.armed),
+:root.touch-input .feed-item:not(.revealed):not(:focus-within):not(:hover) > .copy {
+  pointer-events: none;
+}
+@media (hover: none) {
+  .feed-item:not(.revealed):not(:focus-within):not(:hover) > .del:not(.armed),
+  .feed-item:not(.revealed):not(:focus-within):not(:hover) > .copy {
+    pointer-events: none;
+  }
+}
+/* Armed: the control is red and the next press removes the card. It is reached by pressing
+   the revealed control once, with a mouse or after the tap that reveals it on touch, so
+   neither path leaves a one-press delete sitting under a thumb. Staying visible while armed
+   keeps the second press on a target that is still there. The state is also carried in
+   the button's accessible name (see addCard), so colour is never the only signal. */
 .feed-item > .del.armed {
   opacity: 1;
   color: var(--bg);
@@ -1716,7 +1741,7 @@ iframe.ws-app-frame {
     right: 0.15rem;
   }
   .feed-item > .copy {
-    right: 2.1rem;
+    right: 2.4rem;
   }
   .composer-wrap {
     padding: 0.4rem 0.7rem 0.7rem;

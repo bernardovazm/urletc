@@ -1401,6 +1401,10 @@ with sync_playwright() as p:
         _sout = rstt.locator('pre').last.inner_text()
         check('stt: a speech file transcribes on-device', 'ask not what your country' in _sout.lower(),
               f'{_sst.inner_text()[:160]!r} {_sout[:80]!r}')
+        # The keys keep main and fetch the commit, so the cache is named after the pins.
+        _skeys = rp.evaluate('() => caches.keys()')
+        check('stt: the model is cached under a name that carries the pins',
+              any(k.startswith('transformers-cache-') for k in _skeys) and 'transformers-cache' not in _skeys, str(_skeys))
     rc.close()
 
     # Both Pong players see the match end. Only the host scores, and the state carrying

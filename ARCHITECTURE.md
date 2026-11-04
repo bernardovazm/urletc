@@ -333,9 +333,14 @@ Files and video are solid; live mic is best effort. The pipeline runs in a dedic
   the weight SHA-256 against a pinned digest before loading (supply-chain control, section 9).
   Neither the OPFS cache nor the digest check is built. `src/workers/stt.worker.ts` loads
   each model at a pinned Hugging Face commit and refuses any other model, so a later push
-  to the repo cannot change what runs; transformers.js caches the files itself, and no
-  digest is checked against bytes the host serves for that commit. ONNX Runtime's loader
-  and WASM binary are served from this origin (`?url` imports), not from jsdelivr.
+  to the repo cannot change what runs. The pin rewrites every `resolve/main/` request in
+  the worker's fetch, since pipeline()'s `revision` option misses the config probes that
+  pick which parts load. transformers.js caches the files itself, in a cache named after
+  the pins (`stt-assets.ts`) that the service worker drops two deploys after a pin change,
+  and no digest is checked against bytes the host serves for that commit. ONNX Runtime's
+  loader and WASM binary (the plain CPU build, 13.6 MB; the asyncify build is for WebGPU)
+  are served from this origin (`?url` imports), not from jsdelivr, and the service worker
+  carries the binary from one build's cache to the next.
 - The Web Speech API is offered only as an opt-in, persistently-warned, never-default cloud
   fast path, since it ships audio to Google or Apple, which rules it out as a default. No
   diarization in v1.

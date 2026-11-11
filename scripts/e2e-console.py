@@ -1320,10 +1320,84 @@ with sync_playwright() as p:
     check('ocr: a blocked language download ends the run with an error',
           bool(rpoll(rp, lambda: rstatus.inner_text().startswith('OCR failed'), 20)), rstatus.inner_text()[:120])
     rc.unroute('https://tessdata.projectnaptha.com/**')
+    # A language file that does not match its pinned SHA-256 fails the run the same way and
+    # is not kept. The body has eng's pinned length, so the digest is what refuses it.
+    _tpins = {k: (int(n), h) for k, n, h in re.findall(r"(\w{3}): \[(\d+), '([0-9a-f]{64})'\]", TESS_SHIM)}
+    _tlangs = set(re.findall(r"^\s+\w+: '(\w{3})',$", re.search(r'const LANG_BY_PREFIX[^{]*\{(.*?)\n\}', repo_text(
+        'src', 'tools', 'ocr', 'index.ts'), re.S).group(1), re.M)) | {'eng'}
+    check('ocr: every language the tool can load has a pinned digest', len(_tlangs) > 1 and _tlangs == set(_tpins),
+          f'{sorted(_tlangs ^ set(_tpins))}')
+    rc.route('https://tessdata.projectnaptha.com/**', lambda r: r.fulfill(
+        status=200, body=bytes(_tpins['eng'][0]), headers={'access-control-allow-origin': '*', 'content-type': 'application/gzip'}))
+    # What the library cached in IndexedDB before the shim checked anything is dropped.
+    rp.evaluate('''() => new Promise((res, rej) => {
+      const q = indexedDB.open('keyval-store')
+      q.onupgradeneeded = () => q.result.createObjectStore('keyval')
+      q.onsuccess = () => {
+        const t = q.result.transaction('keyval', 'readwrite')
+        t.objectStore('keyval').put(new Uint8Array(8), './eng.traineddata')
+        t.oncomplete = () => { q.result.close(); res() }
+        t.onerror = () => rej(t.error)
+      }
+      q.onerror = () => rej(q.error)
+    })''')
+    rocr.locator('input[type=file]').set_input_files(files=[{'name': 'c.png', 'mimeType': 'image/png', 'buffer': rpng}])
+    check('ocr: a language file that does not match its pinned digest fails the run',
+          bool(rpoll(rp, lambda: rstatus.inner_text().startswith('OCR failed'), 20)) and 'SHA-256' in rstatus.inner_text(),
+          rstatus.inner_text()[:160])
+    TESS_CACHED = '''async (lang) => {
+      const r = await (await caches.open('tessdata-4.0.0_fast')).match('https://tessdata.projectnaptha.com/4.0.0_fast/' + lang + '.traineddata.gz')
+      if (!r) return null
+      const d = new Uint8Array(await crypto.subtle.digest('SHA-256', await r.arrayBuffer()))
+      return Array.from(d, (b) => b.toString(16).padStart(2, '0')).join('')
+    }'''
+    check('ocr: the refused language file is not cached', rp.evaluate(TESS_CACHED, 'eng') is None)
+    check('ocr: the unchecked IndexedDB copy from before the pin is gone', rp.evaluate('''() => new Promise((res) => {
+      const q = indexedDB.open('keyval-store')
+      q.onsuccess = () => {
+        const g = q.result.transaction('keyval').objectStore('keyval').get('./eng.traineddata')
+        g.onsuccess = () => { q.result.close(); res(g.result === undefined) }
+        g.onerror = () => res(false)
+      }
+      q.onerror = () => res(false)
+    })'''))
+    rc.unroute('https://tessdata.projectnaptha.com/**')
     rocr.locator('input[type=file]').set_input_files(files=[{'name': 'b.png', 'mimeType': 'image/png', 'buffer': rpng}])
     rpoll(rp, lambda: rstatus.inner_text() == 'Done.' or rstatus.inner_text().startswith('OCR failed'), 60)
     check('ocr: the next run after a failed load retries and reads the text',
           'hello' in rocr.locator('pre').inner_text().lower(), f'{rstatus.inner_text()[:80]!r} {rocr.locator("pre").inner_text()[:80]!r}')
+    check('ocr: the language file is cached as pinned', rp.evaluate(TESS_CACHED, 'eng') == _tpins['eng'][1],
+          str(rp.evaluate(TESS_CACHED, 'eng')))
+    # A stored copy that no longer matches is dropped and downloaded again: the next worker
+    # reads the cache, and the network still answers.
+    rp.evaluate('''async () => (await caches.open('tessdata-4.0.0_fast'))
+      .put('https://tessdata.projectnaptha.com/4.0.0_fast/eng.traineddata.gz', new Response(new Uint8Array(16)))''')
+    rp.reload()
+    rp.wait_for_selector('.composer', timeout=20000)
+    rp.evaluate("location.hash = '#/t/ocr'")
+    rocr = rp.locator('details.card[data-tool="ocr"]')
+    rocr.locator('input[type=file]').wait_for(timeout=10000)
+    rstatus = rocr.locator('div.muted').first
+    rocr.locator('input[type=file]').set_input_files(files=[{'name': 'd.png', 'mimeType': 'image/png', 'buffer': rpng}])
+    rpoll(rp, lambda: rstatus.inner_text() == 'Done.' or rstatus.inner_text().startswith('OCR failed'), 60)
+    check('ocr: a cached language file that no longer matches is replaced from the network',
+          'hello' in rocr.locator('pre').inner_text().lower() and rp.evaluate(TESS_CACHED, 'eng') == _tpins['eng'][1],
+          f'{rstatus.inner_text()[:80]!r} {rp.evaluate(TESS_CACHED, "eng")}')
+    # With the host unreachable, a new worker reads its language file from the shim's cache.
+    rc.route('https://tessdata.projectnaptha.com/**', lambda r: r.abort())
+    try:
+        rp.reload()
+        rp.wait_for_selector('.composer', timeout=20000)
+        rp.evaluate("location.hash = '#/t/ocr'")
+        rocr = rp.locator('details.card[data-tool="ocr"]')
+        rocr.locator('input[type=file]').wait_for(timeout=10000)
+        rstatus = rocr.locator('div.muted').first
+        rocr.locator('input[type=file]').set_input_files(files=[{'name': 'e.png', 'mimeType': 'image/png', 'buffer': rpng}])
+        rpoll(rp, lambda: rstatus.inner_text() == 'Done.' or rstatus.inner_text().startswith('OCR failed'), 60)
+        check('ocr: a cached language file is read without the network',
+              'hello' in rocr.locator('pre').inner_text().lower(), f'{rstatus.inner_text()[:120]!r}')
+    finally:
+        rc.unroute('https://tessdata.projectnaptha.com/**')
     rc.close()
 
     # A getUserMedia that resolves after a newer Start, a Stop or the card closing is

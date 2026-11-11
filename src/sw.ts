@@ -14,8 +14,9 @@ const manifest = self.__WB_MANIFEST
 
 // Named after the build (FNV-1a over the precache revisions), so each deploy fills a fresh
 // cache; activate keeps it and the one it replaced, and drops anything older. Only names
-// under this prefix are ours: transformers.js keeps its downloaded models in a
-// 'transformers-cache-<pin>' cache on the same origin (stt.worker.ts).
+// under this prefix are ours: the speech worker keeps its downloaded models in a
+// 'transformers-cache-<pin>' cache on the same origin (stt.worker.ts), and the OCR worker its
+// language files in 'tessdata-4.0.0_fast' (public/tesseract/worker-tt.js).
 const PREFIX = 'wt-precache-'
 let hash = 0x811c9dc5
 for (const e of manifest) {
@@ -138,8 +139,9 @@ self.addEventListener('fetch', (event) => {
 
   if (req.method !== 'GET') return
 
-  // Same-origin only. Cross-origin (HF models, OCR lang data, CDN wasm) is left to the
-  // libraries' own caching and never cached here. Hashed build output under /assets/ never
+  // Same-origin only. Cross-origin files (Whisper models, OCR language data) are cached by
+  // the workers that check their digests (stt.worker.ts, public/tesseract/worker-tt.js),
+  // never here. Hashed build output under /assets/ never
   // changes behind its URL, so it is cache-first and lazy tool chunks and workers cache as
   // they are used rather than all being precached up front. Everything else keeps its URL
   // across deploys (public/tesseract, the icon), so it is network-first and the cached copy

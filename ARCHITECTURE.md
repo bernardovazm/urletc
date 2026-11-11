@@ -259,10 +259,16 @@ therefore progressive enhancement rather than one-tap-only:
 ### 4.2 OCR: Tesseract.js v7 `[v]`
 v7's relaxed-SIMD LSTM build (15-35% faster than v6 `[v]`) runs in a Web Worker, lazy-loaded
 on first image detection. Core and worker are self-hosted under `public/tesseract/` so
-`script-src` stays `'self'`; only the `eng` traineddata is fetched from the tessdata CDN
-(allowed in `connect-src`), and the library caches it in IndexedDB. The WASM core plus Brotli
-`eng` traineddata is roughly a single-digit-MB download `[~]`. Do not quote an exact MB to
-users: measure at build time and surface the real number in the download dialog. No
+`script-src` stays `'self'`; only the traineddata is fetched from the tessdata CDN (allowed
+in `connect-src`): `eng` plus at most one browser language (`ocrLanguages()`). The worker
+shim, `public/tesseract/worker-tt.js`, checks each file against a byte length and SHA-256
+kept in the repo before tesseract reads it, from the network and from the shim's own cache
+(`tessdata-4.0.0_fast`) alike, and refuses any other fetch from the worker. The library's
+IndexedDB cache is off, since it stores the decompressed file the digest does not cover, and
+the copies it stored before the shim checked anything are deleted, so the first OCR run after
+that change needs the network. The WASM core plus the gzipped `eng` traineddata (2 MB) is a
+single-digit-MB download `[~]`. Do not quote an exact MB to users: measure at build time and
+surface the real number in the download dialog. No
 SharedArrayBuffer is needed (worker-per-scheduler), so OCR works even on pages without
 cross-origin isolation, which matters for the COEP interaction in sections 4.3 and 10.
 
@@ -870,7 +876,7 @@ Footguns do not become safety properties by being documented, so these are absol
 | Sybil / gossip poisoner | flood or fake-vouch | challenge-response (signature) admission, trusted-peers-only vouching, re-verify before relay; PoW is an anti-flood speed-bump only, no part of the Sybil answer (5.5) |
 | XSS into host origin | read IDB, use in-realm keys, exfiltrate | strict CSP (no eval, no inline) plus Trusted Types plus the DOMParser strip as the primary control; encrypted IDB is secondary (see the key-lifecycle caveat below) |
 | Offline disk-image attacker | copy browser profile | passphrase-lock mode (PBKDF2>=600k into AES-GCM) for the vault. Device mode does not cover this: its wrap key record sits in the same profile as the ciphertext. The identity keypairs (`wt-keys`) are outside the vault in both modes, so a profile copy can sign handshakes as this device (Key lifecycle below) |
-| Supply chain | tampered dep or model | exact-pinned deps plus lockfile, bundle rather than CDN, SRI where applicable; models load at a pinned Hugging Face commit and ONNX Runtime from this origin; model-weight hash verification is not built (4.3) |
+| Supply chain | tampered dep or model | exact-pinned deps plus lockfile, bundle rather than CDN, SRI where applicable; every Whisper file and OCR language file is checked against a byte length and SHA-256 kept in the repo before use, from the network or a cache (4.2, 4.3), and ONNX Runtime loads from this origin |
 
 ### Identity, key and E2EE design
 - All crypto is native WebCrypto: Ed25519 (sign), X25519 (ECDH), AES-256-GCM, HKDF-SHA-256

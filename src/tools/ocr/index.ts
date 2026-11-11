@@ -1,3 +1,4 @@
+import { delMany } from 'idb-keyval'
 import { createWorker, OEM, PSM } from 'tesseract.js'
 import type { ToolContext, ToolModule } from '../../shell/registry'
 import { button, copyButton, el, toast } from '../../shell/ui'
@@ -5,7 +6,8 @@ import { prepareForOcr } from './preprocess'
 
 // Tesseract.js v7, fully self-hosted core + worker (see public/tesseract/), so the
 // strict CSP keeps script-src 'self'. Only the language data is fetched from a CDN
-// (allowed in connect-src) on first use and cached by the library in IndexedDB.
+// (allowed in connect-src) on first use, checked against a pinned SHA-256 and cached by the
+// worker shim (public/tesseract/worker-tt.js).
 
 // The Tesseract worker is a shared singleton, since loading its WASM core twice is
 // wasteful, and is reached from this tool's cards and from the clipboard tool's inline OCR.
@@ -64,8 +66,17 @@ export function ocrLanguages(langs: readonly string[] = navigator.languages ?? [
   return out.join('+')
 }
 
+// What the library cached in IndexedDB before the shim took over: the decompressed files,
+// unchecked, under the default idb-keyval store. Nothing reads them now.
+async function dropLegacyLanguageCache(): Promise<void> {
+  if (!(await indexedDB.databases?.())?.some((d) => d.name === 'keyval-store')) return
+  const langs = ['eng', ...Object.values(LANG_BY_PREFIX)]
+  await delMany(langs.map((l) => `./${l}.traineddata`))
+}
+
 function getWorker(): ReturnType<typeof createWorker> {
   if (workerPromise) return workerPromise
+  void dropLegacyLanguageCache().catch(() => {})
   // A failed traineddata download (offline, a blocked CDN) rejects its job inside
   // tesseract.js, which swallows it and never settles the promise createWorker returned, so
   // the cached promise would hang every later recognition until a reload. errorHandler is
@@ -96,7 +107,10 @@ function getWorker(): ReturnType<typeof createWorker> {
       // the shim cannot resolve the sibling script it needs to import.
       workerBlobURL: false,
       corePath: '/tesseract',
+      // The shim pins every language under this path. The library's IndexedDB cache would
+      // hand tesseract a decompressed copy no digest covers, so the shim caches instead.
       langPath: 'https://tessdata.projectnaptha.com/4.0.0_fast',
+      cacheMethod: 'none',
       logger: (m) => {
         if (m.status === 'recognizing text') progressCb?.(m.progress)
       },

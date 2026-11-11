@@ -4,7 +4,8 @@ These files are copied verbatim from npm, not built here. They are vendored so t
 tool loads its worker and WASM core from this origin, which is what keeps `script-src` at
 `'self'` in the production CSP (see `ARCHITECTURE.md`). Language data is not vendored and
 still downloads from `tessdata.projectnaptha.com`, which is why that host is in
-`connect-src`.
+`connect-src`; `worker-tt.js` checks each file against a pinned SHA-256 before tesseract
+reads it.
 
 | Files | Package | Version | License |
 | --- | --- | --- | --- |
@@ -12,8 +13,10 @@ still downloads from `tessdata.projectnaptha.com`, which is why that host is in
 | `tesseract-core-*-lstm.{js,wasm,wasm.js}` | `tesseract.js-core` | 7.0.0 | Apache-2.0, see `LICENSE-tesseract.js-core.txt` |
 
 `worker-tt.js` belongs to this repository and is not vendored. It installs the Trusted
-Types policy in worker scope and then `importScripts` the vendored worker: a worker has its
-own Trusted Types context, so the document policy does not reach it.
+Types policy in worker scope, wraps the worker's `fetch` so only the pinned language files
+load, and then `importScripts` the vendored worker: a worker has its own Trusted Types
+context, so the document policy does not reach it. A language added to `LANG_BY_PREFIX` in
+`src/tools/ocr/index.ts` needs its size and digest in `PINNED` in `worker-tt.js`.
 
 To refresh, copy from `node_modules/` at the pinned version and copy the two license files
 with them. `package.json` pins both exactly, so the versions above are the versions built.

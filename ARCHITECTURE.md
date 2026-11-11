@@ -331,13 +331,17 @@ Files and video are solid; live mic is best effort. The pipeline runs in a dedic
   short clip and pick the winner; WASM frequently wins on Apple Silicon and q8.
 - Cache weights in OPFS after an explicit, size-disclosed, user-triggered download. Verify
   the weight SHA-256 against a pinned digest before loading (supply-chain control, section 9).
-  Neither the OPFS cache nor the digest check is built. `src/workers/stt.worker.ts` loads
-  each model at a pinned Hugging Face commit and refuses any other model, so a later push
-  to the repo cannot change what runs. The pin rewrites every `resolve/main/` request in
-  the worker's fetch, since pipeline()'s `revision` option misses the config probes that
-  pick which parts load. transformers.js caches the files itself, in a cache named after
-  the pins (`stt-assets.ts`) that the service worker drops two deploys after a pin change,
-  and no digest is checked against bytes the host serves for that commit. ONNX Runtime's
+  The digest check is built; the OPFS cache is not. `src/workers/stt.worker.ts` loads each
+  model at a pinned Hugging Face commit and refuses any other model. Every file the pipeline
+  reads goes through the worker's fetch under the `resolve/main/` URL transformers.js builds
+  (pipeline()'s `revision` option misses the config probes that pick which parts load): it
+  comes from the worker's cache or from the pinned commit, and from either only once its
+  byte length and SHA-256 match `FILES` in `stt-assets.ts`, the commit's LFS object ids and
+  the hashes of its JSON files. A file outside that set reads as missing, a body past its
+  pinned size is cut off, and the one-byte range probes transformers.js sends for sizes are
+  answered from the table, so a cached model loads offline. transformers.js keeps no cache
+  of its own, since it would read its copy back unchecked; the worker's cache is named after
+  the pins, and the service worker drops it two deploys after a pin change. ONNX Runtime's
   loader and WASM binary (the plain CPU build, 13.6 MB; the asyncify build is for WebGPU)
   are served from this origin (`?url` imports), not from jsdelivr, and the service worker
   carries the binary from one build's cache to the next.
@@ -1170,8 +1174,8 @@ self-hosted coturn; Double-Ratchet upgrade if the threat model escalates.
   container, since no ffmpeg ships (4.3); live-mic real time is best effort and device and
   browser dependent, degrading to VAD-chunked near real time. Accuracy is capped at
   base/small, below cloud large-v3. Do not trust WebGPU to be faster; benchmark at runtime.
-  Download is tens of MB and never auto-fetched. It is pinned to a commit but not
-  hash-verified (4.3).
+  Download is tens of MB and never auto-fetched. It is pinned to a commit, and each file
+  is checked against a byte length and SHA-256 kept in the repo before use (4.3).
 - **"Catalog with literally no server" is false.** It is "no server *you* operate", with
   persistence degrading to online-peer overlap, and no durable hosting without accepting a
   relay or KV dependency, because browsers have no DHT. Installed tools survive locally and

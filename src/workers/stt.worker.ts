@@ -2,15 +2,15 @@
 // Whisper speech-to-text via transformers.js, off the main thread (ARCHITECTURE section 4.3).
 // Excluded from the app tsconfig because it runs in a worker global scope, and built by Vite.
 // Receives 16 kHz mono Float32 audio plus model and language, posts back status, progress
-// and result. Models load at a pinned Hugging Face commit (REVISIONS): a commit names its
-// files' content, so a later push to the repo cannot change what runs here. Not built: a
-// SHA-256 check of each fetched file against digests kept in this repo, which would also
-// stand against the host serving other bytes for that commit.
+// and result. Models load at a pinned Hugging Face commit (REVISIONS), and every file is
+// checked against the byte length and SHA-256 kept for it in this repo (FILES) before
+// transformers.js reads it, so neither a later push to the repo, the host serving other
+// bytes for that commit, nor a stored copy changes what runs here.
 
 import { pipeline, env } from '@huggingface/transformers'
 import { installTrustedTypes } from '../core/trusted-types'
-// The model pins and ONNX Runtime's same-origin loader and binary (see stt-assets.ts).
-import { MODEL_CACHE, ORT_MJS, ORT_WASM, REVISIONS } from './stt-assets'
+// The model pins and digests and ONNX Runtime's same-origin loader and binary.
+import { FILES, MODEL_CACHE, ORT_MJS, ORT_WASM, REVISIONS } from './stt-assets'
 
 // The worker is under the same require-trusted-types-for CSP as the page, and ONNX
 // Runtime's threaded build starts its own workers from here, which throw without a policy.
@@ -22,32 +22,137 @@ env.allowLocalModels = false
 env.useWasmCache = false
 env.backends.onnx.wasm.wasmPaths = { mjs: ORT_MJS, wasm: ORT_WASM }
 
+// The pin is applied to every request rather than through pipeline()'s `revision` option,
+// which reaches the weights only: pipeline() first reads config.json and probes
+// tokenizer_config.json and preprocessor_config.json at main to decide which parts to load.
+// Every model file comes through env.fetch under the main URL transformers.js builds, and
+// that URL is never fetched: the file comes from this worker's cache or from the pinned
+// commit, and from either only once its size and SHA-256 match FILES. transformers.js keeps
+// no cache of its own, since it would read its copy back unchecked. The cache keys still
+// name main, so copies stored before the check existed are found and checked like any
+// other, and the cache is named after the pins instead; the service worker drops the ones
+// two deploys old (sw.ts).
+env.useBrowserCache = false
+const HF_FILE = /^https:\/\/huggingface\.co\/([^/]+\/[^/]+)\/resolve\/main\/(.+)$/
+const baseFetch = env.fetch
+env.fetch = async (input, init) => {
+  const req = new Request(input, init)
+  const m = HF_FILE.exec(req.url)
+  if (!m) {
+    if (new URL(req.url).hostname === 'huggingface.co') throw new Error(`not a pinned model file: ${req.url}`)
+    return baseFetch(input, init)
+  }
+  const [, model, path] = m
+  if (!Object.hasOwn(REVISIONS, model) || !Object.hasOwn(FILES, model)) throw new Error(`model not allowed: ${model}`)
+  // A file outside the pinned set reads as one the repo does not have.
+  if (!Object.hasOwn(FILES[model], path)) return new Response(null, { status: 404 })
+  const [size, sha256] = FILES[model][path]
+  // transformers.js probes each file with a one-byte range request for its size before it
+  // loads it. The size is pinned, so the answer needs no network, and a cached model loads
+  // offline.
+  if (req.headers.has('range')) {
+    return new Response(new Uint8Array(1), { status: 206, headers: { 'content-range': `bytes 0-0/${size}` } })
+  }
+  return pinnedFile(req.url, model, path, size, sha256)
+}
+
+// A download that stops sending is abandoned, so the load fails and the next request
+// retries rather than every request on this worker waiting on it for good.
+const STALL_MS = 30_000
+
+async function pinnedFile(key, model, path, size, sha256) {
+  let cache = null
+  try {
+    cache = await caches.open(MODEL_CACHE)
+  } catch {
+    // no Cache Storage here (a private window in some browsers), so every load downloads
+  }
+  // Read as a Blob: it is immutable, so the bytes checked are the bytes handed on, and its
+  // contents can stay on disk while transformers.js reads them. Handing on the checked copy
+  // itself would keep it in memory beside the one transformers.js makes.
+  const hit = await cache?.match(key).catch(() => undefined)
+  const stored = hit && (await hit.blob().catch(() => null))
+  if (stored) {
+    if (await intact(new Uint8Array(await stored.arrayBuffer().catch(() => new ArrayBuffer(0))), size, sha256)) {
+      return new Response(stored, { headers: { 'content-length': String(stored.size) } })
+    }
+    await cache.delete(key).catch(() => {})
+  }
+  const stall = new AbortController()
+  const stop = () => stall.abort(new Error(`${model}/${path} stopped downloading`))
+  let timer = setTimeout(stop, STALL_MS)
+  const alive = () => {
+    clearTimeout(timer)
+    timer = setTimeout(stop, STALL_MS)
+  }
+  try {
+    const res = await baseFetch(`https://huggingface.co/${model}/resolve/${REVISIONS[model]}/${path}`, { signal: stall.signal })
+    if (!res.ok) return res // transformers.js reports the status
+    let shown = -1
+    const bytes = await readCapped(res, size, (loaded) => {
+      alive()
+      const pct = Math.floor((loaded / size) * 100)
+      if (pct === shown) return
+      shown = pct
+      progress({ status: 'progress', name: model, file: path, progress: (loaded / size) * 100, loaded, total: size })
+    })
+    clearTimeout(timer)
+    if (!(await intact(bytes, size, sha256))) throw new Error(`${model}/${path} does not match its pinned SHA-256`)
+    // Stored before it is handed on, so the copy the cache reads is released before
+    // transformers.js makes its own and a file is never held three times at once: a decoder
+    // is tens of MB. A full disk only costs the cache.
+    await cache?.put(key, new Response(bytes)).catch(() => {})
+    return inMemory(bytes)
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/** The body, read up to the pinned size: a larger one is cut off rather than buffered. */
+async function readCapped(res, size, onProgress) {
+  const out = new Uint8Array(size)
+  const reader = res.body?.getReader()
+  let loaded = 0
+  while (reader) {
+    const { done, value } = await reader.read()
+    if (done) break
+    if (loaded + value.byteLength > size) {
+      await reader.cancel().catch(() => {})
+      throw new Error('a model file is larger than its pinned size')
+    }
+    out.set(value, loaded)
+    loaded += value.byteLength
+    onProgress(loaded)
+  }
+  return loaded === size ? out : out.subarray(0, loaded)
+}
+
+async function intact(bytes, size, sha256) {
+  if (bytes.byteLength !== size) return false
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))
+  return Array.from(digest, (b) => b.toString(16).padStart(2, '0')).join('') === sha256
+}
+
+/** A response that hands its reader `bytes` itself, where a BufferSource body is copied. */
+function inMemory(bytes) {
+  const body = new ReadableStream({
+    start(c) {
+      c.enqueue(bytes)
+      c.close()
+    },
+  })
+  return new Response(body, { headers: { 'content-length': String(bytes.byteLength) } })
+}
+
 // One load per model, shared by every request for it. Switching models disposes the
 // previous pipeline: its ONNX sessions held hundreds of MB in this shared worker. Not
 // while a request is still transcribing with it, since STT cards share this worker, so
 // the last such request disposes it when it ends.
-
-// The pin is applied to every request rather than through pipeline()'s `revision` option.
-// That option reaches the weights only: pipeline() first reads config.json and probes
-// tokenizer_config.json and preprocessor_config.json at main to decide which parts to load.
-// Those probes then decided what ran, and since their cache keys named main while the files
-// were stored under the commit, they missed the cache and a cached model still failed
-// offline. Rewritten here, every URL keeps main in its cache key and fetches the commit.
-// The cache is named after the pins instead, and the service worker drops the ones two
-// deploys old (sw.ts).
-env.cacheKey = MODEL_CACHE
-const HF_RESOLVE = /^https:\/\/huggingface\.co\/([^/]+\/[^/]+)\/resolve\/main\//
-const baseFetch = env.fetch
-env.fetch = (input, init) => {
-  const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
-  const m = HF_RESOLVE.exec(url)
-  const rev = m && REVISIONS[m[1]]
-  if (m && !rev) return Promise.reject(new Error(`model not allowed: ${m[1]}`))
-  return baseFetch(rev ? url.replace(m[0], `https://huggingface.co/${m[1]}/resolve/${rev}/`) : input, init)
-}
-
 let loading = null // { model, promise, users, superseded, settled }
 const waiting = new Set() // request ids waiting on a load, each told its download progress
+function progress(data) {
+  for (const wid of waiting) postMessage({ id: wid, type: 'progress', data })
+}
 
 function release(entry) {
   if (--entry.users > 0 || !entry.superseded) return
@@ -59,7 +164,7 @@ self.onmessage = async (e) => {
   const post = (m) => postMessage({ id, ...m }) // echo the request id so callers can demux
   let entry = null
   try {
-    if (!REVISIONS[model]) throw new Error(`model not allowed: ${model}`)
+    if (!Object.hasOwn(REVISIONS, model)) throw new Error(`model not allowed: ${model}`)
     if (!loading || loading.model !== model) {
       const prev = loading
       if (prev) {
@@ -73,9 +178,7 @@ self.onmessage = async (e) => {
         settled: false,
         promise: pipeline('automatic-speech-recognition', model, {
           dtype: 'q8',
-          progress_callback: (p) => {
-            for (const wid of waiting) postMessage({ id: wid, type: 'progress', data: p })
-          },
+          progress_callback: progress,
         }),
       }
       next.promise.then(

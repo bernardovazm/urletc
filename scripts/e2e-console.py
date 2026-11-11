@@ -37,6 +37,15 @@ CODE_ALPHABET = re.search(r"const CODE_ALPHABET = '([a-z0-9]+)'", io.open(
 TYPED_CODE = 'q7' + ''.join(CODE_ALPHABET[b % len(CODE_ALPHABET)] for b in os.urandom(6))
 
 
+def repo_text(*parts):
+    return io.open(os.path.join(os.path.dirname(__file__), '..', *parts), encoding='utf-8').read()
+
+
+# The pinned OCR language files and Whisper files, read where the suite checks digests.
+TESS_SHIM = repo_text('public', 'tesseract', 'worker-tt.js')
+STT_ASSETS = repo_text('src', 'workers', 'stt-assets.ts')
+
+
 def tool_ids():
     """Every registered tool id, parsed from src/tools/index.ts.
 
@@ -1390,6 +1399,8 @@ with sync_playwright() as p:
         _scancel = rp.locator('.modal button', has_text='Cancel')
         if rpoll(rp, lambda: _scancel.count() > 0, 3):
             _scancel.click()
+        _hf_ranges = []
+        rc.on('request', lambda r: _hf_ranges.append(r.url) if 'huggingface.co/' in r.url and r.headers.get('range') else None)
         rstt.locator('select').first.select_option('Xenova/whisper-tiny')
         rstt.locator('input[type=file]').set_input_files(files=[{'name': 'jfk.wav', 'mimeType': 'audio/wav', 'buffer': _jfk}])
         rstt.locator('button', has_text='Transcribe file').click()
@@ -1405,6 +1416,80 @@ with sync_playwright() as p:
         _skeys = rp.evaluate('() => caches.keys()')
         check('stt: the model is cached under a name that carries the pins',
               any(k.startswith('transformers-cache-') for k in _skeys) and 'transformers-cache' not in _skeys, str(_skeys))
+        # Every file comes through the worker's checked fetch, which forwards no request
+        # headers, and each file is stored under the key transformers.js asks for.
+        check('stt: no request to the model host carries a Range header', not _hf_ranges, str(_hf_ranges[:3]))
+        _spins = {f: (int(n), h) for f, n, h in re.findall(r"'([\w./]+)': \[(\d+), '([0-9a-f]{64})'\]", re.search(
+            r"'Xenova/whisper-tiny': \{(.*?)\n  \}", STT_ASSETS, re.S).group(1))}
+        check('stt: every pinned model has its files pinned',
+              set(re.findall(r"'(Xenova/[\w-]+)': '[0-9a-f]{40}'", STT_ASSETS)) == set(re.findall(r"'(Xenova/[\w-]+)': \{", STT_ASSETS))
+              and len(_spins) == 7, f'{sorted(_spins)}')
+        STT_CACHED = '''async ({ cache, key }) => {
+          const r = await (await caches.open(cache)).match(key)
+          if (!r) return null
+          const d = new Uint8Array(await crypto.subtle.digest('SHA-256', await r.arrayBuffer()))
+          return Array.from(d, (b) => b.toString(16).padStart(2, '0')).join('')
+        }'''
+        _sarg = {'cache': next((k for k in _skeys if k.startswith('transformers-cache-')), ''),
+                 'key': 'https://huggingface.co/Xenova/whisper-tiny/resolve/main/preprocessor_config.json'}
+        _sgood = _spins['preprocessor_config.json'][1]
+        check('stt: each file is stored as pinned', rp.evaluate(STT_CACHED, _sarg) == _sgood, str(rp.evaluate(STT_CACHED, _sarg)))
+
+        def stt_run(pg):
+            pg.evaluate("location.hash = '#/t/stt'")
+            card = pg.locator('details.card[data-tool="stt"]')
+            card.locator('button', has_text='Transcribe file').wait_for(timeout=10000)
+            card.locator('select').first.select_option('Xenova/whisper-tiny')
+            card.locator('input[type=file]').set_input_files(files=[{'name': 'jfk.wav', 'mimeType': 'audio/wav', 'buffer': _jfk}])
+            card.locator('button', has_text='Transcribe file').click()
+            go = pg.locator('.modal button', has_text='Download')
+            if rpoll(pg, lambda: go.count() > 0, 5):
+                go.click()
+            st = card.locator('div.muted').first
+            rpoll(pg, lambda: st.inner_text().startswith(('Done', 'Failed')), 300, 1)
+            return st.inner_text(), card.locator('pre').last.inner_text()
+
+        # A stored copy that no longer matches is dropped, and a download that does not match
+        # fails the load instead of running. Both stand for the disk or the host handing over
+        # other bytes. One digit changes, so the length still matches and the digest refuses
+        # it. A new page starts a new worker, which reads every file again.
+        _sbad = rp.evaluate('''async ({ cache, key }) => {
+          const r = await (await caches.open(cache)).match(key)
+          return r ? (await r.text()).replace(/\\d/, (d) => String((+d + 1) % 10)) : null
+        }''', _sarg)
+        check('stt: the tamper checks have a stored file to change', bool(_sbad))
+        _sroute = re.compile(r'huggingface\.co/Xenova/whisper-tiny/resolve/[0-9a-f]{40}/preprocessor_config\.json')
+        if _sbad:
+            rp.evaluate('async ({ cache, key, body }) => (await caches.open(cache)).put(key, new Response(body))', {**_sarg, 'body': _sbad})
+            rc.route(_sroute, lambda r: r.fulfill(status=200, body=_sbad, headers={'access-control-allow-origin': '*', 'content-type': 'application/json'}))
+            sp = rc.new_page()
+            try:
+                sp.goto(f'{BASE}/#/join/x{os.urandom(3).hex()}')
+                sp.wait_for_selector('.composer', timeout=20000)
+                _sst, _sout = stt_run(sp)
+                check('stt: a model file that does not match its pinned digest fails the load', 'pinned SHA-256' in _sst, repr(_sst[:200]))
+                check('stt: the stored copy that no longer matched is dropped', rp.evaluate(STT_CACHED, _sarg) is None,
+                      str(rp.evaluate(STT_CACHED, _sarg)))
+                rc.unroute(_sroute)
+                _sst, _sout = stt_run(sp)
+                check('stt: the next load downloads the pinned file again and transcribes',
+                      'ask not what your country' in _sout.lower() and rp.evaluate(STT_CACHED, _sarg) == _sgood, f'{_sst[:120]!r} {_sout[:60]!r}')
+            finally:
+                rc.unroute(_sroute)
+                sp.close()
+        # The probes need no network and every file is stored, so a stored model loads with
+        # the network gone.
+        rc.set_offline(True)
+        try:
+            op = rc.new_page()
+            op.goto(f'{BASE}/#/join/x{os.urandom(3).hex()}')
+            op.wait_for_selector('.composer', timeout=20000)
+            _ost, _oout = stt_run(op)
+        except Exception as e:  # noqa: BLE001
+            _ost, _oout = f'error {e}', ''
+        finally:
+            rc.set_offline(False)
+        check('stt: a stored model transcribes offline', 'ask not what your country' in _oout.lower(), f'{_ost[:160]!r}')
     rc.close()
 
     # Both Pong players see the match end. Only the host scores, and the state carrying

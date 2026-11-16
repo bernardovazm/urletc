@@ -41,7 +41,7 @@
   },
   "dependencies": {
     "@huggingface/transformers": "4.3.2",
-    "compromise": "14.19.0",
+    "compromise": "14.20.0",
     "idb-keyval": "6.3.0",
     "nanostores": "1.5.5",
     "tesseract.js": "7.0.0",

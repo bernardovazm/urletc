@@ -225,7 +225,7 @@ export function registerBuiltins(): void {
   registry.register({
     id: 'tempmail',
     name: 'Disposable Email',
-    description: 'A throwaway email address, received and read in the app',
+    description: 'A throwaway email address from mail.gw, received and read in the app',
     category: 'util',
     version: '0.1.0',
     icon: '\u{1F4E7}',
@@ -239,7 +239,7 @@ export function registerBuiltins(): void {
   registry.register({
     id: 'shorten',
     name: 'Link Shortener',
-    description: 'Shorten a link with spoo.me, the one tool that sends data off the device',
+    description: 'Shorten a link with spoo.me, which receives the link you submit',
     category: 'util',
     version: '0.1.0',
     icon: '\u{1F587}',
@@ -258,6 +258,33 @@ export function registerBuiltins(): void {
     source: 'builtin',
     permissions: ['clipboard-write', { net: ['https://raw.githubusercontent.com', 'https://cdn.jsdelivr.net'] }],
     load: () => import('./url-safety'),
+  })
+
+  registry.register({
+    id: 'markets',
+    name: 'Markets',
+    description: 'Crypto prices from CoinGecko and currency rates from Frankfurter (ECB), with Coinbase and currency-api as fallbacks; pin any to the top bar',
+    category: 'util',
+    version: '0.1.0',
+    icon: '\u{1F4C8}',
+    source: 'builtin',
+    // Only item ids and the quote currency are sent. jsDelivr serves the currency-api fallback.
+    permissions: ['clipboard-write', { net: ['https://api.coingecko.com', 'https://api.frankfurter.dev', 'https://api.coinbase.com', 'https://cdn.jsdelivr.net'] }],
+    load: () => import('./markets'),
+  })
+
+  registry.register({
+    id: 'weather',
+    name: 'Weather',
+    description: 'Current conditions, 24 hours and 7 days from Open-Meteo for a place you search or choose; pin it to the top bar',
+    category: 'util',
+    version: '0.1.0',
+    icon: '\u26C5',
+    source: 'builtin',
+    // Only a typed place name with the interface language, or coordinates rounded to about
+    // 1 km, are sent.
+    permissions: [{ net: ['https://api.open-meteo.com', 'https://geocoding-api.open-meteo.com'] }],
+    load: () => import('./weather'),
   })
 
   registry.register({

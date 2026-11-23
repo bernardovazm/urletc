@@ -1074,6 +1074,19 @@ copy in this document drifts out of date, which is what happened to the previous
   documented self-host fork where the operator edits this header. The hosted build does not
   advertise arbitrary user relays. A BitTorrent tracker fallback, not built, would need its
   tracker origins in this list too, kept curated and small.
+- The Markets and Weather origins (`api.coingecko.com`, `api.frankfurter.dev`,
+  `api.coinbase.com`, the currency-api path on `cdn.jsdelivr.net`, `api.open-meteo.com`,
+  `geocoding-api.open-meteo.com`) receive only item ids and the quote currency, or a typed
+  place name with the interface language (for localized result names), or coordinates
+  rounded to two decimals (about 1 km) before they are stored or sent. Pinned top-bar tickers (`src/shell/tickers.ts`) are the shell's only background
+  HTTP fetch: one loop per tool, only while the tab is visible and online, backing off to 15
+  minutes on failure, and never mounted in stage view. e2e checks that `vite.config.ts` and
+  `vercel.json` carry the same policy and that every manifest `net` origin is in it.
+- No `Permissions-Policy` header is sent, so geolocation keeps its default allowlist of
+  `self`: the app may ask, and does so only from Weather's "Use my location" click, while
+  the null-origin Workshop frames cannot, because a cross-origin frame needs an `allow`
+  attribute the sandbox runner never sets. Camera, microphone and screen capture rest on
+  the same default.
 - COEP is `credentialless` rather than `require-corp`, precisely because `require-corp` breaks
   any cross-origin resource lacking CORP, including URL-preview embeds and third-party media.
   `credentialless` still grants `crossOriginIsolated`, and with it SharedArrayBuffer for

@@ -35,7 +35,7 @@ const CSP = [
   "media-src 'self' blob:",
   "font-src 'self'",
   "manifest-src 'self'",
-  "connect-src 'self' https://api.mail.gw https://spoo.me https://raw.githubusercontent.com https://tessdata.projectnaptha.com https://huggingface.co https://*.huggingface.co https://*.hf.co https://*.xethub.hf.co https://cdn.jsdelivr.net wss://relay.snort.social wss://bucket.coracle.social wss://relay.primal.net",
+  "connect-src 'self' https://api.mail.gw https://spoo.me https://raw.githubusercontent.com https://tessdata.projectnaptha.com https://huggingface.co https://*.huggingface.co https://*.hf.co https://*.xethub.hf.co https://cdn.jsdelivr.net https://api.coingecko.com https://api.frankfurter.dev https://api.coinbase.com https://api.open-meteo.com https://geocoding-api.open-meteo.com wss://relay.snort.social wss://bucket.coracle.social wss://relay.primal.net",
   "frame-src 'self'",
   "frame-ancestors 'none'",
   "require-trusted-types-for 'script'",

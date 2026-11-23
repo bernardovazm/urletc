@@ -36,6 +36,9 @@ import { registry, type ToolManifest, type ToolModule } from './registry'
 import { Router } from './router'
 import { setStudio, type SourceKind, type StageLayout, type StreamMeta, type StudioController, type StudioSource } from './studio'
 import { DISPLAY_MEDIA_OPTIONS, screenShareSupport } from './screen-share'
+import { marketTickers } from './ticker-markets'
+import { weatherTicker } from './ticker-weather'
+import { mountTickers } from './tickers'
 import { button, copyText, el, toast } from './ui'
 
 type Tier = 'personal' | 'nearby' | 'code' | 'presence'
@@ -3837,9 +3840,24 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     peersBtn,
   ])
 
+  // Pinned prices and weather follow the code chip, or sit in a rail under the bar on a
+  // phone. Never mounted in stage view, which must make no request of its own.
+  const tickers = stageView
+    ? null
+    : mountTickers({
+        topbar,
+        after: codeChip,
+        placeMenu,
+        launch: (id) => {
+          const m = registry.get(id)
+          if (m) void launchTool(m)
+        },
+        sources: [weatherTicker(), marketTickers()],
+      })
   renderPins()
+  tickers?.render()
 
-  app.append(sink, announcer, el('div', { class: 'app-shell' }, [topbar, bodyEl]))
+  app.append(sink, announcer, el('div', { class: 'app-shell' }, [topbar, ...(tickers ? [tickers.rail] : []), bodyEl]))
   // Sized only now: detached, the textarea measures 0 and loaded as an 11px sliver.
   autosize()
   if (stageView) document.documentElement.classList.add('stage-view') // chromeless: CSS shows only the stage

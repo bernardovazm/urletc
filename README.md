@@ -11,11 +11,17 @@ Live: [urletc.vercel.app](https://urletc.vercel.app)
 - Each tool is lazily loaded and has its own deep link: clipboard router, image to text,
   speech to text, text to speech, HTML to text, URL check (blocklist feeds plus a
   structural read), subtitle conversion and retiming, disposable email, link shortener,
-  text tools, JSON, Base64, hashing, diff, timestamps, regional test data generators,
-  session uptime, microphone and camera check, and a two-player game over the peer
-  channel. Everything runs on the device except the disposable email and the link
-  shortener, which are labelled as such in the tool list; model weights and blocklist
-  feeds download from their sources and never carry anything you typed.
+  market prices, weather, text tools, JSON, Base64, hashing, diff, timestamps, regional
+  test data generators, session uptime, microphone and camera check, and a two-player
+  game over the peer channel. Everything runs on the device except the disposable email,
+  the link shortener, Markets and Weather, whose tool list entries name the service they
+  use; model weights and blocklist feeds download from their sources and never carry
+  anything you typed.
+- Markets asks CoinGecko, Frankfurter, Coinbase and currency-api for prices, sending only
+  item ids and the quote currency. Weather asks Open-Meteo, sending only a place name you
+  typed with your interface language, or coordinates rounded to about 1 km, and reads your
+  position only when you press Use my location. Prices and weather pinned to the top bar
+  keep refreshing with their card closed, only while the tab is visible.
 - Discovery works over same-network peers, an eight character code for anyone anywhere, or a
   permanent pairing between your own devices. The presence list is opt-in.
 - Text and files are end to end encrypted with a per-session HKDF ratchet for forward

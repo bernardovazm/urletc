@@ -6,6 +6,7 @@ import base64
 import hashlib
 import io
 import json
+import math
 import os
 import re
 import sys
@@ -219,10 +220,172 @@ def clip_after(pg, want, seconds=5):
     return t
 
 
+# Markets and Weather call third-party APIs, and the suite never does: every context that can
+# open either tool answers these hosts with deterministic JSON shaped like the real
+# responses (measured from a browser). The payloads carry what a hostile or drifting API
+# might: an `image` URL that must never be rendered, markup in a coin name, a quote the
+# Frankfurter stub omits (TRY) and a coin the Coinbase stub omits (TRX).
+MK_USD_PER = {'USD': 1.0, 'EUR': 1.0812, 'GBP': 1.2705, 'JPY': 0.006712, 'CNY': 0.1381, 'BRL': 0.1689, 'CAD': 0.7302,
+              'AUD': 0.6598, 'CHF': 1.1324, 'INR': 0.01198, 'MXN': 0.0587, 'KRW': 0.000731, 'HKD': 0.1281,
+              'SGD': 0.7443, 'SEK': 0.0957, 'NOK': 0.0931, 'ZAR': 0.0551, 'TRY': 0.0293}
+MK_COINS = {'bitcoin': ('BTC', 60815.12, 1.23), 'ethereum': ('ETH', 3012.45, -0.87), 'tether': ('USDT', 1.0002, 0.01),
+            'binancecoin': ('BNB', 589.3, 0.42), 'solana': ('SOL', 142.37, 3.18), 'ripple': ('XRP', 0.5213, -1.94),
+            'usd-coin': ('USDC', 0.9999, 0.0), 'dogecoin': ('DOGE', 0.1834, 5.6), 'cardano': ('ADA', 0.4521, -2.3),
+            'tron': ('TRX', 0.1203, 0.8), 'toncoin': ('TON', 5.43, -0.4), 'chainlink': ('LINK', 14.21, 2.05),
+            'avalanche-2': ('AVAX', 27.85, -3.4), 'shiba-inu': ('SHIB', 0.00001734, 1.1), 'litecoin': ('LTC', 72.4, -0.15)}
+MK_HOSTS = ('api.coingecko.com', 'api.coinbase.com', 'api.frankfurter.dev', 'cdn.jsdelivr.net/npm/@fawazahmed0')
+WX_HOSTS = ('api.open-meteo.com', 'geocoding-api.open-meteo.com')
+
+
+def stub_json(route, body, status=200):
+    route.fulfill(status=status, body=json.dumps(body), content_type='application/json',
+                  headers={'access-control-allow-origin': '*'})
+
+
+def new_hold():
+    """A one-shot gate for route_markets/route_weather: set hold['when'] to a URL predicate
+    and the first matching request is parked, unanswered, until release_hold()."""
+    return {'when': None, 'routes': [], 'answer': None}
+
+
+def release_hold(hold):
+    for r in hold['routes']:
+        try:
+            hold['answer'](r)
+        except Exception:
+            pass  # the page gave up on it (its own 10 s timeout), which is fine here
+    hold['routes'].clear()
+
+
+def stub_routes(context, log, patterns, answer, hold):
+    def handle(route):
+        log.append(route.request.url)
+        if hold is not None and hold['when'] and hold['when'](route.request.url):
+            hold['when'] = None
+            hold['routes'].append(route)
+            return
+        answer(route)
+
+    if hold is not None:
+        hold['answer'] = answer
+    for pat in patterns:
+        context.route(pat, handle)
+
+
+def route_markets(context, log, gecko=lambda: 200, frank=lambda: 200, hold=None, tweak=None):
+    """Answer the four price hosts. `gecko` and `frank` give CoinGecko's and Frankfurter's
+    status per call, for the fallbacks; `tweak(url, body)` edits a 200 body, for hostile
+    values; `hold` (new_hold()) parks one request."""
+    from urllib.parse import urlparse, parse_qs
+
+    def answer(route):
+        url = route.request.url
+
+        def reply(route, body, status=200):
+            stub_json(route, tweak(url, body) if status == 200 and tweak else body, status)
+        u = urlparse(url)
+        qs = {k: v[0] for k, v in parse_qs(u.query).items()}
+        if u.hostname == 'api.coingecko.com':
+            st = gecko()
+            if st != 200:
+                return reply(route, {'status': {'error_code': st}}, st)
+            q = (qs.get('vs_currency') or qs.get('vs_currencies') or 'usd').upper()
+            per = MK_USD_PER.get(q, 1.0)
+            ids = [i for i in (qs.get('ids') or '').split(',') if i in MK_COINS]
+            if u.path.endswith('/coins/markets'):
+                rows = []
+                for i in ids:
+                    sym, usd, chg = MK_COINS[i]
+                    p = usd / per
+                    spark = [p * (1 + 0.03 * math.sin(k / 9.0 + len(i)) - chg / 100 * (167 - k) / 167) for k in range(168)]
+                    rows.append({'id': i, 'symbol': sym.lower(), 'name': '<img src=x onerror=alert(1)>' + i,
+                                 'image': 'https://example.invalid/logo.png', 'current_price': p,
+                                 'price_change_percentage_24h_in_currency': chg, 'price_change_percentage_7d_in_currency': chg * 2,
+                                 'last_updated': '2026-11-22T12:00:00.000Z', 'sparkline_in_7d': {'price': spark}})
+                return reply(route, rows)
+            return reply(route, {i: {q.lower(): MK_COINS[i][1] / per, q.lower() + '_24h_change': MK_COINS[i][2],
+                                         'last_updated_at': 1795400000} for i in ids})
+        if u.hostname == 'api.coinbase.com':
+            q = (qs.get('currency') or 'USD').upper()
+            per = MK_USD_PER.get(q, 1.0)
+            return reply(route, {'data': {'currency': q, 'rates': {sym: repr(per / usd) for sym, usd, _ in MK_COINS.values() if sym != 'TRX'}}})
+        if u.hostname == 'api.frankfurter.dev':
+            st = frank()
+            if st != 200:
+                return reply(route, {'message': 'stub'}, st)
+            base = (qs.get('base') or 'EUR').upper()
+            quotes = [c for c in (qs.get('quotes') or '').split(',') if c in MK_USD_PER and c != 'TRY']
+            days = ['2026-11-%02d' % d for d in range(2, 23)] if 'from' in qs else ['2026-11-22']
+            return reply(route, [{'date': d, 'base': base, 'quote': c,
+                                      'rate': round(MK_USD_PER[base] / MK_USD_PER[c] * (1 + 0.004 * math.sin(n / 2.0 + len(c))), 6)}
+                                     for n, d in enumerate(days) for c in quotes])
+        if u.hostname == 'cdn.jsdelivr.net':
+            base = re.search(r'/currencies/([a-z]+)\.min\.json$', u.path)
+            b = (base.group(1) if base else 'usd').upper()
+            return reply(route, {'date': '2026-11-22', b.lower(): {c.lower(): MK_USD_PER[b] / v for c, v in MK_USD_PER.items()}})
+        return route.continue_()
+
+    stub_routes(context, log, ('https://api.coingecko.com/**', 'https://api.coinbase.com/**', 'https://api.frankfurter.dev/**',
+                               'https://cdn.jsdelivr.net/npm/@fawazahmed0/**'), answer, hold)
+
+
+WX_PLACES = [
+    {'id': 2267057, 'name': 'Lisbon', 'latitude': 38.716672, 'longitude': -9.133336, 'country': 'Portugal', 'admin1': 'Lisbon'},
+    {'id': 2643743, 'name': 'London', 'latitude': 51.508530, 'longitude': -0.125740, 'country': 'United Kingdom', 'admin1': 'England'},
+    {'id': 4517009, 'name': 'London', 'latitude': 39.886450, 'longitude': -83.448250, 'country': 'United States', 'admin1': 'Ohio'},
+]
+
+
+def wx_forecast(lat, lon):
+    """A forecast whose hours start at today's UTC midnight, with utc_offset 0, so "now" is always inside it."""
+    import datetime
+    now = datetime.datetime.now(datetime.timezone.utc)
+    day0 = datetime.datetime(now.year, now.month, now.day)
+    hours = [day0 + datetime.timedelta(hours=h) for h in range(168)]
+    days = [(day0 + datetime.timedelta(days=d)).date().isoformat() for d in range(7)]
+    codes = [0, 1, 2, 3, 61, 80, 2, 1]
+    return {
+        'latitude': lat, 'longitude': lon, 'utc_offset_seconds': 0, 'timezone': 'GMT',
+        'current': {'time': now.strftime('%Y-%m-%dT%H:00'), 'interval': 900, 'temperature_2m': 21.4, 'apparent_temperature': 22.9,
+                    'relative_humidity_2m': 64, 'precipitation': 0.2, 'weather_code': 2, 'wind_speed_10m': 14.4,
+                    'wind_direction_10m': 225, 'is_day': 1},
+        'hourly': {'time': [h.strftime('%Y-%m-%dT%H:%M') for h in hours],
+                   'temperature_2m': [round(16 + 6 * math.sin((h.hour - 9) / 24 * 2 * math.pi), 1) for h in hours],
+                   'precipitation_probability': [(i * 7) % 90 for i in range(168)],
+                   'weather_code': [codes[(i // 3) % len(codes)] for i in range(168)]},
+        'daily': {'time': days, 'weather_code': [2, 61, 3, 0, 95, 71, 45],
+                  'temperature_2m_max': [24.1, 19.5, 21.0, 26.3, 22.8, 9.4, 17.2],
+                  'temperature_2m_min': [14.2, 12.8, 13.1, 15.9, 16.0, 1.5, 9.8],
+                  'precipitation_probability_max': [10, 80, 35, 0, 65, 90, 20],
+                  'sunrise': [d + 'T07:12' for d in days], 'sunset': [d + 'T17:31' for d in days]},
+    }
+
+
+def route_weather(context, log, hold=None):
+    """Answer Open-Meteo's forecast and geocoding hosts; `hold` (new_hold()) parks one request."""
+    from urllib.parse import urlparse, parse_qs
+
+    def answer(route):
+        url = route.request.url
+        u = urlparse(url)
+        qs = {k: v[0] for k, v in parse_qs(u.query).items()}
+        if u.hostname == 'geocoding-api.open-meteo.com':
+            name = (qs.get('name') or '').lower()
+            hits = [p for p in WX_PLACES if name and name[:3] in p['name'].lower()]
+            return stub_json(route, {'results': hits, 'generationtime_ms': 0.2} if hits else {'generationtime_ms': 0.1})
+        return stub_json(route, wx_forecast(float(qs.get('latitude', 0)), float(qs.get('longitude', 0))))
+
+    stub_routes(context, log, ('https://api.open-meteo.com/**', 'https://geocoding-api.open-meteo.com/**'), answer, hold)
+
+
 with sync_playwright() as p:
     # Fake mic/cam so getUserMedia flows (captions offer, device check) run headless.
     browser = p.chromium.launch(headless=True, args=['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream'])
     ctx = browser.new_context(permissions=['clipboard-read', 'clipboard-write', 'microphone', 'camera'])
+    # The mount loop below opens Markets and Weather in this context too, so their hosts get
+    # the same stubs as the driven sections.
+    route_markets(ctx, [])
+    route_weather(ctx, [])
     page = ctx.new_page()
     logs = []
     page.on('console', lambda m: logs.append(f'{m.type}: {m.text}'))
@@ -2786,7 +2949,7 @@ with sync_playwright() as p:
     check('pasted clean link still names the feed it was checked against',
           'openphish' in cverdict, cverdict[:200])
 
-    # --- shorten: the one tool that leaves the device ---
+    # --- shorten: a link posted to spoo.me ---
     page.evaluate(f"location.hash = '#/t/{tool_id_for('shorten')}'")
     page.wait_for_timeout(800)
     sh = page.locator('details.card').last.locator('.card-body')
@@ -5032,6 +5195,604 @@ with sync_playwright() as p:
     check('pin: no page error on the pin path', not perrs, ' | '.join(perrs)[:200])
     pctx.close()
 
+    # --- markets: card, pinned tickers, reorder, offline, stage view, phone rail, overflow ---
+    # Every price host is stubbed (route_markets); the suite never calls the real APIs.
+    mk_log = []
+    mk_hold = new_hold()
+    mkc = browser.new_context(viewport={'width': 1280, 'height': 800}, locale='en-US',
+                              permissions=['clipboard-read', 'clipboard-write'])
+    route_markets(mkc, mk_log, hold=mk_hold)
+    route_weather(mkc, [])
+    mkp = mkc.new_page()
+    mk_errs = []
+    mkp.on('pageerror', lambda e: mk_errs.append(str(e)))
+    # The clock flows like the real one; the reconnect check below jumps it.
+    mkp.clock.install()
+    mkp.goto(f'{BASE}/#/t/markets')
+    try:
+        mkp.wait_for_selector('details.card[data-tool="markets"] .mk-sec[data-sec="fiat"] .mk-row', timeout=20000)
+    except Exception:
+        pass
+    mk = mkp.locator('details.card[data-tool="markets"]')
+
+    def mk_row(mid, sec=None):
+        return mk.locator((f'.mk-sec[data-sec="{sec}"] ' if sec else '') + f'.mk-row[data-market="{mid}"]')
+
+    def mk_bar():
+        return mkp.eval_on_selector_all('.topbar .ticker[data-market]', 'els => els.map(e => e.dataset.market)')
+
+    mk_text = mk.inner_text() if mk.count() else ''
+    check('markets: every catalog coin renders a row',
+          mk.locator('.mk-sec[data-sec="crypto"] .mk-row').count() == 15, str(mk.locator('.mk-sec[data-sec="crypto"] .mk-row').count()))
+    check('markets: currencies omit the quote currency and any code the source did not return',
+          mk.locator('.mk-sec[data-sec="fiat"] .mk-row').count() == 16 and mk_row('f:USD').count() == 0 and mk_row('f:TRY').count() == 0,
+          str(mk.locator('.mk-sec[data-sec="fiat"] .mk-row').count()))
+    check('markets: nothing renders as NaN, undefined or markup from the payload',
+          'NaN' not in mk_text and 'undefined' not in mk_text and 'onerror' not in mk_text and mk.locator('img').count() == 0)
+    btc = mk_row('c:bitcoin', 'crypto')
+    check('markets: a crypto row shows the symbol, price and 24h change',
+          btc.locator('.mk-sym').inner_text() == 'BTC' and btc.locator('.mk-price').inner_text() == '$60,815.12'
+          and btc.locator('.mk-chg').inner_text() == '▲ 1.23%' and 'up' in btc.locator('.mk-chg').get_attribute('class'),
+          btc.inner_text().replace('\n', ' ') if btc.count() else 'no row')
+    xrp = mk_row('c:ripple', 'crypto').locator('.mk-chg')
+    check('markets: a fall carries the ▼ glyph as well as the colour',
+          xrp.inner_text() == '▼ 1.94%' and 'down' in xrp.get_attribute('class'), xrp.inner_text())
+    check('markets: a sub-cent price keeps its significant digits',
+          mk_row('c:shiba-inu', 'crypto').locator('.mk-price').inner_text() == '$0.00001734',
+          mk_row('c:shiba-inu', 'crypto').locator('.mk-price').inner_text())
+    check('markets: stablecoins are tagged', mk_row('c:tether', 'crypto').locator('.mk-tag').inner_text().lower() == 'stable')
+    check('markets: rows carry a 7-day or 30-day sparkline',
+          btc.locator('svg.mk-spark polyline').count() == 1 and mk_row('f:EUR', 'fiat').locator('svg.mk-spark polyline').count() == 1)
+    check('markets: currencies are labelled as daily reference rates with their date',
+          'daily reference rate, as of' in mk.locator('.mk-sec[data-sec="fiat"] .group-label').inner_text().lower())
+    btc.locator('.mk-price').click()
+    check('markets: the price copies on click', clip_after(mkp, '$60,815.12') == '$60,815.12')
+    mk_link = mk.locator('.mk-foot a[href="https://www.coingecko.com"]')
+    check('markets: the footer names each source, its delay, and links CoinGecko as required',
+          mk_link.count() == 1 and mk_link.get_attribute('rel') == 'noopener noreferrer' and mk_link.get_attribute('target') == '_blank'
+          and 'about 1-2 min delay' in mk_text and 'ECB reference rates via Frankfurter, daily' in mk_text
+          and 'Data provided by CoinGecko' in mk_text and 'Updated ' in mk_text, mk_text[-300:])
+
+    mk.locator('input.mk-search').fill('doge')
+    mkp.wait_for_timeout(200)
+    check('markets: search narrows the list',
+          mk.locator('.mk-row').count() == 1 and mk_row('c:dogecoin').count() == 1, str(mk.locator('.mk-row').count()))
+    mk.locator('input.mk-search').fill('zzzz')
+    mkp.wait_for_timeout(200)
+    check('markets: an empty search says so', mk.locator('.mk-row').count() == 0 and 'Nothing matches' in mk.inner_text())
+    mk.locator('input.mk-search').fill('')
+    mk.locator('button[data-filter="crypto"]').click()
+    check('markets: the Crypto filter hides currencies',
+          mk.locator('.mk-sec[data-sec="fiat"]').count() == 0 and mk.locator('.mk-sec[data-sec="crypto"] .mk-row').count() == 15
+          and mk.locator('button[data-filter="crypto"]').get_attribute('aria-pressed') == 'true')
+    mk.locator('button[data-filter="fiat"]').click()
+    check('markets: the Currencies filter hides crypto',
+          mk.locator('.mk-sec[data-sec="crypto"]').count() == 0 and mk.locator('.mk-sec[data-sec="fiat"] .mk-row').count() == 16)
+    mk.locator('button[data-filter="all"]').click()
+
+    btc.locator('.mk-pin').click()
+    check('markets: pinning puts a ticker on the bar with no reload', bool(poll_page(mkp, lambda: mk_bar() == ['c:bitcoin'], 5)), str(mk_bar()))
+    tk = mkp.locator('.topbar .ticker[data-market="c:bitcoin"]')
+    tk_label = tk.get_attribute('aria-label') or ''
+    check('markets: the ticker reads its name, price and change aloud, and is not a live region',
+          'Bitcoin' in tk_label and '60,815' in tk_label and 'up 1.2% in 24 hours' in tk_label
+          and mkp.locator('.topbar [aria-live]').count() == 0, tk_label)
+    check('markets: the ticker shows symbol, price and a ▲ change', tk.inner_text().replace('\n', ' ').split() == ['BTC', '60,815', '▲1.2%'],
+          tk.inner_text())
+    check('markets: tickers avoid the classes existing selectors key on',
+          mkp.locator('.topbar .tickers .tool-pin, .topbar .tickers .badge, .topbar .tickers .icon').count() == 0)
+    check('markets: the first pin explains what pinning starts, once',
+          'CoinGecko' in mkp.locator('#toasts').inner_text() and 'visible' in mkp.locator('#toasts').inner_text())
+    check('markets: the pin toggle reports its state', btc.locator('.mk-pin').get_attribute('aria-pressed') == 'true'
+          and btc.locator('.mk-pin').get_attribute('title') == 'Unpin')
+    mk_row('c:ethereum', 'crypto').locator('.mk-pin').click()
+    mk_row('f:EUR', 'fiat').locator('.mk-pin').click()
+    check('markets: pins line up in the order they were made',
+          bool(poll_page(mkp, lambda: mk_bar() == ['c:bitcoin', 'c:ethereum', 'f:EUR'], 5)), str(mk_bar()))
+    check('markets: a Pinned section lists them above the full list', mk.locator('.mk-sec[data-sec="pinned"] .mk-row').count() == 3)
+    mk_row('c:bitcoin', 'pinned').locator('[data-part="right"]').click()
+    check('markets: → moves a pin right in the bar',
+          bool(poll_page(mkp, lambda: mk_bar() == ['c:ethereum', 'c:bitcoin', 'f:EUR'], 5)), str(mk_bar()))
+    check('markets: focus stays on the moved row after the re-render',
+          mkp.evaluate("() => document.activeElement?.closest('.mk-row')?.dataset.market") == 'c:bitcoin')
+    mk_row('f:EUR', 'pinned').locator('[data-part="left"]').focus()
+    mkp.keyboard.press('Enter')
+    check('markets: ← works from the keyboard',
+          bool(poll_page(mkp, lambda: mk_bar() == ['c:ethereum', 'f:EUR', 'c:bitcoin'], 5)), str(mk_bar()))
+    check('markets: the ends of the order disable the move that would leave the bar',
+          mk_row('c:ethereum', 'pinned').locator('[data-part="left"]').is_disabled()
+          and mk_row('c:bitcoin', 'pinned').locator('[data-part="right"]').is_disabled())
+
+    mkp.goto(BASE)
+    mkp.wait_for_selector('.composer', timeout=30000)
+    check('markets: pins survive a reload in their order',
+          bool(poll_page(mkp, lambda: mk_bar() == ['c:ethereum', 'f:EUR', 'c:bitcoin'], 8)), str(mk_bar()))
+    poll_page(mkp, lambda: '2,371' in mkp.locator('.topbar .ticker[data-market="c:ethereum"]').inner_text()
+              or '3,012' in mkp.locator('.topbar .ticker[data-market="c:ethereum"]').inner_text(), 8)
+    mkp.locator('.topbar .ticker[data-market="f:EUR"]').click()
+    check('markets: a ticker opens the Markets card at its own row',
+          bool(poll_page(mkp, lambda: mkp.evaluate("() => document.activeElement?.closest('.mk-row')?.dataset.market") == 'f:EUR', 10)),
+          str(mkp.evaluate("() => document.activeElement?.outerHTML?.slice(0, 80)")))
+    # A collapsed card has to open first: a row inside a closed <details> can be neither
+    # scrolled to nor focused. Focus lands on the price, not on the ★ before it, which
+    # Enter would turn into an unpin.
+    mk.locator('summary').first.click()
+    poll_page(mkp, lambda: not mkp.evaluate("() => document.querySelector('details.card[data-tool=markets]').open"), 3)
+    mkp.locator('.topbar .ticker[data-market="c:ethereum"]').click()
+    mk_focus = poll_page(mkp, lambda: mkp.evaluate("""() => { const a = document.activeElement, r = a?.closest('.mk-row');
+      if (!r) return null; const b = r.getBoundingClientRect();
+      return {open: document.querySelector('details.card[data-tool=markets]').open, market: r.dataset.market, part: a.dataset.part,
+        inView: b.top >= 0 && b.bottom <= innerHeight, flash: r.classList.contains('mk-flash')} }"""), 5) or {}
+    check('markets: a ticker click on a collapsed card opens it, scrolls to the row and focuses its price',
+          mk_focus.get('open') and mk_focus.get('market') == 'c:ethereum' and mk_focus.get('part') == 'price'
+          and mk_focus.get('inView') and mk_focus.get('flash'), str(mk_focus))
+    mk_row('c:bitcoin', 'crypto').locator('.mk-pin').click()
+    check('markets: unpinning takes the ticker off the bar', bool(poll_page(mkp, lambda: mk_bar() == ['c:ethereum', 'f:EUR'], 5)), str(mk_bar()))
+
+    mkc.set_offline(True)
+    check('markets: going offline marks every ticker stale',
+          bool(poll_page(mkp, lambda: mkp.locator('.topbar .ticker.stale').count() == 2, 5))
+          and 'offline' in (mkp.locator('.topbar .ticker[data-market="c:ethereum"]').get_attribute('title') or ''),
+          mkp.locator('.topbar .ticker[data-market="c:ethereum"]').get_attribute('title') or '')
+    check('markets: the card says it is offline', 'Offline' in mk.locator('.mk-status').inner_text())
+    mkc.set_offline(False)
+    # Reconnecting refreshes what fell due. With the tickers alone on the page, the quotes
+    # are aged past two crypto intervals while offline, and the first request after the
+    # reconnect is held: the ETH ticker has to stay stale until that request lands.
+    mkp.goto(BASE)
+    mkp.wait_for_selector('.composer', timeout=30000)
+    poll_page(mkp, lambda: mkp.locator('.topbar .ticker').count() == 2 and mkp.locator('.topbar .ticker.stale').count() == 0, 10)
+    mkc.set_offline(True)
+    mkp.clock.fast_forward('05:00')
+    mkp.wait_for_timeout(300)
+    mk_n = len(mk_log)
+    mk_hold['when'] = lambda u: '/simple/price' in u
+    mkc.set_offline(False)
+    mk_sent = poll_page(mkp, lambda: len(mk_hold['routes']) == 1, 8)
+    check('markets: reconnecting sends a new price request for what fell due',
+          bool(mk_sent) and any('/simple/price' in u for u in mk_log[mk_n:]), ' | '.join(u[:70] for u in mk_log[mk_n:]))
+    check('markets: the ticker stays stale until that answer lands',
+          'stale' in (mkp.locator('.topbar .ticker[data-market="c:ethereum"]').get_attribute('class') or ''))
+    release_hold(mk_hold)
+    check('markets: and is fresh once it has',
+          bool(poll_page(mkp, lambda: mkp.locator('.topbar .ticker[data-market="c:ethereum"].stale').count() == 0, 5)))
+    mkp.evaluate("location.hash = '#/t/markets'")
+    try:
+        mkp.wait_for_selector('details.card[data-tool="markets"] .mk-sec[data-sec="fiat"] .mk-row', timeout=15000)
+    except Exception:
+        pass
+
+    # Stage view is an OBS source: no ticker and no price request, whatever is pinned.
+    stg = mkc.new_page()
+    stg_reqs = []
+    stg.on('request', lambda r: stg_reqs.append(r.url) if any(h in r.url for h in MK_HOSTS + WX_HOSTS) else None)
+    stg.goto(f'{BASE}/#/stage/mk{os.urandom(3).hex()}')
+    stg.wait_for_selector('.app-shell', timeout=20000)
+    stg.wait_for_timeout(3000)
+    check('markets: stage view mounts no ticker and makes no price request',
+          not stg_reqs and stg.locator('.ticker, .ticker-rail').count() == 0, ' | '.join(stg_reqs[:2]))
+    stg.close()
+
+    # Phone width: the tickers move to a rail under the bar, which keeps its own fit.
+    rl = mkc.new_page()
+    rl.set_viewport_size({'width': 390, 'height': 844})
+    rl.goto(BASE)
+    rl.wait_for_selector('.composer', timeout=30000)
+    poll_page(rl, lambda: rl.locator('.ticker-rail .ticker').count() == 2, 8)
+    rl_geo = rl.evaluate("""() => { const t = document.querySelector('.topbar'), r = document.querySelector('.ticker-rail');
+      return {over: t.scrollWidth > t.clientWidth, inBar: t.querySelectorAll('.ticker').length,
+        rail: r ? r.querySelectorAll('.ticker').length : 0, railTop: r ? Math.round(r.getBoundingClientRect().top) : -1,
+        barBottom: Math.round(t.getBoundingClientRect().bottom), railH: getComputedStyle(document.documentElement).getPropertyValue('--rail-h').trim()} }""")
+    check('markets: at 390px the tickers sit in a rail directly under the top bar',
+          rl_geo['rail'] == 2 and rl_geo['inBar'] == 0 and rl_geo['railTop'] == rl_geo['barBottom'] and rl.locator('.ticker-rail').is_visible(), str(rl_geo))
+    check('markets: the top bar still fits at 390px with pins', not rl_geo['over'], str(rl_geo))
+    check('markets: the drawer offset follows the rail', rl_geo['railH'] == '38px', str(rl_geo))
+    rl.close()
+
+    # Eight pins, the cap: the bar never overflows, and "+N" lists what did not fit.
+    for mid, sec in (('c:bitcoin', 'crypto'), ('c:solana', 'crypto'), ('c:dogecoin', 'crypto'), ('c:ripple', 'crypto'),
+                     ('f:GBP', 'fiat'), ('f:JPY', 'fiat')):
+        mk_row(mid, sec).locator('.mk-pin').click()
+        mkp.wait_for_timeout(120)
+    poll_page(mkp, lambda: len(mk_bar()) == 8, 5)
+    mk_row('c:tether', 'crypto').locator('.mk-pin').click()
+    mkp.wait_for_timeout(300)
+    check('markets: pins stop at eight and say why', len(mk_bar()) == 8 and 'Up to 8' in mkp.locator('#toasts').inner_text(), str(len(mk_bar())))
+    mk_fit = []
+    for w in (600, 640, 720, 900, 1100, 1280, 1440):
+        mkp.set_viewport_size({'width': w, 'height': 800})
+        mkp.wait_for_timeout(350)
+        g = mkp.evaluate("""() => { const t = document.querySelector('.topbar'), m = document.querySelector('.ticker-more');
+          const shown = [...t.querySelectorAll('.ticker')].filter(b => getComputedStyle(b).display !== 'none').length;
+          const more = m && getComputedStyle(m).display !== 'none' ? m.textContent : '';
+          const last = [...t.children].filter(c => getComputedStyle(c).display !== 'none').pop();
+          const edge = t.getBoundingClientRect().right - parseFloat(getComputedStyle(t).paddingRight);
+          return {over: t.scrollWidth > t.clientWidth, shown, more, slack: Math.round((edge - last.getBoundingClientRect().right) * 10) / 10} }""")
+        ok = not g['over'] and g['slack'] >= 0 and g['more'].startswith('+') and g['shown'] + int(g['more'][1:] or 0) == 8
+        if not ok:
+            mk_fit.append(f'{w}: {g}')
+    check('markets: with eight pins the bar fits inside its padding from 600 to 1440px and "+N" counts the rest', not mk_fit, ' | '.join(mk_fit))
+    mkp.set_viewport_size({'width': 1280, 'height': 800})
+    mkp.wait_for_timeout(300)
+    mkp.locator('.topbar .ticker-more').click()
+    mk_menu = mkp.locator('.menu.ticker-menu .tk-menu-row')
+    check('markets: "+N" opens a menu listing every pin with Open and Unpin',
+          mk_menu.count() == 8 and mk_menu.last.locator('button', has_text='Open').count() == 1
+          and mk_menu.last.locator('button', has_text='Unpin').count() == 1, str(mk_menu.count()))
+    mk_menu.last.locator('button', has_text='Unpin').click()
+    check('markets: Unpin in that menu takes the pin off', bool(poll_page(mkp, lambda: len(mk_bar()) == 7, 5)), str(mk_bar()))
+    # The list is rebuilt on every repaint, so focus has to be put back where it was.
+    MK_FOCUS = "() => { const a = document.activeElement; return [a?.closest('.tk-menu-row')?.dataset.key || null, a?.dataset.part || null, a?.classList.contains('ticker') || false] }"
+    mk_menu.nth(1).locator('[data-part="open"]').focus()
+    mk_key = mk_menu.nth(1).get_attribute('data-key')
+    mkp.evaluate("() => window.dispatchEvent(new Event('online'))")  # repaints the bar and the list, then refreshes
+    mkp.wait_for_timeout(600)
+    check('markets: a repaint leaves focus on the same button in the "+N" list', mkp.evaluate(MK_FOCUS)[:2] == [mk_key, 'open'], str(mkp.evaluate(MK_FOCUS)))
+    mk_next = mk_menu.nth(2).get_attribute('data-key')
+    mk_menu.nth(1).locator('[data-part="unpin"]').focus()
+    mkp.keyboard.press('Enter')
+    check('markets: a keyboard Unpin moves focus to the row that took its place',
+          bool(poll_page(mkp, lambda: mkp.evaluate(MK_FOCUS)[:2] == [mk_next, 'unpin'], 5)), str(mkp.evaluate(MK_FOCUS)))
+    for _ in range(8):
+        if mkp.locator('.menu.ticker-menu').count() == 0:
+            break
+        mk_menu.first.locator('[data-part="unpin"]').focus()
+        mkp.keyboard.press('Enter')
+        mkp.wait_for_timeout(400)
+    check('markets: once everything fits the list closes and focus moves to the first ticker',
+          mkp.locator('.menu.ticker-menu').count() == 0 and mkp.evaluate(MK_FOCUS)[2]
+          and mkp.locator('.topbar .ticker-more').is_hidden(), str(mkp.evaluate(MK_FOCUS)))
+    mkp.keyboard.press('Escape')
+    check('markets: no page error on the markets path', not mk_errs, ' | '.join(mk_errs)[:200])
+    mkc.close()
+
+    # CoinGecko rate limited: Coinbase takes over, the card names it, and the 24h change
+    # reads n/a instead of 0.
+    fb_log = []
+    fbc = browser.new_context(locale='en-US')
+    route_markets(fbc, fb_log, gecko=lambda: 429)
+    fbp = fbc.new_page()
+    fbp.clock.install()
+    fbp.goto(f'{BASE}/#/t/markets')
+    fb = fbp.locator('details.card[data-tool="markets"]')
+    poll_page(fbp, lambda: fb.locator('.mk-sec[data-sec="crypto"] .mk-row').count() > 0, 15)
+    fb_status = fb.locator('.mk-status').inner_text() if fb.locator('.mk-status').count() else ''
+    check('markets: a 429 from CoinGecko falls back to Coinbase and says so',
+          any('api.coinbase.com' in u for u in fb_log) and 'CoinGecko is rate limiting' in fb_status and 'Coinbase' in fb_status, fb_status)
+    fb_btc = fb.locator('.mk-sec[data-sec="crypto"] .mk-row[data-market="c:bitcoin"]')
+    check('markets: on the fallback the change is n/a, not 0', fb_btc.locator('.mk-chg').inner_text() == 'n/a'
+          and fb_btc.locator('.mk-price').inner_text() == '$60,815.12', fb_btc.inner_text().replace('\n', ' '))
+    check('markets: a coin the fallback lacks is left out, and the footer names the fallback',
+          fb.locator('.mk-row[data-market="c:tron"]').count() == 0 and 'Crypto prices from Coinbase' in fb.inner_text())
+    # Under a constant 429 the primary is retried on a doubling backoff (2, 4, 8 min after
+    # each failure), not on every 2-minute poll: at most three calls in ten minutes, against
+    # a pool every tab on the IP shares. Each step is its own jump, so each poll runs.
+    for _ in range(5):
+        fbp.clock.fast_forward('02:05')
+        fbp.wait_for_timeout(800)
+    fb_gecko = [u for u in fb_log if 'api.coingecko.com' in u]
+    check('markets: a rate-limited CoinGecko is retried on the backoff, at most 3 calls in 10 minutes',
+          2 <= len(fb_gecko) <= 3, f'{len(fb_gecko)} calls')
+    fbc.close()
+
+    # Frankfurter down: currency-api on jsDelivr takes over, and both the status line and
+    # the footer say so.
+    fx_log = []
+    fxc = browser.new_context(locale='en-US')
+    route_markets(fxc, fx_log, frank=lambda: 503)
+    fxp = fxc.new_page()
+    fxp.goto(f'{BASE}/#/t/markets')
+    fx = fxp.locator('details.card[data-tool="markets"]')
+    poll_page(fxp, lambda: fx.locator('.mk-sec[data-sec="fiat"] .mk-row').count() > 0, 15)
+    fx_status = fx.locator('.mk-status').inner_text() if fx.locator('.mk-status').count() else ''
+    check('markets: a 503 from Frankfurter falls back to currency-api and says so',
+          any('cdn.jsdelivr.net/npm/@fawazahmed0/currency-api' in u for u in fx_log)
+          and 'currency-api' in fx_status and 'currency-api' in fx.locator('.mk-foot').inner_text(), fx_status)
+    check('markets: the fallback fills every currency, with the change n/a',
+          fx.locator('.mk-sec[data-sec="fiat"] .mk-row').count() == 17
+          and fx.locator('.mk-sec[data-sec="fiat"] .mk-row[data-market="f:EUR"] .mk-chg').inner_text() == 'n/a',
+          str(fx.locator('.mk-sec[data-sec="fiat"] .mk-row').count()))
+    fxc.close()
+
+    # Hostile values. A timestamp past the Date range used to throw out of the parser and
+    # drop the whole answer without trying the fallback; a subnormal rate inverted into an
+    # Infinity price. Both must cost only the value itself.
+    def hostile(url, body):
+        if '/simple/price' in url:
+            for row in body.values():
+                row['last_updated_at'] = 1e13
+        if 'api.coinbase.com' in url:
+            body['data']['rates']['BTC'] = '1e-320'
+        if 'api.frankfurter.dev' in url:
+            for row in body:
+                if row['quote'] == 'GBP':
+                    row['rate'] = 1e-320
+        return body
+
+    hx_errs = []
+    hxc = browser.new_context(locale='en-US')
+    route_markets(hxc, [], tweak=hostile)
+    hxp = hxc.new_page()
+    hxp.on('pageerror', lambda e: hx_errs.append(str(e)))
+    hxp.goto(f'{BASE}/#/t/markets')
+    hx = hxp.locator('details.card[data-tool="markets"]')
+    poll_page(hxp, lambda: hx.locator('.mk-sec[data-sec="crypto"] .mk-row').count() > 0, 15)
+    hx.locator('.mk-sec[data-sec="crypto"] .mk-row[data-market="c:bitcoin"] .mk-pin').click()
+    check('markets: a currency whose inverted rate is out of range is left out',
+          hx.locator('.mk-row[data-market="f:GBP"]').count() == 0 and hx.locator('.mk-row[data-market="f:EUR"]').count() == 1
+          and not any(t in hx.inner_text() for t in ('∞', 'Infinity', 'NaN')))
+    hxp.goto(BASE)  # the ticker alone, so the /simple/price answer is the one parsed
+    hxp.wait_for_selector('.composer', timeout=30000)
+    hx_tk = hxp.locator('.topbar .ticker[data-market="c:bitcoin"]')
+    check('markets: a timestamp outside the Date range costs only the timestamp',
+          bool(poll_page(hxp, lambda: hx_tk.count() == 1 and 'stale' not in (hx_tk.get_attribute('class') or '')
+                         and '60,815' in hx_tk.inner_text(), 8)), hx_tk.inner_text() if hx_tk.count() else 'no ticker')
+    hxc.close()
+    hyc = browser.new_context(locale='en-US')
+    route_markets(hyc, [], gecko=lambda: 429, tweak=hostile)
+    hyp = hyc.new_page()
+    hyp.on('pageerror', lambda e: hx_errs.append(str(e)))
+    hyp.goto(f'{BASE}/#/t/markets')
+    hy = hyp.locator('details.card[data-tool="markets"]')
+    poll_page(hyp, lambda: hy.locator('.mk-sec[data-sec="crypto"] .mk-row').count() > 0, 15)
+    check('markets: a coin whose inverted fallback rate is out of range is left out',
+          hy.locator('.mk-row[data-market="c:bitcoin"]').count() == 0 and hy.locator('.mk-row[data-market="c:ethereum"]').count() == 1
+          and not any(t in hy.inner_text() for t in ('∞', 'Infinity', 'NaN')), hy.inner_text()[:160])
+    check('markets: no page error from hostile values', not hx_errs, ' | '.join(hx_errs)[:200])
+    hyc.close()
+
+    # A switch while the previous request is still in flight must still be fetched. The
+    # first answer is held, the quote changes, and only then is it released.
+    rq_log = []
+    rq_hold = new_hold()
+    rw_hold = new_hold()
+    rqc = browser.new_context(locale='en-US')
+    route_markets(rqc, rq_log, hold=rq_hold)
+    route_weather(rqc, rq_log, hold=rw_hold)
+    rqp = rqc.new_page()
+    rq_hold['when'] = lambda u: '/coins/markets' in u and 'vs_currency=usd' in u
+    rqp.goto(f'{BASE}/#/t/markets')
+    rq = rqp.locator('details.card[data-tool="markets"]')
+    poll_page(rqp, lambda: len(rq_hold['routes']) == 1, 15)
+    rq.locator('select.mk-quote').select_option('EUR')
+    rqp.wait_for_timeout(700)  # past the select's debounce
+    release_hold(rq_hold)
+    check('markets: a quote switched mid-request is fetched once the first answer lands',
+          bool(poll_page(rqp, lambda: any('/coins/markets' in u and 'vs_currency=eur' in u for u in rq_log)
+                         and rq.locator('.mk-sec[data-sec="crypto"] .mk-row').count() == 15, 8)),
+          ' | '.join(u.split('?')[0][-20:] + '?' + u.split('?')[1][:24] for u in rq_log if 'coins/markets' in u))
+    check('markets: and renders in the new currency',
+          rq.locator('.mk-sec[data-sec="crypto"] .mk-row[data-market="c:bitcoin"] .mk-price').inner_text().startswith('€')
+          and rq.locator('.mk-row[data-market="f:EUR"]').count() == 0 and rq.locator('.mk-row[data-market="f:USD"]').count() == 1,
+          rq.locator('.mk-sec[data-sec="crypto"] .mk-row').first.inner_text().replace('\n', ' ') if rq.locator('.mk-row').count() else 'no rows')
+    rqp.evaluate("location.hash = '#/t/weather'")
+    rw = rqp.locator('details.card[data-tool="weather"]')
+    rw.locator('input.wx-search').wait_for(timeout=15000)
+    for q in ('lisb', 'lond'):
+        rw.locator('input.wx-search').fill(q)
+        rw.locator('button.wx-result').first.wait_for(timeout=5000)
+        rw.locator('button.wx-result').first.click()
+        poll_page(rqp, lambda: rw.locator('.wx-day').count() == 7, 8)
+    rw_hold['when'] = lambda u: 'api.open-meteo.com' in u and 'latitude=38.72' in u
+    rqp.reload()
+    rw.locator('button.wx-place').first.wait_for(timeout=15000)
+    poll_page(rqp, lambda: len(rw_hold['routes']) == 1, 10)
+    rw_n = len(rq_log)
+    rw.locator('button.wx-place', has_text='London').click()
+    release_hold(rw_hold)
+    check('weather: a place switched mid-request is fetched once the first answer lands',
+          bool(poll_page(rqp, lambda: any('latitude=51.51' in u for u in rq_log[rw_n:])
+                         and 'London' in rw.locator('.wx-where').inner_text() and rw.locator('.wx-day').count() == 7, 8)),
+          rw.locator('.wx-status').inner_text() + ' | ' + ' | '.join(u[40:80] for u in rq_log[rw_n:]))
+    check('weather: and the card is not left loading', 'Loading' not in rw.inner_text())
+    # Removing the last place takes the pin and the stored conditions with it, so the next
+    # place looked at is not pinned, and polled, without a click.
+    KV_KEYS = """() => new Promise((res, rej) => { const r = indexedDB.open('wt-data'); r.onerror = () => rej(r.error);
+      r.onsuccess = () => { const q = r.result.transaction('kv').objectStore('kv').getAllKeys();
+        q.onsuccess = () => { r.result.close(); res(q.result.map(String)) } } })"""
+    rw.locator('button.wx-place', has_text='Lisbon').click()
+    rw.locator('button.wx-pin').click()
+    poll_page(rqp, lambda: 'weather-snapshot' in rqp.evaluate(KV_KEYS), 8)
+    check('weather: the pinned place writes its snapshot', 'weather-snapshot' in rqp.evaluate(KV_KEYS))
+    for _ in range(2):
+        rw.locator('.wx-actions button', has_text='Remove').click()
+        rqp.wait_for_timeout(400)
+    check('weather: removing the last place unpins it and deletes its snapshot',
+          bool(poll_page(rqp, lambda: 'weather-snapshot' not in rqp.evaluate(KV_KEYS), 5))
+          and rqp.locator('.topbar .ticker[data-weather]').count() == 0, str([k for k in rqp.evaluate(KV_KEYS) if 'weather' in k]))
+    rw.locator('input.wx-search').fill('lond')
+    rw.locator('button.wx-result').first.wait_for(timeout=5000)
+    rw.locator('button.wx-result').first.click()
+    poll_page(rqp, lambda: rw.locator('button.wx-pin').count() == 1, 8)
+    check('weather: the next place saved is not pinned without a click',
+          rqp.locator('.topbar .ticker[data-weather]').count() == 0 and rw.locator('button.wx-pin').get_attribute('aria-pressed') == 'false')
+    rqc.close()
+
+    # CoinGecko calls per event, with crypto pinned and the card open. The card's
+    # /coins/markets answer fills the pins, so the bar adds nothing: one call for a reload,
+    # one for a tab return after the data aged, one for four quote changes in a row.
+    mq_log = []
+    mqc = browser.new_context(locale='en-US', viewport={'width': 1280, 'height': 800})
+    mqc.add_init_script(VISIBILITY)
+    route_markets(mqc, mq_log)
+    route_weather(mqc, [])
+    mqp = mqc.new_page()
+    mqp.clock.install()
+    mqp.goto(f'{BASE}/#/t/markets')
+    mq = mqp.locator('details.card[data-tool="markets"]')
+    poll_page(mqp, lambda: mq.locator('.mk-sec[data-sec="crypto"] .mk-row').count() == 15, 15)
+    for mid in ('c:bitcoin', 'c:ethereum'):
+        mq.locator(f'.mk-sec[data-sec="crypto"] .mk-row[data-market="{mid}"] .mk-pin').click()
+        mqp.wait_for_timeout(200)
+    mqp.wait_for_timeout(1000)
+
+    def mq_gecko(since):
+        return [u.split('/api/v3/')[1].split('?')[0] for u in mq_log[since:] if 'api.coingecko.com' in u]
+
+    mq_n = len(mq_log)
+    mqp.reload()
+    poll_page(mqp, lambda: mq.locator('.mk-sec[data-sec="crypto"] .mk-row').count() == 15, 15)
+    mqp.wait_for_timeout(2500)
+    check('markets: a reload with pins and the card open makes one CoinGecko call',
+          mq_gecko(mq_n) == ['coins/markets'] and mqp.locator('.topbar .ticker.stale').count() == 0, str(mq_gecko(mq_n)))
+    mqp.evaluate('window.__background(true)')
+    mqp.clock.fast_forward('03:00')
+    mqp.wait_for_timeout(500)
+    mq_n = len(mq_log)
+    mqp.evaluate('window.__background(false)')
+    mqp.wait_for_timeout(2500)
+    check('markets: a tab return after the data aged makes one CoinGecko call', mq_gecko(mq_n) == ['coins/markets'], str(mq_gecko(mq_n)))
+    mq_n = len(mq_log)
+    mq.locator('select.mk-quote').focus()
+    for _ in range(4):
+        mqp.keyboard.press('ArrowDown')
+    mqp.wait_for_timeout(1500)
+    mq_q = [u for u in mq_log[mq_n:] if 'api.coingecko.com' in u]
+    check('markets: four quote changes in a row make one CoinGecko call',
+          len(mq_q) == 1 and 'vs_currency=cny' in mq_q[0] and mq.locator('select.mk-quote').input_value() == 'CNY',
+          ' | '.join(u[30:110] for u in mq_q) + ' select=' + mq.locator('select.mk-quote').input_value())
+    for mid in ('c:bitcoin', 'c:ethereum'):
+        mq.locator(f'.mk-sec[data-sec="crypto"] .mk-row[data-market="{mid}"] .mk-pin').click()
+        mqp.wait_for_timeout(300)
+    check('markets: unpinning the last price deletes the stored snapshot',
+          bool(poll_page(mqp, lambda: 'market-snapshot' not in mqp.evaluate(KV_KEYS), 5)))
+    mqc.close()
+
+    # --- weather: search, units, click-only geolocation with rounded coordinates, pin ---
+    wx_log = []
+    wxc = browser.new_context(viewport={'width': 1280, 'height': 800}, locale='en-GB', permissions=['geolocation'],
+                              geolocation={'latitude': 38.7223456, 'longitude': -9.1393456})
+    wxc.add_init_script("""(() => { const g = navigator.geolocation; const real = g.getCurrentPosition.bind(g);
+      window.__geoCalls = 0; g.getCurrentPosition = (...a) => { window.__geoCalls++; return real(...a) } })()""")
+    route_weather(wxc, wx_log)
+    route_markets(wxc, [])
+    wp = wxc.new_page()
+    wx_errs = []
+    wp.on('pageerror', lambda e: wx_errs.append(str(e)))
+    wp.goto(f'{BASE}/#/t/weather')
+    wx = wp.locator('details.card[data-tool="weather"]')
+    try:
+        wx.locator('input.wx-search').wait_for(timeout=20000)
+    except Exception:
+        pass
+    wp.wait_for_timeout(1000)
+    check('weather: nothing is requested and no position is read before a choice',
+          not wx_log and wp.evaluate('window.__geoCalls') == 0, ' | '.join(wx_log[:2]))
+    check('weather: with no place it says what to do', 'Search for a place' in wx.inner_text())
+    check('weather: the card says only the name with the interface language, or rounded coordinates, leave the device',
+          'rounded to about 1 km' in wx.inner_text() and 'interface language' in wx.inner_text() and 'Open-Meteo' in wx.inner_text())
+    wx.locator('input.wx-search').fill('lisb')
+    try:
+        wx.locator('button.wx-result').first.wait_for(timeout=5000)
+    except Exception:
+        pass
+    check('weather: a search lists places with their area and country',
+          'Lisbon' in wx.locator('button.wx-result').first.inner_text() and 'Portugal' in wx.locator('button.wx-result').first.inner_text()
+          and any('name=lisb' in u and 'language=en' in u for u in wx_log), ' | '.join(wx_log[-2:]))
+    wx.locator('button.wx-result').first.click()
+    poll_page(wp, lambda: wx.locator('.wx-day').count() == 7, 8)
+    check('weather: choosing a place renders current conditions',
+          wx.locator('.wx-temp').inner_text() == '21°' and wx.locator('.wx-word').inner_text() == 'Partly cloudy'
+          and 'Lisbon, Portugal' in wx.locator('.wx-where').inner_text(), wx.locator('.wx-now-wrap').inner_text()[:160])
+    wx_facts = wx.locator('.wx-facts').inner_text().replace('\n', ' ')
+    check('weather: feels-like, humidity, wind with direction and precipitation are listed',
+          all(s in wx_facts for s in ('Feels like 23°', 'Humidity 64%', 'Wind 14 km/h SW', 'Precipitation 0.2 mm')), wx_facts)
+    check('weather: a 24-hour strip starting now and a 7-day list',
+          wx.locator('.wx-hour').count() == 24 and wx.locator('.wx-h-time').first.inner_text() == 'Now'
+          and wx.locator('.wx-day').count() == 7 and wx.locator('.wx-d-name').first.inner_text() == 'Today',
+          f"{wx.locator('.wx-hour').count()} hours, {wx.locator('.wx-day').count()} days")
+    check('weather: each day draws its range inside the week',
+          all(wp.evaluate("() => [...document.querySelectorAll('.wx-fill')].map(f => !!f.style.width && !!f.style.left)")))
+    check('weather: the forecast request carries coordinates rounded to two decimals',
+          any('api.open-meteo.com' in u and 'latitude=38.72&longitude=-9.13' in u for u in wx_log), ' | '.join(u for u in wx_log if 'forecast' in u)[:200])
+    check('weather: Open-Meteo is credited with a link and the non-commercial terms',
+          wx.locator('.wx-foot a[href="https://open-meteo.com/"]').count() == 1 and 'non-commercial' in wx.locator('.wx-foot').inner_text())
+    wx.locator('button[data-units="imperial"]').click()
+    wp.wait_for_timeout(200)
+    check('weather: the unit toggle converts every figure',
+          wx.locator('.wx-temp').inner_text() == '71°', wx.locator('.wx-temp').inner_text())
+    wx_facts = wx.locator('.wx-facts').inner_text().replace('\n', ' ')
+    check('weather: imperial wind and rain read mph and inches',
+          'Wind 9 mph SW' in wx_facts and 'Precipitation 0.01 in' in wx_facts and wx.locator('.wx-d-max').first.inner_text() == '75°', wx_facts)
+    check('weather: a place is saved, the first one as the default',
+          wx.locator('button.wx-place').count() == 1 and wx.locator('button.wx-place').first.get_attribute('aria-label') == 'Lisbon, default place')
+
+    wx_log.clear()
+    wx.locator('button.wx-geo').click()
+    poll_page(wp, lambda: any('api.open-meteo.com' in u for u in wx_log), 10)
+    check('weather: Use my location asks the browser once, on the click',
+          wp.evaluate('window.__geoCalls') == 1)
+    coords = [re.search(r'latitude=([-\d.]+)&longitude=([-\d.]+)', u) for u in wx_log if 'api.open-meteo.com' in u]
+    check('weather: the position is rounded to about 1 km before it is sent',
+          bool(coords) and all(m and len(m.group(1).split('.')[-1]) <= 2 and len(m.group(2).split('.')[-1]) <= 2 for m in coords)
+          and any(m and m.group(1) == '38.72' and m.group(2) == '-9.14' for m in coords), ' | '.join(wx_log)[:200])
+    poll_page(wp, lambda: wx.locator('button.wx-place').count() == 2, 5)
+    check('weather: the located place is saved and shown',
+          wx.locator('button.wx-place[aria-pressed="true"]').inner_text().strip() == 'Near 38.72, -9.14',
+          wx.locator('.wx-places').inner_text())
+    wx.locator('button.wx-place', has_text='Lisbon').click()
+    check('weather: switching places is one click', 'Lisbon, Portugal' in wx.locator('.wx-where').inner_text())
+    wx.locator('button.wx-pin').click()
+    wtk = wp.locator('.topbar .ticker[data-weather]')
+    check('weather: pinning puts the default place on the bar', bool(poll_page(wp, lambda: wtk.count() == 1, 5)))
+    wtk_label = wtk.get_attribute('aria-label') or ''
+    check('weather: the weather ticker shows a glyph and the temperature, and reads place and condition',
+          '71°' in wtk.inner_text() and wtk.locator('.tk-sym').inner_text().strip() != '', wtk.inner_text())
+    check('weather: its label names the place and the condition', 'Lisbon' in wtk_label and 'partly cloudy' in wtk_label, wtk_label)
+    wp.goto(BASE)
+    wp.wait_for_selector('.composer', timeout=30000)
+    check('weather: the pin survives a reload', bool(poll_page(wp, lambda: wtk.count() == 1, 8)))
+    wtk.click()
+    check('weather: the ticker opens the Weather card', bool(poll_page(wp, lambda: wx.locator('.wx-temp').count() == 1, 10)))
+    check('weather: the unit choice survives a reload',
+          wx.locator('button[data-units="imperial"]').get_attribute('aria-pressed') == 'true')
+    stw = wxc.new_page()
+    stw_reqs = []
+    stw.on('request', lambda r: stw_reqs.append(r.url) if any(h in r.url for h in MK_HOSTS + WX_HOSTS) else None)
+    stw.goto(f'{BASE}/#/stage/wx{os.urandom(3).hex()}')
+    stw.wait_for_selector('.app-shell', timeout=20000)
+    stw.wait_for_timeout(3000)
+    check('weather: stage view requests no weather', not stw_reqs and stw.locator('.ticker').count() == 0, ' | '.join(stw_reqs[:2]))
+    stw.close()
+    check('weather: no page error on the weather path', not wx_errs, ' | '.join(wx_errs)[:200])
+    wxc.close()
+
+    # --- tickers: a hidden tab makes no request, however long it stays hidden ---
+    # The page clock jumps 20 minutes, past every refresh interval (2 min crypto, 15 min
+    # weather), while the VISIBILITY harness reports the tab hidden. Coming back has to
+    # refresh what fell due.
+    hv_log = []
+    hvc = browser.new_context(locale='en-GB')
+    hvc.add_init_script(VISIBILITY)
+    route_markets(hvc, hv_log)
+    route_weather(hvc, hv_log)
+    hvp = hvc.new_page()
+    hvp.clock.install()
+    hvp.goto(f'{BASE}/#/t/markets')
+    hvm = hvp.locator('details.card[data-tool="markets"]')
+    poll_page(hvp, lambda: hvm.locator('.mk-row[data-market="c:bitcoin"]').count() > 0, 15)
+    hvm.locator('.mk-sec[data-sec="crypto"] .mk-row[data-market="c:bitcoin"] .mk-pin').click()
+    hvp.evaluate("location.hash = '#/t/weather'")
+    hvw = hvp.locator('details.card[data-tool="weather"]')
+    hvw.locator('input.wx-search').wait_for(timeout=15000)
+    hvw.locator('input.wx-search').fill('lisb')
+    hvw.locator('button.wx-result').first.wait_for(timeout=5000)
+    hvw.locator('button.wx-result').first.click()
+    poll_page(hvp, lambda: hvw.locator('button.wx-pin').count() == 1, 8)
+    hvw.locator('button.wx-pin').click()
+    poll_page(hvp, lambda: hvp.locator('.topbar .ticker').count() == 2, 8)
+    hvp.wait_for_timeout(1000)
+    hvp.evaluate('window.__background(true)')
+    hv_log.clear()
+    hvp.clock.fast_forward('20:00')
+    hvp.wait_for_timeout(2000)
+    check('tickers: a hidden tab makes no request across 20 minutes', not hv_log, ' | '.join(hv_log[:3]))
+    hvp.evaluate('window.__background(false)')
+    check('tickers: returning to the tab refreshes what fell due',
+          bool(poll_page(hvp, lambda: any('coingecko' in u for u in hv_log) and any('api.open-meteo.com' in u for u in hv_log), 8)),
+          ' | '.join(u[:60] for u in hv_log[:4]))
+    hvc.close()
+
     # --- connect launcher entry: pinned by default, right after Tools, unpinnable ---
     cnctx = browser.new_context()
     cnp = cnctx.new_page()
@@ -6635,7 +7396,7 @@ with sync_playwright() as p:
     page.evaluate("() => navigator.clipboard.writeText(' ')")
 
     # --- topbar geometry after the theme button was removed ---
-    # The sheet sheds topbar children at 560, 470 and 360, ordered by which controls have a
+    # The sheet sheds topbar children at 860, 720, 470 and 360, ordered by which controls have a
     # second entry point elsewhere. The drawer toggle has none, and was shed at 380 until
     # the room link took its place, since the address bar already carries the same invite.
     # Asserted at every width rather than the one the desktop run happens to use: the bar
@@ -6662,10 +7423,13 @@ with sync_playwright() as p:
     # (width, brand visible, room link visible, screen button and pins visible). The status
     # chip is only asserted where a rule hides it outright; above 470 its visibility is
     # connection state, not layout. The screen button is the widest thing the bar carries, so
-    # it sheds first, at the same 560 as the brand, and the slack below is measured with it
-    # present.
+    # it sheds first, at the same 720 as the brand; at 560 the bar overflowed from 561 to
+    # 640px, which 600, 620 and 640 now cover.
     for w, want_brand, want_link, want_pin in ((320, False, False, False), (360, False, False, False),
-                                               (390, False, True, False), (768, True, True, True)):
+                                               (390, False, True, False), (600, False, True, False),
+                                               (620, False, True, False), (640, False, True, False),
+                                               (700, False, True, False), (740, True, True, True),
+                                               (768, True, True, True)):
         page.set_viewport_size({'width': w, 'height': 720})
         page.wait_for_timeout(350)
         tb = page.evaluate(TB)
@@ -7082,6 +7846,30 @@ with sync_playwright() as p:
     missing = sorted(h for h in relay_hosts() if csp and f'wss://{h}' not in csp)
     check('every relay in the source is allowed by connect-src', not missing,
           ('CSP header absent' if not csp else 'missing: ' + ', '.join(missing)))
+
+    # The production policy lives in vercel.json and the preview copy in vite.config.ts.
+    # They have to stay identical, or a regression passes this suite and ships anyway, and
+    # every origin a tool declares in its manifest has to be in connect-src, or that tool's
+    # fetches fail on the deploy while the manifest says they are allowed.
+    _vite = repo_text('vite.config.ts')
+
+    def _vite_policy(name):
+        body = re.search(r'const ' + name + r' = \[(.*?)\]\.join', _vite, re.S).group(1)
+        return '; '.join(a or b for a, b in re.findall(r'"([^"]*)"|\'([^\']*)\'', body))
+
+    _vercel = {h['source']: next(x['value'] for x in h['headers'] if x['key'] == 'Content-Security-Policy')
+               for h in json.loads(repo_text('vercel.json'))['headers']}
+    check('csp: vite.config.ts and vercel.json carry the same app policy',
+          _vite_policy('CSP') == _vercel['/((?!sandbox/).*)'], _vite_policy('CSP')[:120])
+    check('csp: vite.config.ts and vercel.json carry the same sandbox policy',
+          _vite_policy('SANDBOX_CSP') == _vercel['/sandbox/(.*)'], _vite_policy('SANDBOX_CSP')[:120])
+    check('csp: the preview serves the policy vercel.json declares', not csp or csp == _vercel['/((?!sandbox/).*)'], csp[:120])
+    _connect = next(d for d in _vercel['/((?!sandbox/).*)'].split('; ') if d.startswith('connect-src')).split()[1:]
+    _declared = sorted({o for block in re.findall(r'net: \[([^\]]*)\]', repo_text('src', 'tools', 'index.ts'))
+                        for o in re.findall(r"'(https?://[^']+)'", block)})
+    check('csp: every manifest net origin is in connect-src',
+          len(_declared) >= 9 and all(o in _connect for o in _declared),
+          'missing: ' + ', '.join(o for o in _declared if o not in _connect) + f' ({len(_declared)} declared)')
 
     # --- factory reset ("Delete everything on this device") ---
     # Last in the suite and in its own context on purpose: the main page auto-accepts every

@@ -38,6 +38,9 @@
   --maxw: 760px;
   --sidebar-w: 300px;
   --topbar-h: 52px;
+  /* Height of the pinned-price rail under the top bar: 0 unless a phone-width layout is
+     showing pins (Markets section below). The drawer is offset by it. */
+  --rail-h: 0px;
   /* Height of the screen strip an on-screen keyboard is covering, written by console.ts
      from visualViewport (per-property CSSOM, since `style-src 'self'` blocks a style
      attribute). 0 everywhere else, including every desktop, so the shell geometry below
@@ -359,6 +362,13 @@ label.row > span {
   border-bottom: 1px solid var(--border);
   min-width: 0;
 }
+/* A squeezed control keeps its one line. Wrapping let "Share screen" fold onto two lines
+   inside its 36px button between 561 and 620px, which hid the overflow from every
+   scrollWidth check while the roster toggle sat past the right edge. */
+.topbar > button,
+.topbar .badge {
+  white-space: nowrap;
+}
 .topbar .brand {
   font-weight: 600;
   text-transform: uppercase;
@@ -388,7 +398,7 @@ label.row > span {
   /* Small screens: the open sidebar floats as a drawer instead of squeezing content. */
   .sidebar {
     position: fixed;
-    top: var(--topbar-h);
+    top: calc(var(--topbar-h) + var(--rail-h));
     right: 0;
     bottom: 0;
     width: min(84vw, 320px);
@@ -1875,34 +1885,798 @@ iframe.ws-app-frame {
   background: #000;
 }
 
+/* ---------- Markets card (src/tools/markets.ts) ---------- */
+/* Monochrome like the rest of the sheet. Colour marks direction only, and never alone:
+   every change also carries a ▲ or ▼ glyph. Figures are monospace, so columns of prices
+   line up digit for digit. */
+.mk {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  container-type: inline-size;
+}
+.mk-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.6rem;
+}
+.mk-quote-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+.mk-head select,
+.mk-head input {
+  padding: 0.3rem 0.5rem;
+  font-size: 0.82rem;
+}
+.mk-seg {
+  display: inline-flex;
+  border: 1px solid var(--border-strong);
+}
+.mk-seg button {
+  padding: 0.3rem 0.65rem;
+  font-size: 0.8rem;
+  color: var(--fg-mute);
+}
+.mk-seg button + button {
+  border-left-color: var(--border-strong);
+}
+.mk-seg button[aria-pressed='true'] {
+  color: var(--fg);
+  background: var(--surface-2);
+}
+.mk-search {
+  flex: 1 1 8rem;
+  min-width: 0;
+}
+.mk-status {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  color: var(--fg-dim);
+  border-left: 2px solid var(--border-strong);
+  padding: 0.1rem 0 0.1rem 0.6rem;
+}
+.mk-status.hidden {
+  display: none;
+}
+.mk-lists {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  /* Thirty-odd rows would make this the tallest card in the feed; the list scrolls inside
+     it instead, with the header and the source line in view. */
+  max-height: min(34rem, 62vh);
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+.mk-sec {
+  display: flex;
+  flex-direction: column;
+}
+.mk-sec > .group-label {
+  padding: 0.3rem 0 0.3rem;
+}
+/* Fixed tracks rather than auto, so the pinned section and the full list share columns. */
+.mk-row {
+  display: grid;
+  grid-template-columns: 1.75rem minmax(0, 1fr) 4rem 8.5rem 4.75rem;
+  align-items: center;
+  gap: 0.6rem;
+  min-height: 2.1rem;
+  padding-right: 0.15rem;
+  border-top: 1px solid var(--border);
+}
+.mk-row:last-child {
+  border-bottom: 1px solid var(--border);
+}
+.mk-row.mk-flash {
+  background: var(--surface-2);
+  outline: 1px solid var(--border-strong);
+  outline-offset: -1px;
+}
+button.mk-pin {
+  justify-content: center;
+  width: 1.75rem;
+  height: 1.75rem;
+  padding: 0;
+  font-size: 0.95rem;
+  color: var(--fg-mute);
+}
+button.mk-pin[aria-pressed='true'] {
+  color: var(--fg);
+}
+.mk-name {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  min-width: 0;
+}
+.mk-sym {
+  flex: none;
+  min-width: 3.2rem;
+  padding: 0.05rem 0.3rem;
+  border: 1px solid var(--border-strong);
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  letter-spacing: 0.05em;
+  line-height: 1.5;
+  text-align: center;
+  color: var(--fg-dim);
+}
+.mk-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.86rem;
+}
+.mk-tag {
+  flex: none;
+  font-size: 0.64rem;
+  text-transform: uppercase;
+  letter-spacing: var(--track);
+  color: var(--fg-mute);
+}
+.mk-move {
+  display: inline-flex;
+  flex: none;
+  gap: 0.2rem;
+  margin-left: auto;
+}
+button.mk-step {
+  justify-content: center;
+  width: 1.6rem;
+  height: 1.6rem;
+  padding: 0;
+  font-size: 0.78rem;
+  color: var(--fg-dim);
+  border-color: var(--border-strong);
+}
+.mk-spark {
+  display: block;
+  width: 4rem;
+  height: 1.25rem;
+}
+.mk-spark polyline {
+  fill: none;
+  stroke: var(--fg-mute);
+  stroke-width: 1.25;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+}
+.mk-row:hover .mk-spark polyline {
+  stroke: var(--fg-dim);
+}
+.mk-price {
+  justify-self: end;
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+button.mk-price {
+  padding: 0.2rem 0.45rem;
+  margin-right: -0.45rem;
+}
+button.mk-price:hover {
+  background: var(--bg);
+  border-color: var(--border-strong);
+}
+.mk-price.none {
+  color: var(--fg-mute);
+}
+.mk-chg {
+  justify-self: end;
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.mk-chg.up,
+.tk-chg.up {
+  color: var(--ok);
+}
+.mk-chg.down,
+.tk-chg.down {
+  color: var(--danger);
+}
+.mk-chg.flat,
+.mk-chg.na,
+.tk-chg.flat {
+  color: var(--fg-mute);
+}
+.mk-empty {
+  padding: 0.45rem 0;
+}
+.mk-foot {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+.mk-sources {
+  margin: 0;
+  line-height: 1.5;
+}
+.mk-foot a {
+  color: var(--fg-dim);
+}
+.mk-foot a:hover {
+  color: var(--fg);
+}
+.mk-foot-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.mk-foot-row button {
+  padding: 0.25rem 0.65rem;
+  font-size: 0.8rem;
+}
+/* A phone-width card: the sparkline and the stablecoin tag go (the symbol says it), and
+   the name ellipses before any figure does. The tracks stay fixed so rows still align. */
+@container (max-width: 460px) {
+  .mk-row {
+    grid-template-columns: 1.5rem minmax(0, 1fr) 6.6rem 4rem;
+    gap: 0.4rem;
+  }
+  .mk-spark,
+  .mk-tag {
+    display: none;
+  }
+  .mk-name {
+    gap: 0.4rem;
+  }
+  .mk-sym {
+    min-width: 2.9rem;
+  }
+  .mk-price {
+    font-size: 0.8rem;
+  }
+  button.mk-price {
+    padding: 0.2rem 0.3rem;
+    margin-right: -0.3rem;
+  }
+  .mk-chg {
+    font-size: 0.74rem;
+  }
+}
+/* A phone: the symbol alone names the row (the name stays in its title and is still read
+   by a screen reader), so no figure has to share its width with an ellipsed name. */
+@container (max-width: 400px) {
+  .mk-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  .mk-row {
+    grid-template-columns: 1.5rem minmax(0, 1fr) 6.4rem 4rem;
+  }
+}
+
+/* ---------- Weather card (src/tools/weather.ts) ---------- */
+/* Same register as Markets: monochrome glyphs (text presentation, never emoji), mono
+   figures, hairline rows. Colour is used once, for a rain chance worth noticing, and the
+   percentage is always printed beside it. */
+.wx {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  container-type: inline-size;
+}
+.wx-places:empty {
+  display: none;
+}
+.wx-places {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  align-items: center;
+}
+button.wx-place,
+span.wx-place {
+  gap: 0.35rem;
+  padding: 0.25rem 0.6rem;
+  font-size: 0.8rem;
+  border: 1px solid var(--border);
+  color: var(--fg-dim);
+  max-width: 14rem;
+}
+button.wx-place[aria-pressed='true'] {
+  color: var(--fg);
+  background: var(--surface-2);
+  border-color: var(--border-strong);
+}
+span.wx-place.unsaved {
+  display: inline-flex;
+  border-style: dashed;
+  color: var(--fg);
+}
+.wx-place-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wx-home {
+  color: var(--fg-mute);
+}
+.wx-find {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+.wx-search {
+  flex: 1 1 10rem;
+  min-width: 0;
+  padding: 0.3rem 0.5rem;
+  font-size: 0.82rem;
+}
+.wx-find button {
+  flex: none;
+  padding: 0.3rem 0.65rem;
+  font-size: 0.8rem;
+}
+.wx-results {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border-strong);
+  background: var(--elev);
+  max-height: 16rem;
+  overflow-y: auto;
+}
+.wx-results.hidden {
+  display: none;
+}
+button.wx-result {
+  justify-content: flex-start;
+  gap: 0.6rem;
+  padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+}
+button.wx-result:last-child {
+  border-bottom-color: transparent;
+}
+.wx-res-name {
+  font-size: 0.86rem;
+}
+.wx-res-where {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.78rem;
+  color: var(--fg-mute);
+}
+.wx-res-note {
+  padding: 0.45rem 0.6rem;
+}
+.wx-note {
+  margin: -0.2rem 0 0;
+}
+.wx-status {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  color: var(--fg-dim);
+  border-left: 2px solid var(--border-strong);
+  padding: 0.1rem 0 0.1rem 0.6rem;
+}
+.wx-status.hidden {
+  display: none;
+}
+.wx-now-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+.wx-now-wrap:empty {
+  display: none;
+}
+.wx-now {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.4rem 0.8rem;
+  padding-top: 0.2rem;
+}
+/* Weather glyphs come from whichever font has them, and fallback fonts draw them at
+   different sizes; one symbol-first stack keeps the set consistent where it is installed. */
+.wx-glyph,
+.wx-h-glyph,
+.wx-d-glyph,
+.ticker[data-weather] .tk-sym {
+  font-family: 'Noto Sans Symbols 2', 'Segoe UI Symbol', 'Apple Symbols', 'DejaVu Sans', var(--sans);
+}
+.wx-glyph {
+  font-size: 2.1rem;
+  line-height: 1;
+  width: 2.4rem;
+  text-align: center;
+  color: var(--fg-dim);
+}
+.wx-temp {
+  font-family: var(--mono);
+  font-size: 2.6rem;
+  font-weight: 300;
+  line-height: 1;
+  letter-spacing: -0.03em;
+  font-variant-numeric: tabular-nums;
+}
+.wx-cond {
+  min-width: 0;
+}
+.wx-word {
+  font-size: 0.95rem;
+}
+.wx-units {
+  display: inline-flex;
+  border: 1px solid var(--border-strong);
+}
+.wx-units button {
+  padding: 0.25rem 0.55rem;
+  font-size: 0.76rem;
+  color: var(--fg-mute);
+}
+.wx-units button + button {
+  border-left-color: var(--border-strong);
+}
+.wx-units button[aria-pressed='true'] {
+  color: var(--fg);
+  background: var(--surface-2);
+}
+.wx-facts {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 0.15rem 0.8rem;
+  margin: 0;
+  padding: 0.5rem 0;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+.wx-facts > div {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.wx-facts dt {
+  font-size: 0.68rem;
+  color: var(--fg-mute);
+}
+.wx-facts dd {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 0.82rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.wx-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+.wx-actions button {
+  padding: 0.25rem 0.6rem;
+  font-size: 0.78rem;
+}
+button.wx-pin[aria-pressed='true'] {
+  border-color: var(--border-strong);
+}
+.wx-sec:empty {
+  display: none;
+}
+.wx-sec > .group-label {
+  padding: 0.1rem 0 0.35rem;
+}
+.wx-hours {
+  display: flex;
+  overflow-x: auto;
+  scrollbar-width: thin;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+.wx-hour {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.15rem;
+  width: 3.4rem;
+  padding: 0.45rem 0 0.4rem;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+.wx-hour + .wx-hour {
+  border-left: 1px solid var(--border);
+}
+.wx-h-time {
+  font-size: 0.68rem;
+  color: var(--fg-mute);
+  white-space: nowrap;
+}
+.wx-h-glyph {
+  font-size: 1.05rem;
+  line-height: 1.3;
+  color: var(--fg-dim);
+}
+.wx-h-temp {
+  font-size: 0.82rem;
+}
+.wx-h-pop,
+.wx-d-pop {
+  font-size: 0.68rem;
+  color: var(--fg-mute);
+  min-height: 1em;
+}
+.wx-h-pop.wet,
+.wx-d-pop.wet {
+  color: var(--fg);
+}
+.wx-days {
+  display: flex;
+  flex-direction: column;
+}
+.wx-day {
+  display: grid;
+  grid-template-columns: 3.4rem 1.4rem minmax(0, 1fr) 2.6rem 2.6rem minmax(4rem, 9rem) 2.6rem;
+  align-items: center;
+  gap: 0.55rem;
+  min-height: 2.1rem;
+  border-top: 1px solid var(--border);
+}
+.wx-day:last-child {
+  border-bottom: 1px solid var(--border);
+}
+.wx-d-name {
+  font-size: 0.84rem;
+}
+.wx-d-glyph {
+  text-align: center;
+  color: var(--fg-dim);
+}
+.wx-d-word {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.8rem;
+  color: var(--fg-dim);
+}
+.wx-d-pop {
+  text-align: right;
+  font-family: var(--mono);
+}
+.wx-d-min,
+.wx-d-max {
+  font-family: var(--mono);
+  font-size: 0.82rem;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+.wx-d-min {
+  color: var(--fg-mute);
+}
+.wx-d-max {
+  text-align: left;
+}
+/* The week's lowest to highest temperature; the fill is one day's span within it. Its
+   left and width are set per property from weather.ts. */
+.wx-range {
+  position: relative;
+  height: 4px;
+  background: var(--surface-2);
+}
+.wx-fill {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: var(--fg-dim);
+}
+.wx-foot {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+.wx-sources {
+  margin: 0;
+  line-height: 1.5;
+}
+.wx-foot a {
+  color: var(--fg-dim);
+}
+.wx-foot a:hover {
+  color: var(--fg);
+}
+.wx-foot-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.wx-foot-row button {
+  padding: 0.25rem 0.65rem;
+  font-size: 0.8rem;
+}
+@container (max-width: 620px) {
+  .wx-facts {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    row-gap: 0.4rem;
+  }
+}
+@container (max-width: 460px) {
+  .wx-day {
+    grid-template-columns: 3rem 1.2rem 2.4rem 2.4rem minmax(3rem, 1fr) 2.4rem;
+    gap: 0.45rem;
+  }
+  .wx-d-word {
+    display: none;
+  }
+  .wx-temp {
+    font-size: 2.2rem;
+  }
+  .wx-units {
+    order: 5;
+  }
+}
+
+/* ---------- Top-bar tickers (src/shell/tickers.ts): pinned prices and weather ---------- */
+/* One flex item for the whole group, rigid, so the bar's scrollWidth is
+   the honest measure tickers.ts fits against; a ticker that does not fit is hidden whole. */
+.tickers {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 0.35rem;
+}
+.tickers.hidden,
+.tickers > .tk-off {
+  display: none;
+}
+button.ticker,
+button.ticker-more {
+  flex: none;
+  height: 28px;
+  padding: 0 0.5rem;
+  gap: 0.4rem;
+  border-color: var(--border);
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  line-height: 1;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+button.ticker:hover,
+button.ticker-more:hover {
+  border-color: var(--border-strong);
+}
+.tk-sym {
+  letter-spacing: 0.06em;
+  color: var(--fg-mute);
+}
+.tk-price {
+  color: var(--fg);
+}
+.tk-chg {
+  font-size: 0.68rem;
+}
+.tk-chg:empty {
+  display: none;
+}
+/* Stale: older than two refresh intervals, or offline. Dimmed by colour rather than
+   opacity, which kept the figures at AA, and the direction colour goes too: an old
+   direction is not news. */
+button.ticker.stale .tk-price,
+button.ticker.stale .tk-chg {
+  color: var(--fg-mute);
+}
+button.ticker.stale {
+  border-style: dotted;
+}
+button.ticker-more {
+  color: var(--fg-dim);
+}
+.menu.ticker-menu {
+  position: fixed;
+  min-width: 280px;
+}
+.tk-menu-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.15rem 0.3rem;
+  font-family: var(--mono);
+  font-size: 0.76rem;
+  font-variant-numeric: tabular-nums;
+}
+.tk-menu-row .tk-sym {
+  min-width: 3rem;
+}
+.menu .tk-menu-row button {
+  width: auto;
+  padding: 0.25rem 0.55rem;
+  font-family: var(--sans);
+  font-size: 0.78rem;
+}
+/* At phone width the bar has no room, so the group moves into this rail under it. A
+   sibling of .topbar on purpose: the bar's own shedding and fit stay as they were. The
+   shell grows a row only while the rail exists; in stage view it is never mounted. */
+.ticker-rail {
+  display: none;
+}
+.app-shell:has(> .ticker-rail) {
+  grid-template-rows: var(--topbar-h) auto 1fr;
+}
+.app-shell:has(> .ticker-rail) > .body {
+  grid-row: 3;
+}
+@media (max-width: 560px) {
+  :root.has-tickers {
+    --rail-h: 38px;
+  }
+  :root.has-tickers .ticker-rail {
+    display: flex;
+    grid-row: 2;
+    align-items: center;
+    height: var(--rail-h);
+    padding: 0 0.4rem;
+    border-bottom: 1px solid var(--border);
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+  }
+  .ticker-rail .tickers {
+    gap: 0.3rem;
+  }
+}
+:root.stage-view .ticker-rail,
+:root.stage-view .tickers {
+  display: none !important;
+}
+
 /* Phones. Last block in the sheet on purpose: a media query adds no specificity, so these
    rules only beat the base .feed / .feed-item / .composer-wrap / .captions rules by
    sitting after them.
 
    The topbar carries nine controls plus any pinned tools, more than 320-390px can hold,
    so it sheds them in value order, by what survives elsewhere rather than by what is least
-   used: below 560px the screen button and the pinned tools other than Connect go (the
+   used. Below 860px Add screen goes (the stage head and each own-screen tile carry the same
+   action). Below 720px the screen button and the pinned tools other than Connect go (the
    composer holds the same screen control, Tools opens every tool, and they are the widest
-   things on the bar) and the brand goes (decorative), below 470px the status chip
-   goes (80px of text the roster drawer also reports), below 360px the room link goes
-   (Connect holds the same action, and the address bar holds the link). The code chip, the
-   clear-feed button, the roster toggle, Tools and the Connect pin survive every step. The theme toggle lives in Settings and is off the
-   bar entirely, which is where the room came from. Measured with the drawer toggle on the
-   bar, the flexible spacer still holds 34px at 320px, 58px at 344px, 74px at 360px (the
-   room link is gone by then), 58px at 380px, 68px at 390px and 215px at 768px, and no
-   control is clipped or pushed past the right edge at any of them. */
+   things on the bar) and the brand goes (decorative); with these at 560px the bar
+   overflowed by 4-64px from 561 to 640px, and by up to 37px to 700px with a status chip
+   and a share running. Below 470px the status chip goes (80px of text the roster drawer
+   also reports), below 360px the room link goes (Connect holds the same action, and the
+   address bar holds the link). The code chip, the clear-feed button, the roster toggle,
+   Tools and the Connect pin survive every step. The theme toggle lives in Settings and is
+   off the bar entirely. Measured with the drawer toggle and a "1 connected" chip on the
+   bar, nothing overflows from 320 to 1440px, sharing or not; pinned tickers
+   (src/shell/tickers.ts) only take what is left and hide whole when it runs out. */
+@media (max-width: 860px) {
+  .topbar button.screen-add {
+    display: none;
+  }
+}
+@media (max-width: 720px) {
+  .topbar button.tool-pin:not([data-tool='connect']),
+  .topbar button.screen-share {
+    display: none;
+  }
+  .topbar .brand {
+    display: none;
+  }
+}
 @media (max-width: 560px) {
   .topbar {
     padding: 0 0.4rem;
     gap: 0.25rem;
   }
-  .topbar button.tool-pin:not([data-tool='connect']),
-  .topbar button.screen-share,
-  .topbar button.screen-add,
   .tiles-head button.stage-add {
-    display: none;
-  }
-  .topbar .brand {
     display: none;
   }
   .topbar button.icon {

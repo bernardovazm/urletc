@@ -1,7 +1,6 @@
-// Link shortener, the one built-in that sends data off the device. The submitted URL is
-// posted to spoo.me, which mints and stores the short link. Everything else in this app
-// runs locally, so that disclosure is stated in the card itself rather than in a doc, and
-// nothing is sent until the button is pressed.
+// Link shortener. The submitted URL is posted to spoo.me, which mints and stores the short
+// link; nothing else is sent. That disclosure is stated in the card itself rather than in a
+// doc, and nothing is sent until the button is pressed.
 //
 // The provider is not interchangeable. is.gd, ulvis.net and cleanuri were checked from a
 // browser and none answers with CORS headers, so a client-only page cannot read their

@@ -17,7 +17,14 @@
 //    polarity (light text on dark browser chrome above, dark text on a light page below),
 //    and one threshold destroys whichever region it was not fitted to. Leptonica already
 //    thresholds per region inside Tesseract, so doing it here only throws information
-//    away. Not applied.
+//    away. Not applied to the first pass.
+//
+// The exception is caption text over a photo: white or yellow letters with a dark outline
+// on grass, sky or a crowd. Grayscale keeps the background's texture at the same contrast
+// as the letters, and Tesseract read a meme caption over a football pitch as "suzuer
+// eatranatertaccouts" at 7% confidence. A mask that keeps only the light pixels reads it
+// exactly at 80-95%. So a low-confidence first pass is retried with a light-text and a
+// dark-text mask (`OcrMode`), and the caller keeps whichever reading wins (index.ts).
 
 /** Largest integer upscale. Past 4x the fixtures stop improving and only cost memory. */
 const MAX_SCALE = 4
@@ -47,11 +54,23 @@ export function chooseScale(w: number, h: number): number {
   return Math.max(MIN_UPSCALE, Math.min(MAX_SCALE, byBudget))
 }
 
-/** Luma grayscale, in place. Rec.601 coefficients, the same weighting Leptonica uses. */
-export function toGrayscale(d: Uint8ClampedArray): void {
+/** `gray` is the first pass. `light` keeps only pixels brighter than LIGHT_MIN as black ink
+ *  on white, for light letters over a busy background; `dark` keeps only pixels darker than
+ *  DARK_MAX, for dark letters with a light outline. */
+export type OcrMode = 'gray' | 'light' | 'dark'
+
+/** Measured on caption fixtures (white and yellow fill with a black stroke, black fill with
+ *  a white stroke) and a real meme screenshot: yellow (255,230,0) has a luma of 211 and a
+ *  sunlit pitch stays under 170, so 185 keeps both fills and drops the grass. */
+const LIGHT_MIN = 185
+const DARK_MAX = 70
+
+/** Luma grayscale or a luma mask, in place. Rec.601 coefficients, the same weighting
+ *  Leptonica uses. */
+export function toGrayscale(d: Uint8ClampedArray, mode: OcrMode = 'gray'): void {
   for (let i = 0; i < d.length; i += 4) {
     const y = (d[i] * 299 + d[i + 1] * 587 + d[i + 2] * 114) / 1000
-    d[i] = d[i + 1] = d[i + 2] = y
+    d[i] = d[i + 1] = d[i + 2] = mode === 'gray' ? y : (mode === 'light' ? y > LIGHT_MIN : y < DARK_MAX) ? 0 : 255
   }
 }
 
@@ -60,12 +79,12 @@ export function toGrayscale(d: Uint8ClampedArray): void {
  *  the extra allocation at a few MB for any input size. */
 const BAND_PX = 2e6
 
-function grayscaleCanvas(ctx: OffscreenCanvasRenderingContext2D | CanvasRenderingContext2D, w: number, h: number): void {
+function grayscaleCanvas(ctx: OffscreenCanvasRenderingContext2D | CanvasRenderingContext2D, w: number, h: number, mode: OcrMode): void {
   const rows = Math.max(1, Math.min(h, Math.floor(BAND_PX / Math.max(1, w))))
   for (let y = 0; y < h; y += rows) {
     const band = Math.min(rows, h - y)
     const img = ctx.getImageData(0, y, w, band)
-    toGrayscale(img.data)
+    toGrayscale(img.data, mode)
     ctx.putImageData(img, 0, y)
   }
 }
@@ -82,7 +101,7 @@ function makeCanvas(w: number, h: number): OffscreenCanvas | HTMLCanvasElement {
  *  a canvas directly (it calls convertToBlob/toBlob itself), so nothing is encoded twice.
  *  Returns null when the source cannot be decoded, and the caller falls back to the
  *  original bitmap rather than failing the recognition. */
-export async function prepareForOcr(src: Blob): Promise<OffscreenCanvas | HTMLCanvasElement | null> {
+export async function prepareForOcr(src: Blob, mode: OcrMode = 'gray'): Promise<OffscreenCanvas | HTMLCanvasElement | null> {
   let bmp: ImageBitmap
   try {
     bmp = await createImageBitmap(src)
@@ -103,7 +122,7 @@ export async function prepareForOcr(src: Blob): Promise<OffscreenCanvas | HTMLCa
     ctx.imageSmoothingEnabled = true
     ctx.imageSmoothingQuality = 'high'
     ctx.drawImage(bmp, 0, 0, w, h)
-    grayscaleCanvas(ctx, w, h)
+    grayscaleCanvas(ctx, w, h, mode)
     return canvas
   } catch {
     return null

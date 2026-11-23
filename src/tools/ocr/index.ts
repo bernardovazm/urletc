@@ -146,8 +146,39 @@ export interface OcrResult {
   text: string
 }
 
+/** First passes at or above this mean confidence are kept as they are. Every screenshot in
+ *  the fixture set that read correctly scored 74 or more; the meme caption that read as
+ *  noise scored 7. */
+const RETRY_BELOW = 75
+/** A masked reading replaces the first one only when it is this much more confident and
+ *  keeps most of its confident text. A mask always drops the text of the other polarity,
+ *  and on a screenshot that cost whole paragraphs at a similar confidence. */
+const RETRY_MARGIN = 10
+const RETRY_KEEP = 0.6
+/** The first pass's share of the reported progress, the rest is the two masked retries. */
+const FIRST_SHARE = 0.6
+
+interface Reading {
+  text: string
+  confidence: number
+  /** Letters and digits in words read at 70% or more, two characters or longer. */
+  mass: number
+}
+
+async function read(worker: Awaited<ReturnType<typeof getWorker>>, image: Parameters<typeof worker.recognize>[0]): Promise<Reading> {
+  const { data } = await worker.recognize(image, {}, { text: true, blocks: true })
+  let mass = 0
+  for (const block of data.blocks ?? [])
+    for (const para of block.paragraphs)
+      for (const line of para.lines)
+        for (const word of line.words) {
+          const n = word.text.replace(/[^\p{L}\p{N}]/gu, '').length
+          if (word.confidence >= 70 && n >= 2) mass += n
+        }
+  return { text: data.text, confidence: data.confidence, mass }
+}
+
 export async function recognizeImage(image: Blob | string, onProgress?: (p: number) => void): Promise<OcrResult> {
-  progressCb = onProgress ?? null
   inFlight++
   try {
     const worker = await getWorker()
@@ -155,8 +186,19 @@ export async function recognizeImage(image: Blob | string, onProgress?: (p: numb
     // decoded, and a string source (a URL) is handed straight through, because every caller
     // in this app passes a Blob and fetching a URL here would break the no-auto-fetch rule.
     const prepared = typeof image === 'string' ? null : await prepareForOcr(image)
-    const { data } = await worker.recognize(prepared ?? image)
-    return { text: data.text }
+    progressCb = onProgress ? (p) => onProgress(p * FIRST_SHARE) : null
+    const first = await read(worker, prepared ?? image)
+    if (typeof image === 'string' || !prepared || first.confidence >= RETRY_BELOW) return { text: first.text }
+    let best = first
+    const modes = ['light', 'dark'] as const
+    for (const [i, mode] of modes.entries()) {
+      const masked = await prepareForOcr(image, mode)
+      if (!masked) continue
+      progressCb = onProgress ? (p) => onProgress(FIRST_SHARE + ((1 - FIRST_SHARE) * (i + p)) / modes.length) : null
+      const r = await read(worker, masked)
+      if (r.confidence >= first.confidence + RETRY_MARGIN && r.mass >= first.mass * RETRY_KEEP && r.confidence > best.confidence) best = r
+    }
+    return { text: best.text }
   } finally {
     if (--inFlight === 0 && liveCards === 0) disposeWhenIdle()
   }

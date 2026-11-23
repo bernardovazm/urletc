@@ -3023,6 +3023,47 @@ with sync_playwright() as p:
                or l.startswith('pageerror:')]
     check('OCR preprocessing raises no CSP, Trusted Types or runtime error',
           not ocr_bad, ' | '.join(ocr_bad[:2])[:200])
+
+    # A meme caption: white letters with a black outline over a textured pitch and a bright
+    # advertising board. Grayscale kept the grass at the letters' contrast and the reading
+    # was noise at 7% confidence; the light-text retry reads it.
+    def ocr_caption(fill, stroke):
+        return base64.b64decode(page.evaluate('''async ([fill, stroke]) => {
+          const c = document.createElement('canvas'); c.width = 640; c.height = 200
+          const g = c.getContext('2d')
+          for (let y = 0; y < 200; y += 4) for (let x = 0; x < 640; x += 4) {
+            const n = Math.abs((Math.sin(x * 12.9898 + y * 78.233) * 43758.5453) % 1)
+            g.fillStyle = `rgb(${40 + n * 60},${110 + n * 70},${40 + n * 40})`
+            g.fillRect(x, y, 4, 4)
+          }
+          g.fillStyle = '#e8e8f0'; g.fillRect(0, 0, 640, 18)
+          g.fillStyle = '#1a2a6a'; g.font = 'bold 12px sans-serif'; g.fillText('SUZUKI   Emirates', 20, 13)
+          g.font = 'bold 40px Arial, sans-serif'; g.textBaseline = 'middle'; g.lineJoin = 'round'; g.lineWidth = 5
+          for (const [t, y] of [['Me: they started shouting', 85], ['the both of us', 140]]) {
+            g.strokeStyle = stroke; g.strokeText(t, 60, y)
+            g.fillStyle = fill; g.fillText(t, 60, y)
+          }
+          const blob = await new Promise(r => c.toBlob(r, 'image/png'))
+          const buf = new Uint8Array(await blob.arrayBuffer())
+          let out = ''
+          for (let i = 0; i < buf.length; i++) out += String.fromCharCode(buf[i])
+          return btoa(out)
+        }''', [fill, stroke]))
+
+    def ocr_file(name, data):
+        ocr_card.locator('input[type=file]').set_input_files(files=[{'name': name, 'mimeType': 'image/png', 'buffer': data}])
+        page.wait_for_timeout(500)
+        st_ = ocr_card.locator('div.muted').first
+        for _ in range(120):
+            if st_.inner_text() == 'Done.' or st_.inner_text().startswith('OCR failed'):
+                break
+            page.wait_for_timeout(500)
+        return (ocr_card.locator('pre').first.inner_text() or '').strip()
+
+    for fill, stroke, label in (('#ffffff', '#000000', 'white'), ('#ffe600', '#000000', 'yellow'), ('#111111', '#ffffff', 'black')):
+        cap = ocr_file(f'caption-{label}.png', ocr_caption(fill, stroke))
+        check(f'OCR reads a {label} outlined caption over a busy photo',
+              'they started shouting' in cap.lower() and 'both of us' in cap.lower(), repr(cap[:160]))
     # =================== end OCR quality block ===================
 
 

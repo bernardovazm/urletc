@@ -309,6 +309,16 @@ browser path, mean character accuracy went from 0.54 to 1.00.
   traded away.
 - **`user_defined_dpi` and `preserve_interword_spaces` are unset.** Both were tried and
   changed no output on any fixture.
+- **A masked retry for caption text.** White or yellow letters with a dark outline over a
+  photo (a meme caption over a football pitch) keep the background's texture at the
+  letters' contrast in grayscale, and that image read as noise at 7% mean confidence. A first
+  pass under 75% is read again with a light-text mask (luma above 185 as ink) and a dark-text
+  mask (luma below 70), and a retry replaces it only when it is at least 10 points more
+  confident and keeps 60% of the first pass's confidently read characters, since a mask drops
+  all text of the other polarity. The caption then reads exactly at 94%; the screenshot
+  fixtures that read correctly score 74 or more on the first pass and are unchanged. A
+  low-confidence image pays up to two more passes: 21 s in all for the slowest fixture, a
+  large developer-tools capture.
 
 TrOCR and transformers.js OCR are rejected: tens of MB minimum, incompatible with the
 minimalist constraint `[~]`.

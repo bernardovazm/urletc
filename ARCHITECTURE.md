@@ -603,7 +603,19 @@ ships today.
   fullscreen and record). A screen share, incoming or local, pins itself and expands the stage
   over the feed while nothing else is pinned, since the stage is otherwise capped at the feed
   column; that expansion is released when the share ends, unless the expand control has been
-  pressed in between, which hands the state to the user. A chromeless `#/stage/<code>` route renders only the stage for use
+  pressed in between, which hands the state to the user. Several screens can be shared at
+  once (a game table and a music tab). While one is live the top bar and the stage head offer
+  Add screen, and the top bar's stop asks which screen when there are several. Each of your
+  own screens carries a bar under the picture: the surface (tab, window, entire screen),
+  whether sound was captured and a switch that sends silence on that track, an Optimize for
+  choice that sets `contentHint` and a frame-rate constraint (a motion screen is then tuned
+  like a camera, `session.ts` `profileFor`), main on this stage, add, and stop. Same-kind
+  sources from one sender are numbered on every stage ("screen 2"). Expanded Focus keeps the
+  other sources in a rail beside the main one (under it on a portrait screen) instead of below
+  the fold. Capture asks for `selfBrowserSurface: 'exclude'` and `surfaceSwitching:
+  'include'`, and keeps focus in the app after picking a tab where `CaptureController`
+  exists. None of this changes the wire: which screen is main for viewers is still the first
+  one, chosen on each viewer's stage. A chromeless `#/stage/<code>` route renders only the stage for use
   as an OBS Browser source or a second screen. It is view-only: it authenticates like any peer
   but publishes nothing, and it joins only that code room, never personal or nearby. Local
   media still honours section 5.4: trusted tiers only, never nearby. Deferred and not built:

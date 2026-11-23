@@ -4010,6 +4010,68 @@ with sync_playwright() as p:
           and TOP_SCREEN.inner_text() == 'Stop sharing')
     TOP_SCREEN.click()
     poll(lambda: spg.locator('.tiles .stage-tile').count() == 0, 10)
+
+    # Two screens at once, the way a game master shares the table and a music tab. The
+    # second share used to be reachable only through an unlabelled composer button that the
+    # expanded stage hides, both tiles carried one name, the second landed below the fold,
+    # and the one stop control ended both.
+    spg.evaluate('''() => {
+      const inner = navigator.mediaDevices.getDisplayMedia.bind(navigator.mediaDevices)
+      let calls = 0
+      navigator.mediaDevices.getDisplayMedia = async (o) => {
+        const s = await inner(o)
+        if (calls++ === 1) {
+          const ac = new AudioContext(), osc = ac.createOscillator(), dst = ac.createMediaStreamDestination()
+          osc.connect(dst); osc.start(); s.addTrack(dst.stream.getAudioTracks()[0])
+        }
+        return s
+      }
+    }''')
+    TOP_SCREEN.click()
+    poll(lambda: spg.locator('.tiles .stage-tile.kind-screen').count() == 1, 10)
+    TOP_ADD = spg.locator('.topbar button.screen-add')
+    check('while a screen is shared the top bar offers to add another',
+          TOP_ADD.is_visible() and TOP_ADD.inner_text() == 'Add screen', '%d visible=%s' % (TOP_ADD.count(), TOP_ADD.count() and TOP_ADD.is_visible()))
+    own_bar = spg.locator('.stage-tile.own-screen .tile-bar').first
+    check('your own screen has its controls in a bar under the picture, visible without hover',
+          own_bar.is_visible() and own_bar.locator('button.share-stop').is_visible() and own_bar.locator('button.share-add').is_visible())
+    check('the stage head offers to add a screen too', spg.locator('.tiles-head button.stage-add').is_visible())
+    TOP_ADD.click()
+    two = poll(lambda: spg.locator('.tiles .stage-tile.kind-screen').count() == 2, 10)
+    check('Add screen starts a second share beside the first', bool(two),
+          '%d screen tiles' % spg.locator('.tiles .stage-tile.kind-screen').count())
+    check('the stop button counts the screens', TOP_SCREEN.inner_text() == 'Stop sharing (2)', TOP_SCREEN.inner_text())
+    stops = spg.eval_on_selector_all('.stage-tile.own-screen button.share-stop', 'els => els.map(e => e.title)')
+    check('two screens from one person carry two names', len(set(stops)) == 2 and any(t.endswith(' 2') for t in stops), str(stops))
+    if two:
+        vh = spg.evaluate('innerHeight')
+        boxes = spg.eval_on_selector_all('.tiles .stage-tile.kind-screen', 'els => els.map(e => { const r = e.getBoundingClientRect(); return [r.top, r.bottom] })')
+        check('with the stage expanded the second screen is on screen, not below the fold',
+              theater(spg) and all(b[0] < vh and b[1] > 0 for b in boxes), '%s vh=%d max=%s' % (boxes, vh, theater(spg)))
+        snd = spg.locator('.stage-tile.own-screen button.share-sound')
+        check('a screen without sound says so, one with sound gets a switch',
+              spg.locator('.stage-tile.own-screen .share-nosound').count() == 1 and snd.count() == 1 and snd.inner_text() == 'Sound on')
+        snd.click()
+        check('the sound switch sends silence on the same track',
+              spg.evaluate("() => [...document.querySelectorAll('.stage-tile.own-screen video')].flatMap(v => v.srcObject.getAudioTracks()).every(t => !t.enabled && t.readyState === 'live')")
+              and snd.inner_text() == 'Sound off' and snd.get_attribute('aria-pressed') == 'true')
+        mode = spg.locator('.stage-tile.own-screen.spot select.share-mode')
+        mode.select_option('motion')
+        check('optimizing a screen for motion marks its track',
+              spg.evaluate("() => document.querySelector('.stage-tile.own-screen.spot video').srcObject.getVideoTracks()[0].contentHint") == 'motion')
+        TOP_SCREEN.click()
+        menu = spg.locator('.menu.stop-menu')
+        check('with two screens the stop button asks which', bool(poll(lambda: menu.is_visible(), 3)) and menu.locator('button').count() == 3,
+              '%d items' % menu.locator('button').count())
+        menu.locator('button').first.click()
+        one = poll(lambda: spg.locator('.tiles .stage-tile.kind-screen').count() == 1, 10)
+        check('stopping one screen leaves the other running', bool(one) and TOP_SCREEN.inner_text() == 'Stop sharing',
+              '%d tiles %r' % (spg.locator('.tiles .stage-tile.kind-screen').count(), TOP_SCREEN.inner_text()))
+        check('the remaining screen takes the plain name again',
+              not spg.locator('.stage-tile.own-screen button.share-stop').first.get_attribute('title').endswith(' 2'))
+    TOP_SCREEN.click()
+    poll(lambda: spg.locator('.tiles .stage-tile').count() == 0, 10)
+    check('Add screen leaves the bar once nothing is shared', not TOP_ADD.is_visible())
     check('no page error on the screen share path', not serrs, ' | '.join(serrs)[:200])
     sctx.close()
 

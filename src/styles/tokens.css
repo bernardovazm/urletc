@@ -1157,6 +1157,66 @@ button.icon.on {
   aspect-ratio: auto;
   object-fit: contain;
 }
+/* In an own-screen tile the picture shares the height with its control bar. */
+:root.stage-max .stage .stage-tile.own-screen.spot .tile-media {
+  flex: 1 1 auto;
+}
+:root.stage-max .stage.layout-solo .stage-tile.own-screen.spot,
+:root.stage-max .stage.layout-spotlight .stage-tile.own-screen.spot {
+  min-height: 0;
+}
+/* Focus with more than one source. The main tile used to take the whole height and push
+   the others below the fold, where the source count was the only sign they existed: a
+   second screen was invisible to everyone, its sharer included. The others now sit in a
+   rail beside the main tile, or under it on a portrait screen. */
+:root.stage-max .stage.layout-spotlight:has(> .stage-tile:not(.spot)) {
+  --rail-w: clamp(150px, 20%, 280px);
+  flex-direction: column;
+  flex-wrap: wrap;
+  align-content: flex-start;
+}
+:root.stage-max .stage.layout-spotlight:has(> .stage-tile:not(.spot)) > .stage-tile.spot {
+  width: calc(100% - var(--rail-w) - 0.5rem);
+}
+:root.stage-max .stage.layout-spotlight:has(> .stage-tile:not(.spot)) > .stage-tile:not(.spot) {
+  width: var(--rail-w);
+}
+@media (max-aspect-ratio: 1 / 1) {
+  :root.stage-max .stage.layout-spotlight:has(> .stage-tile:not(.spot)) {
+    flex-direction: row;
+    align-content: flex-start;
+  }
+  :root.stage-max .stage.layout-spotlight:has(> .stage-tile:not(.spot)) > .stage-tile.spot {
+    width: 100%;
+    height: calc(100% - 8.5rem);
+  }
+  :root.stage-max .stage.layout-spotlight:has(> .stage-tile:not(.spot)) > .stage-tile:not(.spot) {
+    width: calc(33.3% - 0.35rem);
+  }
+}
+/* Grid at full window: tiles as large as the window allows rather than eight narrow
+   columns of 150px minimum. Rows share the stage's height and the picture letterboxes
+   inside its cell, so no tile runs past the stage, where its controls ended up under the
+   top bar. */
+:root.stage-max .stage.layout-grid {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr));
+  grid-auto-rows: minmax(0, 1fr);
+}
+:root.stage-max .stage.layout-grid .stage-tile {
+  min-height: 0;
+}
+:root.stage-max .stage.layout-grid .stage-tile:not(.own-screen) video.tile,
+:root.stage-max .stage.layout-grid .stage-tile.own-screen .tile-media,
+:root.stage-max .stage.layout-grid .stage-tile.own-screen video.tile {
+  height: 100%;
+}
+:root.stage-max .stage.layout-grid video.tile {
+  aspect-ratio: auto;
+  object-fit: contain;
+}
+:root.stage-max .stage.layout-grid .stage-tile.own-screen .tile-media {
+  flex: 1 1 auto;
+}
 
 /* the stage: VDO.ninja-style multi-source layouts (grid / spotlight / solo) */
 .tiles.stage {
@@ -1255,6 +1315,74 @@ video.tile {
 .stage-tile:focus-visible {
   outline: none;
   box-shadow: var(--ring);
+}
+
+/* Your own screen: the picture with its overlay in .tile-media, the share controls in a
+   bar under it (console.ts shareBar). The bar wraps rather than shrinking its controls, so
+   on a narrow thumbnail it grows a line instead of clipping a label. */
+.stage-tile.own-screen {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+.tile-media {
+  position: relative;
+  min-height: 0;
+}
+.tile-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem 0.4rem;
+  font-size: 0.78rem;
+}
+.tile-bar .share-name {
+  font-family: var(--mono);
+  color: var(--fg);
+  white-space: nowrap;
+}
+.tile-bar button.small,
+.tiles-head button.small {
+  padding: 0.15rem 0.5rem;
+  min-height: 28px;
+  font-size: 0.78rem;
+}
+.tile-bar button.on {
+  background: var(--surface-2);
+  border-color: var(--border-strong);
+}
+.tile-bar .share-sound.off {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+.tile-bar .share-nosound {
+  cursor: help;
+  text-decoration: underline dotted;
+  text-underline-offset: 0.2em;
+}
+.tile-bar .share-mode-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+.tile-bar select {
+  font-size: 0.78rem;
+  padding: 0.1rem 0.3rem;
+  min-height: 28px;
+}
+.tile-bar .share-stop:hover {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+/* A spotlight thumbnail is a quarter of the stage, too narrow for the mode picker and the
+   main switch: those stay on the large tile, stop and sound stay everywhere. */
+.stage.layout-spotlight .stage-tile.own-screen:not(.spot) .share-mode-label,
+.stage.layout-spotlight .stage-tile.own-screen:not(.spot) .share-main,
+.stage.layout-spotlight .stage-tile.own-screen:not(.spot) .share-add {
+  display: none;
+}
+.menu.stop-menu {
+  position: fixed;
 }
 
 /* Video from outside your own devices, before it is shown (console.ts coverTile). The blur
@@ -1712,7 +1840,9 @@ iframe.ws-app-frame {
     gap: 0.25rem;
   }
   .topbar button.tool-pin:not([data-tool='connect']),
-  .topbar button.screen-share {
+  .topbar button.screen-share,
+  .topbar button.screen-add,
+  .tiles-head button.stage-add {
     display: none;
   }
   .topbar .brand {

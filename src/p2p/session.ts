@@ -1654,7 +1654,9 @@ export async function joinRoomSession(opts: {
       if (!stream.getVideoTracks().some((t) => t.id === track.id)) continue
       const k = metaKind(meta)
       // An unlabelled video source is treated as a camera, the assumption that fails
-      // safe, since a mislabelled screen share only loses pixels and never cadence.
+      // safe, since a mislabelled screen share only loses pixels and never cadence. A
+      // screen marked for motion (a video playing in the shared tab) is tuned like a camera.
+      if (k === 'screen' && track.contentHint === 'motion') return ADAPT_PROFILES.cam
       return k === 'mic' ? null : ADAPT_PROFILES[k === 'screen' ? 'screen' : 'cam']
     }
     return null // a sender for a stream this session no longer publishes

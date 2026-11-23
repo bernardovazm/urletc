@@ -31,12 +31,18 @@ const SPLIT = 'Chrome, Edge and Brave capture the audio of a shared tab. Firefox
  *   platform has it.
  * - restrictOwnAudio: that system sound leaves out what this tab plays, the room's own
  *   voices, which would otherwise reach the room again as an echo.
+ * - selfBrowserSurface 'exclude': this tab is left out of the list. Sharing it shows the
+ *   stage inside itself, endlessly, and it is never what anyone meant to pick.
+ * - surfaceSwitching 'include': Chrome offers "Share this tab instead" on its bar, so the
+ *   shared tab can be changed without stopping and starting again.
  */
 export const DISPLAY_MEDIA_OPTIONS = {
   video: true,
   audio: { restrictOwnAudio: true },
   windowAudio: 'window',
   systemAudio: 'include',
+  selfBrowserSurface: 'exclude',
+  surfaceSwitching: 'include',
 } as DisplayMediaStreamOptions
 
 /** Probe on every call: a cached answer would survive a browser that gains the capability

@@ -1577,6 +1577,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     coveredMedia.delete(tile.media)
     const i = stageTiles.indexOf(tile)
     if (i >= 0) stageTiles.splice(i, 1)
+    relabelTiles() // "screen 2" becomes "screen" once the first one ends
     // Release an expansion that a screen share opened, unless another screen share still
     // holds the stage. `autoMaxBy` is null once the control has been pressed by hand, so
     // a share ending never undoes a state the user set.
@@ -1604,9 +1605,16 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   /** A source's name: the sender's name as this device's roster has it, or this device's
    *  own name for a local source. A remote label is never the one the sender put on the
    *  stream: that is self-asserted, and it read "Your screen" on every viewer's stage. */
-  function sourceLabel(peerId: string | null, kind: SourceKind): string {
+  function sourceLabel(peerId: string | null, kind: SourceKind, nth = 1): string {
     const name = peerId === null ? displayName : (mergedPeers().find((x) => x.peer.peerId === peerId)?.peer.name ?? '')
-    return `${name || 'peer'}'s ${kindWord(kind)}`
+    return `${name || 'peer'}'s ${kindWord(kind)}${nth > 1 ? ` ${nth}` : ''}`
+  }
+
+  /** 1 for the first of a sender's sources of one kind, 2 for the next. Two screens from
+   *  one person (a game table and a music tab) otherwise carried one name, on every stage
+   *  and in Studio's source list. */
+  function sourceOrdinal(t: StageTile): number {
+    return stageTiles.filter((x) => x.hasVideo && x.peerId === t.peerId && x.kind === t.kind).indexOf(t) + 1
   }
 
   /** Re-read every source's name. Names change after a tile is built (a rename, or the
@@ -1616,7 +1624,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     let changed = false
     for (const t of stageTiles) {
       if (t.peerId !== null && !mergedPeers().some((x) => x.peer.peerId === t.peerId)) continue
-      const next = sourceLabel(t.peerId, t.kind)
+      const next = sourceLabel(t.peerId, t.kind, t.hasVideo ? sourceOrdinal(t) : 1)
       if (next === t.label) continue
       t.label = next
       t.relabel()
@@ -1765,15 +1773,112 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
       // showing this stage still says whose feed is whose.
       const plate = el('div', { class: 'tile-name' })
       relabelers.push(() => (plate.textContent = `${labelIcon(opts.kind)} ${tile.label}${opts.peerId === null ? ' (you)' : ''}`))
+      if (opts.peerId === null && opts.kind === 'screen') {
+        // Your own screen gets its controls in a bar under the picture, always visible: the
+        // hover overlay above is unreachable by touch, and an expanded stage hides the
+        // composer, which left no visible way to add a second screen or to tell two apart.
+        wrap.classList.add('own-screen')
+        wrap.append(el('div', { class: 'tile-media' }, [media, plate, ctl]), shareBar(tile, relabelers))
+      } else {
+        wrap.append(media, plate, ctl)
+      }
       tile.relabel()
-      wrap.append(media, plate, ctl)
       tile.wrap = wrap
       tiles.append(wrap)
     } else {
       sink.append(media)
     }
     stageTiles.push(tile)
+    relabelTiles()
     return tile
+  }
+
+  const SURFACE_WORD: Record<string, string> = { browser: 'Tab', window: 'Window', monitor: 'Entire screen' }
+  type ShareMode = 'auto' | 'detail' | 'motion'
+  /** What each "Optimize for" choice asks of the capture. contentHint also picks the
+   *  sender's degradation profile (session.ts profileFor): detail keeps resolution and
+   *  lets the frame rate drop, motion keeps the frame rate and sheds resolution. */
+  const SHARE_MODES: Record<ShareMode, { label: string; hint: string; frameRate?: MediaTrackConstraints['frameRate'] }> = {
+    auto: { label: 'Auto', hint: '' },
+    detail: { label: 'Text and detail', hint: 'detail', frameRate: { max: 15 } },
+    motion: { label: 'Motion and video', hint: 'motion', frameRate: { ideal: 30, max: 30 } },
+  }
+
+  /** The control bar under one of your own screens: which surface it is and whether it
+   *  carries sound, sound on or off for the room, what to optimize for, main on this stage,
+   *  add another screen, stop this one. None of it needs the far end to cooperate: the
+   *  sound switch sends silence on the same track, and the mode is a capture setting. */
+  function shareBar(tile: StageTile, relabelers: Array<() => void>): HTMLElement {
+    const stream = tile.stream
+    const video = stream.getVideoTracks()[0]
+    const audio = stream.getAudioTracks()[0]
+    const surface = SURFACE_WORD[(video?.getSettings() as MediaTrackSettings & { displaySurface?: string })?.displaySurface ?? ''] ?? ''
+    const name = el('span', { class: 'share-name' })
+    relabelers.push(() => (name.textContent = `${tile.label.replace(/^.*'s screen/, 'Screen')}${surface ? ` · ${surface}` : ''}`))
+
+    let sound: HTMLElement
+    if (audio) {
+      const syncSound = () => {
+        sound.textContent = audio.enabled ? 'Sound on' : 'Sound off'
+        sound.setAttribute('aria-pressed', String(!audio.enabled))
+        sound.title = audio.enabled ? `Mute the sound of ${tile.label} for everyone watching` : `Send the sound of ${tile.label} again`
+        sound.classList.toggle('off', !audio.enabled)
+      }
+      sound = button(
+        '',
+        () => {
+          audio.enabled = !audio.enabled
+          syncSound()
+        },
+        'ghost small share-sound',
+      )
+      syncSound()
+    } else {
+      // The audio checkbox is in the browser's picker, and only for some surfaces, so a
+      // share without sound says where it would have come from.
+      const why = screenShareSupport().audio
+        ? 'No sound was captured. To share sound, pick a tab (or, from Chrome 141, a window) and tick its audio box in the picker.'
+        : 'No sound was captured. This browser shares picture only.'
+      sound = el('span', { class: 'muted small share-nosound', text: 'No sound', title: why })
+    }
+
+    const mode = el('select', { class: 'share-mode', 'aria-label': 'Optimize this screen for' }) as HTMLSelectElement
+    for (const [k, m] of Object.entries(SHARE_MODES)) mode.append(el('option', { value: k, text: m.label }))
+    mode.value = (['detail', 'motion'] as const).find((k) => SHARE_MODES[k].hint === video?.contentHint) ?? 'auto'
+    mode.title = 'Text and detail keeps small text sharp at a lower frame rate. Motion and video keeps playback smooth and gives up resolution first.'
+    mode.addEventListener('change', () => {
+      const m = SHARE_MODES[mode.value as ShareMode] ?? SHARE_MODES.auto
+      if (!video) return
+      video.contentHint = m.hint
+      void video.applyConstraints(m.frameRate ? { frameRate: m.frameRate } : {}).catch(() => {})
+    })
+
+    const main = button('Main', () => toggleSpot(tile.id), 'ghost small share-main')
+    const syncMain = () => {
+      if (!stageTiles.includes(tile)) return void stageSubs.delete(syncMain)
+      const on = spotId === tile.id
+      main.classList.toggle('on', on)
+      main.setAttribute('aria-pressed', String(on))
+      main.title = on ? `${tile.label} is the large one on your stage. Press to show all sources alike.` : `Show ${tile.label} large on your stage. Viewers keep their own layout.`
+    }
+    stageSubs.add(syncMain)
+    relabelers.push(syncMain)
+
+    const add = button('Add screen', () => void startMedia('screen'), 'ghost small share-add', 'Share another screen, window or tab alongside this one')
+    const stop = button('Stop', () => unpublish(stream), 'ghost small share-stop')
+    relabelers.push(() => {
+      stop.title = `Stop sharing ${tile.label}`
+      stop.setAttribute('aria-label', stop.title)
+    })
+    return el('div', { class: 'tile-bar', role: 'group', 'aria-label': 'Screen share controls' }, [
+      name,
+      sound,
+      el('label', { class: 'share-mode-label small muted' }, [el('span', { text: 'Optimize for' }), mode]),
+      el('span', { class: 'spacer' }),
+      main,
+      add,
+      stop,
+    ])
   }
 
   // Remote media is started with play() as well as the autoplay attribute. Autoplay with
@@ -2101,7 +2206,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
    *  This is the single publish path for both the composer buttons and the Studio tool. */
   async function publishLocal(kind: SourceKind, constraints: MediaStreamConstraints): Promise<void> {
     if (stageView) return // a chromeless stage viewer never publishes
-    const stream = kind === 'screen' ? await navigator.mediaDevices.getDisplayMedia(DISPLAY_MEDIA_OPTIONS) : await navigator.mediaDevices.getUserMedia(constraints)
+    const stream = kind === 'screen' ? await captureScreen() : await navigator.mediaDevices.getUserMedia(constraints)
     // Receivers name a source from their own roster. The label on the wire is for a client
     // that shows it as sent, so it names this device in the third person.
     const meta: StreamMeta = { kind, label: `${displayName}'s ${kindWord(kind)}` }
@@ -2129,6 +2234,21 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     if (kind !== 'screen' && stream.getAudioTracks().length) void maybeOfferCaptions(stream)
   }
 
+  /** Picking a tab normally switches the browser to it. Sharing a second tab (music beside
+   *  a game table) then left the app, and with it the controls for the share just made, so
+   *  focus stays here where the browser allows choosing (Chrome's CaptureController). */
+  async function captureScreen(): Promise<MediaStream> {
+    const Controller = (globalThis as { CaptureController?: new () => { setFocusBehavior(b: string): void } }).CaptureController
+    const controller = Controller ? new Controller() : undefined
+    const stream = await navigator.mediaDevices.getDisplayMedia({ ...DISPLAY_MEDIA_OPTIONS, ...(controller ? { controller } : {}) } as DisplayMediaStreamOptions)
+    try {
+      controller?.setFocusBehavior('no-focus-change')
+    } catch {
+      // an entire screen has no focus to keep, and the call is refused once the moment passes
+    }
+    return stream
+  }
+
   async function startMedia(mode: 'audio' | 'video' | 'screen') {
     const kind: SourceKind = mode === 'screen' ? 'screen' : mode === 'video' ? 'cam' : 'mic'
     const constraints: MediaStreamConstraints = mode === 'screen' ? {} : { audio: true, video: mode === 'video' }
@@ -2152,21 +2272,66 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   // phones.
   const SCREEN_ENTRY = 'screen'
   const screenCapture = screenShareSupport().capture
-  const toggleScreen = () => {
+  // With one screen live the button stops it. With more, it asks which: stopping every
+  // screen at once took the game table down along with the music tab beside it.
+  const toggleScreen = (anchor?: HTMLElement) => {
     const live = localScreens()
-    if (live.length) for (const st of live) unpublish(st)
+    if (live.length === 1) unpublish(live[0])
+    else if (live.length > 1) openStopMenu(anchor ?? screenBtn)
     else void startMedia('screen')
   }
-  const screenLabel = () => (localScreens().length ? 'Stop sharing' : 'Share screen')
-  const screenTitle = () => (localScreens().length ? 'Stop sharing your screen' : 'Share your screen with paired and code devices')
-  const screenBtn = button('Share screen', toggleScreen, 'ghost tool-pin screen-share', 'Share your screen with paired and code devices')
+  function openStopMenu(anchor: HTMLElement): void {
+    const live = localScreens()
+    const menu = el('div', { class: 'menu stop-menu', role: 'menu', 'aria-label': 'Stop sharing' })
+    const close = () => {
+      menu.remove()
+      document.removeEventListener('pointerdown', outside, true)
+      document.removeEventListener('keydown', onKey, true)
+    }
+    const outside = (e: Event) => {
+      if (!menu.contains(e.target as Node) && e.target !== anchor) close()
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return
+      close()
+      anchor.focus()
+    }
+    for (const st of live) {
+      const label = stageTiles.find((t) => t.peerId === null && t.stream === st)?.label ?? 'screen'
+      menu.append(button(`Stop ${label.replace(/^.*'s screen/, 'screen')}`, () => (close(), unpublish(st)), 'ghost menu-item', `Stop sharing ${label}`))
+    }
+    menu.append(button('Stop all screens', () => (close(), live.forEach(unpublish)), 'ghost menu-item'))
+    document.body.append(menu)
+    placeMenu(menu, anchor.getBoundingClientRect())
+    document.addEventListener('pointerdown', outside, true)
+    document.addEventListener('keydown', onKey, true)
+    ;(menu.querySelector('button') as HTMLElement | null)?.focus()
+  }
+  const screenLabel = () => {
+    const n = localScreens().length
+    return n > 1 ? `Stop sharing (${n})` : n ? 'Stop sharing' : 'Share screen'
+  }
+  const screenTitle = () => {
+    const n = localScreens().length
+    return n > 1 ? `Stop one of your ${n} screens, or all of them` : n ? 'Stop sharing your screen' : 'Share your screen with paired and code devices'
+  }
+  const screenBtn = button('Share screen', () => toggleScreen(screenBtn), 'ghost tool-pin screen-share', 'Share your screen with paired and code devices')
   screenBtn.dataset.tool = SCREEN_ENTRY
+  // Beside it while a screen is live: adding a second share was only reachable through an
+  // unlabelled composer button that an expanded stage hides.
+  const screenAddBtn = button('Add screen', () => void startMedia('screen'), 'ghost screen-add hidden', 'Share another screen, window or tab alongside the current one')
+  const stageAddBtn = button('Add screen', () => void startMedia('screen'), 'ghost small stage-add hidden', 'Share another screen, window or tab alongside the current one')
+  tilesHead.insertBefore(stageAddBtn, tilesHead.querySelector('.row.tight'))
   function syncScreenBtn(): void {
     const on = localScreens().length > 0
     screenBtn.textContent = screenLabel()
     screenBtn.title = screenTitle()
     screenBtn.setAttribute('aria-pressed', String(on))
     screenBtn.classList.toggle('on', on)
+    screenAddBtn.classList.toggle('hidden', !on || !screenBtn.isConnected)
+    stageAddBtn.classList.toggle('hidden', !on || !screenCapture || !!stageView)
+    if (screenBtn.isConnected && screenAddBtn.parentElement !== screenBtn.parentElement) screenBtn.after(screenAddBtn)
+    if (!screenBtn.isConnected) screenAddBtn.remove()
   }
 
   // Connect as a launcher entry, for the same reason: it opens a dialog rather than a card,
@@ -2351,7 +2516,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
           `🖥 ${screenLabel()}`,
           () => {
             closeLauncher()
-            toggleScreen()
+            toggleScreen(toolsBtn)
           },
           'ghost tool-open',
           screenTitle(),
@@ -2359,6 +2524,19 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
         b.addEventListener('mouseenter', scheduleGenClose)
         b.dataset.tool = SCREEN_ENTRY
         menu.append(el('div', { class: 'tool-item' }, [b, pinToggle(SCREEN_ENTRY, 'Share screen')]))
+        if (localScreens().length) {
+          const add = button(
+            '🖥 Add screen',
+            () => {
+              closeLauncher()
+              void startMedia('screen')
+            },
+            'ghost tool-open',
+            'Share another screen, window or tab alongside the current one',
+          )
+          add.addEventListener('mouseenter', scheduleGenClose)
+          menu.append(el('div', { class: 'tool-item' }, [add]))
+        }
       }
       if ('connect'.includes(filter.toLowerCase())) {
         const b = button(

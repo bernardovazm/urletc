@@ -5568,11 +5568,13 @@ with sync_playwright() as p:
     rqp.evaluate("location.hash = '#/t/weather'")
     rw = rqp.locator('details.card[data-tool="weather"]')
     rw.locator('input.wx-search').wait_for(timeout=15000)
-    for q in ('lisb', 'lond'):
+    # The results of the previous search stay listed until the debounced one answers, so
+    # each pick waits for a result naming the place it searched for.
+    for q, place in (('lisb', 'Lisbon'), ('lond', 'London')):
         rw.locator('input.wx-search').fill(q)
-        rw.locator('button.wx-result').first.wait_for(timeout=5000)
-        rw.locator('button.wx-result').first.click()
-        poll_page(rqp, lambda: rw.locator('.wx-day').count() == 7, 8)
+        rw.locator('button.wx-result', has_text=place).first.wait_for(timeout=5000)
+        rw.locator('button.wx-result', has_text=place).first.click()
+        poll_page(rqp, lambda: rw.locator('.wx-day').count() == 7 and place in rw.locator('.wx-where').inner_text(), 8)
     rw_hold['when'] = lambda u: 'api.open-meteo.com' in u and 'latitude=38.72' in u
     rqp.reload()
     rw.locator('button.wx-place').first.wait_for(timeout=15000)
@@ -5601,8 +5603,8 @@ with sync_playwright() as p:
           bool(poll_page(rqp, lambda: 'weather-snapshot' not in rqp.evaluate(KV_KEYS), 5))
           and rqp.locator('.topbar .ticker[data-weather]').count() == 0, str([k for k in rqp.evaluate(KV_KEYS) if 'weather' in k]))
     rw.locator('input.wx-search').fill('lond')
-    rw.locator('button.wx-result').first.wait_for(timeout=5000)
-    rw.locator('button.wx-result').first.click()
+    rw.locator('button.wx-result', has_text='London').first.wait_for(timeout=5000)
+    rw.locator('button.wx-result', has_text='London').first.click()
     poll_page(rqp, lambda: rw.locator('button.wx-pin').count() == 1, 8)
     check('weather: the next place saved is not pinned without a click',
           rqp.locator('.topbar .ticker[data-weather]').count() == 0 and rw.locator('button.wx-pin').get_attribute('aria-pressed') == 'false')

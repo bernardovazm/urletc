@@ -241,6 +241,13 @@ with sync_playwright() as p:
           page.eval_on_selector('.topbar .brand',
                                 "e => getComputedStyle(e).textTransform") == 'uppercase')
     check('composer visible', page.locator('.composer textarea').is_visible())
+    # Sized while still detached, the textarea loaded 11px tall with its placeholder cut.
+    check('the message box loads tall enough to read its placeholder',
+          page.evaluate("document.querySelector('.composer textarea').getBoundingClientRect().height") >= 28,
+          str(page.evaluate("document.querySelector('.composer textarea').getBoundingClientRect().height")))
+    # The system lines of every load no longer remove the first-run hint.
+    check('the empty-feed hint shows beside the system lines',
+          page.locator('.feed .empty').is_visible() and page.locator('.feed .sys').count() > 0)
     # The CSP sets require-trusted-types-for 'script', which makes the Worker constructor
     # a TrustedScriptURL sink. With no default policy installed every worker throws, and
     # OCR, speech to text, live captions and the regex engine all die while the rest of
@@ -255,6 +262,23 @@ with sync_playwright() as p:
     vp = page.viewport_size
     check('composer inside viewport', cb and cb['y'] + cb['height'] <= vp['height'] + 1)
     check('no page errors on boot', not any('pageerror' in l for l in logs), '; '.join(l for l in logs if 'pageerror' in l)[:300])
+
+    # The top bar's clear control takes two presses, like each card's delete: it sits beside
+    # the roster toggle on a phone bar, and one stray tap emptied the feed for good.
+    clr_ctx = browser.new_context()
+    clr = clr_ctx.new_page()
+    clr.goto(f'{BASE}/#/join/x{os.urandom(3).hex()}')
+    clr.wait_for_selector('.composer', timeout=20000)
+    clr.wait_for_timeout(800)
+    clr_n = clr.locator('.feed .feed-item').count()
+    clr_btn = clr.locator('.topbar button[aria-label="Clear everything in the feed"]')
+    clr_btn.click()
+    check('one press on the top bar clear arms it and keeps the feed',
+          clr.locator('.feed .feed-item').count() == clr_n and clr_n > 0
+          and 'armed' in (clr.locator('.topbar button.armed').get_attribute('class') or ''), f'{clr_n} items')
+    clr.locator('.topbar button.armed').click()
+    check('the second press clears the feed', bool(poll_page(clr, lambda: clr.locator('.feed .feed-item').count() == 0, 3)))
+    clr_ctx.close()
 
     # --- 2. tooltips ---
     titles = page.eval_on_selector_all('.composer .bar button', 'els => els.map(e => e.title)')

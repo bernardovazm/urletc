@@ -13,7 +13,9 @@
   --surface: #0a0b0c;
   --surface-2: #121314;
   --elev: #0e0f10;
-  --border: #121314;
+  /* 1.09:1 against --bg at #121314, the same as --surface-2, so a ghost button lost its
+     edge on hover and cards their outline. Still a hairline. */
+  --border: #1c1e20;
   --border-strong: #2a2d2f;
   --fg: #ffffff;
   --fg-dim: #c4c4c4;
@@ -261,6 +263,50 @@ input[type='radio'] {
 }
 label.row {
   cursor: pointer;
+}
+/* A checkbox keeps its text beside it. The row's wrap dropped the text under a lone box
+   in Connect and Settings, since the text span had no basis to shrink from. */
+label.row:has(> input[type='checkbox']) {
+  flex-wrap: nowrap;
+  align-items: flex-start;
+}
+label.row > input[type='checkbox'] {
+  flex: none;
+  margin-top: 0.2em;
+}
+label.row > span {
+  min-width: 0;
+}
+::placeholder {
+  color: var(--fg-mute);
+  opacity: 1;
+}
+.modal h4 {
+  font-size: 1rem;
+  margin: 0;
+}
+.modal-head {
+  flex-wrap: nowrap;
+}
+/* Section labels in a dialog or a tool card start on the content's edge; the inset suits
+   the sidebar only. */
+.modal .group-label,
+.card-body .group-label {
+  padding-inline: 0;
+  padding-top: 0.75rem;
+}
+/* Emoji controls in the bars read in the interface's own ink rather than in four unrelated
+   colours. An armed control keeps its warning colour. */
+.topbar button.icon:not(.armed),
+.composer .bar button.icon,
+.tiles-head button.icon,
+.tile-ctl button.icon {
+  filter: grayscale(1);
+}
+.topbar button.armed {
+  color: var(--bg);
+  background: var(--danger);
+  border-color: var(--danger);
 }
 .stack {
   display: flex;
@@ -828,12 +874,12 @@ details.card > .card-body {
   display: none;
 }
 .pgroup > summary.group-label::before {
-  content: '🔼 ';
+  content: '▸ ';
   display: inline-block;
   transition: transform 0.12s;
 }
 .pgroup[open] > summary.group-label::before {
-  content: '🔽 ';
+  content: '▾ ';
 }
 
 /* join codes */
@@ -867,8 +913,19 @@ details.card > .card-body {
   flex: none;
 }
 .recent-room .room-name {
-  flex: 1 1 9rem;
+  flex: 1 1 6rem;
   min-width: 0;
+}
+/* The join field and its button share a line: at 100% width the button always wrapped. */
+.row > input.mono-input.full {
+  flex: 1 1 12rem;
+  width: auto;
+  min-width: 0;
+}
+@media (max-width: 560px) {
+  .recent-room.current .room-when {
+    display: none;
+  }
 }
 .recent-room .room-when {
   flex: none;

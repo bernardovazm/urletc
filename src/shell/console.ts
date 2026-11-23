@@ -542,7 +542,9 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   }
 
   const addCard = (node: HTMLElement, onRemove?: () => void, place: 'top' | 'bottom' = 'bottom') => {
-    empty.remove()
+    // System lines ("Your room is open.") arrive on every load, and removing the hint for
+    // them meant nobody ever saw it.
+    if (!node.classList.contains('sys')) empty.remove()
     const wrap = el('div', { class: 'feed-item' })
     if (onRemove) removers.set(wrap, onRemove)
     // Two presses, because this control sits under a thumb on a phone where one stray tap
@@ -943,7 +945,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   // grid but leaves streams running (audio still plays via `sink`). The region hides
   // itself entirely when there are no tiles (CSS :has), so it costs nothing when idle.
   const tilesCollapseBtn = button(
-    '🔽',
+    '▾',
     () => {
       const c = !tilesRegion.classList.contains('tiles-collapsed')
       setTilesCollapsed(c)
@@ -959,7 +961,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   )
   function setTilesCollapsed(on: boolean): void {
     tilesRegion.classList.toggle('tiles-collapsed', on)
-    tilesCollapseBtn.textContent = on ? '🔼' : '🔽'
+    tilesCollapseBtn.textContent = on ? '▴' : '▾'
     tilesCollapseBtn.setAttribute('aria-expanded', String(!on))
   }
   const stageCount = el('span', { class: 'muted small', text: 'Streams' })
@@ -2098,10 +2100,10 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   // Minimize collapses to just the CC pill but keeps transcribing. Delete turns
   // captions off for this share (and free the Whisper worker).
   const capMinBtn = button(
-    '🔽',
+    '▾',
     () => {
       const min = captionsEl.classList.toggle('cap-min')
-      capMinBtn.textContent = min ? '🔼' : '🔽'
+      capMinBtn.textContent = min ? '▴' : '▾'
     },
     'icon sm',
     'Minimize captions (keeps transcribing)',
@@ -2129,7 +2131,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     capLines = []
     captionsEl.classList.add('hidden')
     captionsEl.classList.remove('cap-min')
-    capMinBtn.textContent = '🔽'
+    capMinBtn.textContent = '▾'
   }
   // Stop and free the Whisper worker/decoder. Used when the user turns captions off or
   // stops sharing, so the model doesn't stay resident for the page's life.
@@ -2672,7 +2674,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   const autosize = () => {
     // A display:none textarea reports scrollHeight 0, so running this while collapsed
     // would leave `height: 0px` inline and expand to a box with no room to type.
-    if (composerCollapsed) return
+    if (composerCollapsed || !ta.isConnected) return
     ta.style.height = 'auto'
     ta.style.height = `${Math.min(ta.scrollHeight, window.innerHeight * 0.38)}px`
   }
@@ -2778,7 +2780,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
 
   const slashBtn = hoverTools(button('/', () => openTools('', slashBtn, true), 'icon', 'Tools (hover to open, drag to reorder)'))
   const composerCollapseBtn = button(
-    '🔽',
+    '▾',
     () => {
       composerCollapsed = !composerCollapsed
       void setItem('composer-collapsed', composerCollapsed)
@@ -2807,7 +2809,7 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   const composerWrap = el('div', { class: 'composer-wrap' }, [composer, fileInput, imgInput])
   function applyComposerCollapsed() {
     composerWrap.classList.toggle('composer-collapsed', composerCollapsed)
-    composerCollapseBtn.textContent = composerCollapsed ? '🔼' : '🔽'
+    composerCollapseBtn.textContent = composerCollapsed ? '▴' : '▾'
     composerCollapseBtn.setAttribute('aria-expanded', String(!composerCollapsed))
     // Re-measure on the way back out: Send clears the draft while collapsed, so the inline
     // height left behind belongs to text that is no longer in the box.
@@ -3409,7 +3411,8 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
     document.body.append(back)
 
     const render = async () => {
-      content.replaceChildren(el('h4', { text: 'Connect' }))
+      // The only Close used to be the last control, after a long scroll on a phone.
+      content.replaceChildren(el('div', { class: 'row modal-head' }, [el('h4', { text: 'Connect' }), el('span', { class: 'spacer' }), button('✕', close, 'icon sm', 'Close')]))
 
       // Rooms off: for using the tools alone, with no way for anyone to reach this device.
       if (p2pReady) {
@@ -3708,7 +3711,32 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   }
 
   // ---------- topbar + sidebar ----------
-  const clearBtn = button('🗑', () => clearFeed(), 'icon', 'Clear everything in the feed')
+  // Two presses, like each card's delete: it sits beside the roster toggle on a phone bar
+  // and one stray tap emptied the feed with no undo.
+  let clearArmed = 0
+  const clearBtn = button(
+    '🗑',
+    () => {
+      if (clearArmed) {
+        window.clearTimeout(clearArmed)
+        disarmClear()
+        clearFeed()
+        return
+      }
+      clearBtn.classList.add('armed')
+      clearBtn.title = 'Press again to clear everything in the feed'
+      clearBtn.setAttribute('aria-label', clearBtn.title)
+      clearArmed = window.setTimeout(disarmClear, 3000)
+    },
+    'icon',
+    'Clear everything in the feed',
+  )
+  function disarmClear(): void {
+    clearArmed = 0
+    clearBtn.classList.remove('armed')
+    clearBtn.title = 'Clear everything in the feed'
+    clearBtn.setAttribute('aria-label', clearBtn.title)
+  }
   const codeChip = button(
     '',
     () => {
@@ -3812,6 +3840,8 @@ export async function mountConsole(app: HTMLElement, caps: CryptoCaps): Promise<
   renderPins()
 
   app.append(sink, announcer, el('div', { class: 'app-shell' }, [topbar, bodyEl]))
+  // Sized only now: detached, the textarea measures 0 and loaded as an 11px sliver.
+  autosize()
   if (stageView) document.documentElement.classList.add('stage-view') // chromeless: CSS shows only the stage
 
   // ---------- on-screen keyboard ----------

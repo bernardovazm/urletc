@@ -196,6 +196,22 @@ def cpf_valid(s):
     return True
 
 
+def persisted(ctx, fn, tries=6, seconds=3):
+    """True once a fresh tab of `ctx` sees fn(page) hold. A setting repaints at once and
+    its encrypted-store write follows, and a navigation in that window aborts the write, so
+    a check that reloads right after a change first waits for the write this way."""
+    for _ in range(tries):
+        q = ctx.new_page()
+        try:
+            q.goto(BASE)
+            q.wait_for_selector('.composer', timeout=30000)
+            if poll_page(q, lambda: fn(q), seconds):
+                return True
+        finally:
+            q.close()
+    return False
+
+
 def poll_page(pg, fn, seconds, step=0.25):
     """fn() once it is truthy, else None after `seconds`, waiting on `pg` between tries."""
     for _ in range(int(seconds / step)):
@@ -5281,8 +5297,10 @@ with sync_playwright() as p:
           tk.inner_text())
     check('markets: tickers avoid the classes existing selectors key on',
           mkp.locator('.topbar .tickers .tool-pin, .topbar .tickers .badge, .topbar .tickers .icon').count() == 0)
+    # The notice follows an encrypted-store read and write, so it lands a moment after the pin.
     check('markets: the first pin explains what pinning starts, once',
-          'CoinGecko' in mkp.locator('#toasts').inner_text() and 'visible' in mkp.locator('#toasts').inner_text())
+          bool(poll_page(mkp, lambda: 'CoinGecko' in mkp.locator('#toasts').inner_text() and 'visible' in mkp.locator('#toasts').inner_text(), 3)),
+          mkp.locator('#toasts').inner_text())
     check('markets: the pin toggle reports its state', btc.locator('.mk-pin').get_attribute('aria-pressed') == 'true'
           and btc.locator('.mk-pin').get_attribute('title') == 'Unpin')
     mk_row('c:ethereum', 'crypto').locator('.mk-pin').click()
@@ -5303,6 +5321,8 @@ with sync_playwright() as p:
           mk_row('c:ethereum', 'pinned').locator('[data-part="left"]').is_disabled()
           and mk_row('c:bitcoin', 'pinned').locator('[data-part="right"]').is_disabled())
 
+    check('markets: the new order is stored', persisted(mkc, lambda q: q.eval_on_selector_all(
+        '.topbar .ticker[data-market]', 'els => els.map(e => e.dataset.market)') == ['c:ethereum', 'f:EUR', 'c:bitcoin']))
     mkp.goto(BASE)
     mkp.wait_for_selector('.composer', timeout=30000)
     check('markets: pins survive a reload in their order',
@@ -5741,6 +5761,7 @@ with sync_playwright() as p:
     check('weather: the weather ticker shows a glyph and the temperature, and reads place and condition',
           '71°' in wtk.inner_text() and wtk.locator('.tk-sym').inner_text().strip() != '', wtk.inner_text())
     check('weather: its label names the place and the condition', 'Lisbon' in wtk_label and 'partly cloudy' in wtk_label, wtk_label)
+    check('weather: the pin is stored', persisted(wxc, lambda q: q.locator('.topbar .ticker[data-weather]').count() == 1))
     wp.goto(BASE)
     wp.wait_for_selector('.composer', timeout=30000)
     check('weather: the pin survives a reload', bool(poll_page(wp, lambda: wtk.count() == 1, 8)))
